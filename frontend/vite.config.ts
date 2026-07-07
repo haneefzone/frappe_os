@@ -28,6 +28,9 @@ export default defineConfig({
     include: ['feather-icons', 'dompurify', 'socket.io-client', 'dayjs'],
   },
   server: {
+    // The operator browses from the Windows host into this Hyper-V VM
+    // (docs/dev-setup.md) — localhost-only binding would be unreachable.
+    host: true,
     port: 5173,
     proxy: {
       '/api': {

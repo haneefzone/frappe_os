@@ -14,7 +14,7 @@ Reference: `CLAUDE.md` (rules), `docs/implementation-plan.md` (architecture), `d
   *Accept:* `alembic upgrade head` runs; all sidebar routes render placeholders; toggle persists.
 - [x] **0.3 Core component library + design tokens.** Tailwind tokens from CLAUDE.md; build StatusDot, StatusBadge, EnvironmentBadge, KPICard, DataTable (sort/filter/density/sticky header/row actions), ConfirmModal (standard + destructive type-to-confirm), Wizard (stepper), EmptyState, Toast, CopyField, JobTimeline (static), LogViewer (static), Sparkline. Demo everything on a `/styleguide` route.
   *Accept:* `/styleguide` renders every component in both themes; destructive modal blocks until exact name typed.
-- [ ] **0.4 Dev & test workflow docs.** `docs/dev-setup.md`: running control plane against Hyper-V Ubuntu VMs, SSH reachability, snapshot-before-destructive-test workflow (Checkpoint-VM PowerShell snippet), throwaway-VM policy.
+- [x] **0.4 Dev & test workflow docs.** `docs/dev-setup.md`: running control plane against Hyper-V Ubuntu VMs, SSH reachability, snapshot-before-destructive-test workflow (Checkpoint-VM PowerShell snippet), throwaway-VM policy.
   *Accept:* doc is followable start-to-finish by a non-technical user.
 
 ## Phase 1 — MVP (vertical slice on one Hyper-V VM)

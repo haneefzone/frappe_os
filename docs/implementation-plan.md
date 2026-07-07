@@ -17,14 +17,14 @@
 | Per-session scope | `docs/SESSION_PROMPTS.md` |
 | **Security section — sudoers allowlist** (needed by Session 0.4 and used by Sessions 1.10/1.12) | **Missing. Interim draft below.** |
 
-## Interim security section: sudoers allowlist (draft — ratify before Session 0.4 closes)
+## Security section: sudoers allowlist (ratified by the Technical Architect in Session 0.4)
 
 The platform SSHes into managed servers as the bench-owner user (e.g. `frappe`), which must NOT have
 general sudo. Grant only the exact commands the job templates need, via a drop-in file
 (`/etc/sudoers.d/fdm-platform`, mode 0440, always edited with `visudo -cf` validation):
 
 ```
-# /etc/sudoers.d/fdm-platform — FDM Platform managed-server allowlist (DRAFT)
+# /etc/sudoers.d/fdm-platform — FDM Platform managed-server allowlist
 # Non-interactive checks (server test-connection uses `sudo -n true`)
 frappe ALL=(root) NOPASSWD: /usr/bin/true
 
