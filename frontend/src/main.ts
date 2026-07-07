@@ -1,3 +1,4 @@
+import { createPinia } from 'pinia'
 import { createApp } from 'vue'
 // Ship the spec fonts (uiux-spec B2) instead of hoping the OS has them.
 import '@fontsource/inter/400.css'
@@ -11,4 +12,4 @@ import './composables/useTheme' // applies the persisted theme before first pain
 import './index.css'
 import { router } from './router'
 
-createApp(App).use(router).mount('#app')
+createApp(App).use(createPinia()).use(router).mount('#app')

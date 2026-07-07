@@ -13,6 +13,13 @@ const routes = allNavItems.map((item) => ({
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
+    {
+      name: 'login',
+      path: '/login',
+      component: () => import('../pages/LoginPage.vue'),
+      // public routes render without the app chrome and skip the auth guard.
+      meta: { label: 'Sign in', public: true },
+    },
     ...routes,
     {
       // Living demo of the component library — not in the sidebar on purpose.
@@ -23,4 +30,22 @@ export const router = createRouter({
     },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
+})
+
+router.beforeEach(async (to) => {
+  // Imported lazily: the store needs pinia, which main.ts installs after
+  // this module is evaluated.
+  const { useAuthStore } = await import('../stores/auth')
+  const auth = useAuthStore()
+
+  if (!auth.initialized) await auth.bootstrap()
+
+  if (to.meta.public) {
+    // A signed-in user has no business on the login page.
+    return auth.isAuthenticated && to.name === 'login' ? { path: '/' } : true
+  }
+  if (!auth.isAuthenticated) {
+    return { name: 'login', query: to.fullPath === '/' ? {} : { redirect: to.fullPath } }
+  }
+  return true
 })

@@ -19,7 +19,7 @@ Reference: `CLAUDE.md` (rules), `docs/implementation-plan.md` (architecture), `d
 
 ## Phase 1 — MVP (vertical slice on one Hyper-V VM)
 
-- [ ] **1.1 Auth & RBAC.** User/Role/ApiToken models + migration; argon2; JWT httpOnly cookies + CSRF; login/logout/me endpoints; RBAC dependency; seed admin CLI; login page; route guards; user menu.
+- [x] **1.1 Auth & RBAC.** User/Role/ApiToken models + migration; argon2; JWT httpOnly cookies + CSRF; login/logout/me endpoints; RBAC dependency; seed admin CLI; login page; route guards; user menu.
   *Accept:* login works; Read-only user gets 403 on a mutating endpoint; wrong password rate-limited.
 - [ ] **1.2 Server registry & SSH test.** Server + SSHCredential models; Fernet SecretsService; AsyncSSH service with pooling + known-host pinning; Add Server sheet wizard (identity → auth: paste/upload/generate keypair with copy-pubkey instructions → live streamed Test Connection: SSH ✓, sudo ✓, OS ✓, detected tools table); servers list + detail Overview tab.
   *Accept:* register the Hyper-V VM; test connection streams checks and stores results; private key unreadable in DB (Fernet token).

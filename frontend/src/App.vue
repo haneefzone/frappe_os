@@ -1,5 +1,7 @@
 <template>
-  <div class="flex h-screen" :style="{ background: 'var(--bg-base)' }">
+  <!-- Public pages (login) render bare, without the app chrome. -->
+  <RouterView v-if="route.meta.public" />
+  <div v-else class="flex h-screen" :style="{ background: 'var(--bg-base)' }">
     <AppSidebar :collapsed="sidebarCollapsed" />
     <div class="flex min-w-0 flex-1 flex-col">
       <AppTopbar @toggle-sidebar="toggleSidebar" />
@@ -7,18 +9,20 @@
         <RouterView />
       </main>
     </div>
-    <ToastHost />
   </div>
+  <ToastHost />
 </template>
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import { useRoute } from 'vue-router'
 import AppSidebar from './components/layout/AppSidebar.vue'
 import AppTopbar from './components/layout/AppTopbar.vue'
 import ToastHost from './components/ToastHost.vue'
 
 const COLLAPSE_KEY = 'fdm-sidebar-collapsed'
 
+const route = useRoute()
 const sidebarCollapsed = ref(localStorage.getItem(COLLAPSE_KEY) === '1')
 
 function toggleSidebar() {
