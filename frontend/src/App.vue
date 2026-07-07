@@ -7,6 +7,7 @@
         <RouterView />
       </main>
     </div>
+    <ToastHost />
   </div>
 </template>
 
@@ -14,6 +15,7 @@
 import { ref } from 'vue'
 import AppSidebar from './components/layout/AppSidebar.vue'
 import AppTopbar from './components/layout/AppTopbar.vue'
+import ToastHost from './components/ToastHost.vue'
 
 const COLLAPSE_KEY = 'fdm-sidebar-collapsed'
 

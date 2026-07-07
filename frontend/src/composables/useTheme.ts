@@ -12,6 +12,9 @@ function load(): Theme {
 function apply(theme: Theme) {
   document.documentElement.classList.toggle('light', theme === 'light')
   document.documentElement.style.colorScheme = theme
+  // frappe-ui switches its semantic palette on [data-theme="dark"]; keep it
+  // in sync so its primitives (Button, FormControl, ...) follow our theme.
+  document.documentElement.dataset.theme = theme
 }
 
 const theme = ref<Theme>(load())

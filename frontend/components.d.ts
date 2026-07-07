@@ -10,9 +10,21 @@ declare module 'vue' {
   export interface GlobalComponents {
     AppSidebar: typeof import('./src/components/layout/AppSidebar.vue')['default']
     AppTopbar: typeof import('./src/components/layout/AppTopbar.vue')['default']
+    ConfirmModal: typeof import('./src/components/ConfirmModal.vue')['default']
+    CopyField: typeof import('./src/components/CopyField.vue')['default']
+    DataTable: typeof import('./src/components/DataTable.vue')['default']
     EmptyState: typeof import('./src/components/EmptyState.vue')['default']
+    EnvironmentBadge: typeof import('./src/components/EnvironmentBadge.vue')['default']
+    JobTimeline: typeof import('./src/components/JobTimeline.vue')['default']
+    KPICard: typeof import('./src/components/KPICard.vue')['default']
+    LogViewer: typeof import('./src/components/LogViewer.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     SidebarLink: typeof import('./src/components/layout/SidebarLink.vue')['default']
+    Sparkline: typeof import('./src/components/Sparkline.vue')['default']
+    StatusBadge: typeof import('./src/components/StatusBadge.vue')['default']
+    StatusDot: typeof import('./src/components/StatusDot.vue')['default']
+    ToastHost: typeof import('./src/components/ToastHost.vue')['default']
+    Wizard: typeof import('./src/components/Wizard.vue')['default']
   }
 }

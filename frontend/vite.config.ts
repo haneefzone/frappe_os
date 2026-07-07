@@ -23,6 +23,9 @@ export default defineConfig({
     // frappe-ui ships raw source; the esbuild prebundler can't resolve its
     // virtual ~icons/* imports, so it must go through the plugin pipeline.
     exclude: ['frappe-ui'],
+    // With frappe-ui excluded, esbuild never scans its imports, so its CJS
+    // deps must be pre-bundled explicitly or dev serving fails on them.
+    include: ['feather-icons', 'dompurify', 'socket.io-client', 'dayjs'],
   },
   server: {
     port: 5173,

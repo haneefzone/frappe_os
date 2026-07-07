@@ -12,5 +12,15 @@ const routes = allNavItems.map((item) => ({
 
 export const router = createRouter({
   history: createWebHistory(),
-  routes: [...routes, { path: '/:pathMatch(.*)*', redirect: '/' }],
+  routes: [
+    ...routes,
+    {
+      // Living demo of the component library — not in the sidebar on purpose.
+      name: 'styleguide',
+      path: '/styleguide',
+      component: () => import('../pages/StyleguidePage.vue'),
+      meta: { label: 'Styleguide' },
+    },
+    { path: '/:pathMatch(.*)*', redirect: '/' },
+  ],
 })
