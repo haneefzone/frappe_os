@@ -1,33 +1,26 @@
 <template>
   <div class="flex h-screen" :style="{ background: 'var(--bg-base)' }">
-    <aside
-      class="flex w-56 flex-col border-r px-4 py-5"
-      :style="{ background: 'var(--bg-surface)', borderColor: 'var(--border)' }"
-    >
-      <div class="text-sm font-semibold" :style="{ color: 'var(--text-primary)' }">
-        FDM Platform
-      </div>
-      <div class="mt-1 text-xs" :style="{ color: 'var(--text-muted)' }">v0.1.0</div>
-    </aside>
-    <main class="flex flex-1 items-center justify-center">
-      <div
-        class="rounded-lg border px-10 py-8 text-center"
-        :style="{ background: 'var(--bg-raised)', borderColor: 'var(--border)' }"
-      >
-        <h1 class="text-2xl font-semibold" :style="{ color: 'var(--text-primary)' }">
-          FDM Platform
-        </h1>
-        <p class="mt-2 text-sm" :style="{ color: 'var(--text-secondary)' }">
-          Self-hosted control panel for bare-metal Frappe/ERPNext deployments.
-        </p>
-        <div class="mt-6 flex justify-center">
-          <Button variant="solid" theme="gray">Get started</Button>
-        </div>
-      </div>
-    </main>
+    <AppSidebar :collapsed="sidebarCollapsed" />
+    <div class="flex min-w-0 flex-1 flex-col">
+      <AppTopbar @toggle-sidebar="toggleSidebar" />
+      <main class="min-h-0 flex-1 overflow-y-auto">
+        <RouterView />
+      </main>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { Button } from 'frappe-ui'
+import { ref } from 'vue'
+import AppSidebar from './components/layout/AppSidebar.vue'
+import AppTopbar from './components/layout/AppTopbar.vue'
+
+const COLLAPSE_KEY = 'fdm-sidebar-collapsed'
+
+const sidebarCollapsed = ref(localStorage.getItem(COLLAPSE_KEY) === '1')
+
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  localStorage.setItem(COLLAPSE_KEY, sidebarCollapsed.value ? '1' : '0')
+}
 </script>

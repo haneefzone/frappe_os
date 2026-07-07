@@ -18,6 +18,18 @@
   --status-info: #3b82f6;
 }
 
+/* Light mode inverts the neutral scale; status colors stay unchanged. */
+html.light {
+  --bg-base: #fafafa;
+  --bg-surface: #ffffff;
+  --bg-raised: #f4f4f5;
+  --border: #e4e4e7;
+  --border-strong: #d4d4d8;
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  --text-muted: #8e8e99;
+}
+
 html,
 body {
   height: 100%;

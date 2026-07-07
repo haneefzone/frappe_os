@@ -1,8 +1,12 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import frappeui from 'frappe-ui/vite'
+import pkg from './package.json'
 
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   plugins: [
     // frappe-ui is used for components + design tokens only (CLAUDE.md rule 9).
     // Its Frappe-site integrations (proxy, jinja boot data, build config) stay off;

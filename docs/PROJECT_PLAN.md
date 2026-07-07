@@ -10,7 +10,7 @@ Reference: `CLAUDE.md` (rules), `docs/implementation-plan.md` (architecture), `d
 
 - [x] **0.1 Monorepo scaffold.** Repo layout per CLAUDE.md, FastAPI skeleton with `/api/health`, Vite+Vue3+TS+frappe-ui+Tailwind app shell (dark default), docker-compose.dev.yml (Postgres+Redis), Makefile, .env.example, README.
   *Accept:* `make dev` boots API + SPA; health returns `{"status":"ok"}`; browser shows dark app shell.
-- [ ] **0.2 Config, DB, app skeleton.** Pydantic Settings, SQLAlchemy 2 + Alembic wired (empty first migration), structured JSON logging, global error handlers, CORS; frontend router + sidebar layout with all nav groups (empty placeholder pages), light/dark toggle.
+- [x] **0.2 Config, DB, app skeleton.** Pydantic Settings, SQLAlchemy 2 + Alembic wired (empty first migration), structured JSON logging, global error handlers, CORS; frontend router + sidebar layout with all nav groups (empty placeholder pages), light/dark toggle.
   *Accept:* `alembic upgrade head` runs; all sidebar routes render placeholders; toggle persists.
 - [ ] **0.3 Core component library + design tokens.** Tailwind tokens from CLAUDE.md; build StatusDot, StatusBadge, EnvironmentBadge, KPICard, DataTable (sort/filter/density/sticky header/row actions), ConfirmModal (standard + destructive type-to-confirm), Wizard (stepper), EmptyState, Toast, CopyField, JobTimeline (static), LogViewer (static), Sparkline. Demo everything on a `/styleguide` route.
   *Accept:* `/styleguide` renders every component in both themes; destructive modal blocks until exact name typed.
