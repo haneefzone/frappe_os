@@ -7,7 +7,7 @@
     </template>
     <template v-else>
       <div class="flex items-center justify-between gap-2">
-        <span class="text-meta font-medium uppercase tracking-wide text-ink-3">{{ label }}</span>
+        <span class="text-meta font-medium uppercase tracking-wide text-ink-2">{{ label }}</span>
         <StatusDot v-if="status" :status="status" />
       </div>
       <div class="mt-1.5 text-kpi font-semibold tabular-nums text-ink-1">{{ value }}</div>
@@ -45,6 +45,6 @@ const props = defineProps<{
 const deltaColor = computed(() =>
   props.deltaTone && props.deltaTone !== 'muted'
     ? STATUS_COLOR[props.deltaTone]
-    : 'var(--text-muted)',
+    : 'var(--text-secondary)',
 )
 </script>

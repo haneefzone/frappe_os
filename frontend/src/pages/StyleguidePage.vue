@@ -26,16 +26,16 @@
         >
           <div class="h-10 rounded border border-line" :style="{ background: token.value }" />
           <p class="mt-2 font-mono text-meta text-ink-1">{{ token.name }}</p>
-          <p class="font-mono text-meta text-ink-3">{{ token.hex }}</p>
+          <p class="font-mono text-meta text-ink-2">{{ token.hex }}</p>
         </div>
       </div>
       <div class="mt-4 space-y-1 rounded-lg border border-line bg-surface p-4">
-        <p class="text-meta text-ink-3">12px meta — timestamps, table headers</p>
+        <p class="text-meta text-ink-2">12px meta — timestamps, table headers</p>
         <p class="text-label text-ink-2">13px secondary — table cells, helper text</p>
         <p class="text-body text-ink-1">14px body — default UI text</p>
         <p class="text-section font-semibold text-ink-1">16px section title</p>
         <p class="text-page font-semibold text-ink-1">20px page title</p>
-        <p class="text-kpi font-semibold text-ink-1">28 <span class="text-body font-normal text-ink-3">KPI figures</span></p>
+        <p class="text-kpi font-semibold text-ink-1">28 <span class="text-body font-normal text-ink-2">KPI figures</span></p>
         <p class="font-mono text-label text-ink-2">JetBrains Mono — logs, terminal, commands</p>
       </div>
     </section>
@@ -86,7 +86,7 @@
       </div>
       <div class="mt-3 flex flex-wrap items-end gap-6 rounded-lg border border-line bg-surface p-4">
         <div v-for="v in sparklineVariants" :key="v.label">
-          <p class="mb-1 text-meta text-ink-3">{{ v.label }}</p>
+          <p class="mb-1 text-meta text-ink-2">{{ v.label }}</p>
           <Sparkline :data="v.data" :status="v.status" :filled="v.filled" :show-last="v.showLast" />
         </div>
       </div>
@@ -195,7 +195,7 @@
               <StatusDot :status="server.status" />
               <span class="text-body font-medium text-ink-1">{{ server.name }}</span>
               <EnvironmentBadge :env="server.env" />
-              <span class="ml-auto text-label text-ink-3">{{ server.ip }}</span>
+              <span class="ml-auto text-label text-ink-2">{{ server.ip }}</span>
             </label>
           </div>
         </template>
@@ -211,7 +211,7 @@
                 <input v-model="wizard.version" type="radio" :value="v.version" class="h-3.5 w-3.5" />
                 <span class="text-body font-semibold text-ink-1">Frappe {{ v.version }}</span>
               </span>
-              <span class="text-meta text-ink-3">
+              <span class="text-meta text-ink-2">
                 Python {{ v.python }} · Node {{ v.node }} · MariaDB {{ v.mariadb }}
               </span>
             </label>
@@ -225,13 +225,13 @@
             placeholder="prod-bench-v16"
             class="fdm-focus w-full max-w-sm rounded-lg border border-line bg-base px-2.5 py-1.5 font-mono text-label text-ink-1 placeholder:text-ink-3 focus:border-line-strong"
           />
-          <p class="mt-1 text-meta text-ink-3">Lowercase letters, numbers, and dashes.</p>
+          <p class="mt-1 text-meta text-ink-2">Lowercase letters, numbers, and dashes.</p>
         </template>
         <template #step-review>
           <dl class="space-y-2 text-label">
-            <div class="flex gap-3"><dt class="w-24 text-ink-3">Server</dt><dd class="text-ink-1">{{ wizard.server }}</dd></div>
-            <div class="flex gap-3"><dt class="w-24 text-ink-3">Version</dt><dd class="text-ink-1">Frappe {{ wizard.version }}</dd></div>
-            <div class="flex gap-3"><dt class="w-24 text-ink-3">Name</dt><dd class="font-mono text-ink-1">{{ wizard.name }}</dd></div>
+            <div class="flex gap-3"><dt class="w-24 text-ink-2">Server</dt><dd class="text-ink-1">{{ wizard.server }}</dd></div>
+            <div class="flex gap-3"><dt class="w-24 text-ink-2">Version</dt><dd class="text-ink-1">Frappe {{ wizard.version }}</dd></div>
+            <div class="flex gap-3"><dt class="w-24 text-ink-2">Name</dt><dd class="font-mono text-ink-1">{{ wizard.name }}</dd></div>
           </dl>
           <details class="mt-3 rounded-lg border border-line bg-base px-3 py-2">
             <summary class="cursor-pointer text-label text-ink-2">Show exact commands</summary>

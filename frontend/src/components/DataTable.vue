@@ -67,7 +67,7 @@
             <th
               v-for="col in visibleColumns"
               :key="col.key"
-              class="whitespace-nowrap px-3 text-meta font-medium uppercase tracking-wide text-ink-3"
+              class="whitespace-nowrap px-3 text-meta font-medium uppercase tracking-wide text-ink-2"
               :class="[headerPad, alignClass(col)]"
               :style="col.width ? { width: col.width } : {}"
             >
@@ -144,7 +144,7 @@
     </div>
 
     <!-- Footer -->
-    <div class="flex items-center justify-between border-t border-line px-3 py-1.5 text-meta tabular-nums text-ink-3">
+    <div class="flex items-center justify-between border-t border-line px-3 py-1.5 text-meta tabular-nums text-ink-2">
       <span>{{ processedRows.length.toLocaleString() }} of {{ rows.length.toLocaleString() }} rows</span>
       <span v-if="sortKey">sorted by {{ columnLabel(sortKey) }} {{ sortDir === 'asc' ? '↑' : '↓' }}</span>
     </div>

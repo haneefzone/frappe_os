@@ -18,7 +18,7 @@
           class="fdm-focus w-full rounded-lg border border-line bg-base py-1 pl-7 pr-2 text-label text-ink-1 placeholder:text-ink-3 focus:border-line-strong"
         />
       </div>
-      <span v-if="query" class="text-meta tabular-nums text-ink-3">
+      <span v-if="query" class="text-meta tabular-nums text-ink-2">
         {{ matchCount }} {{ matchCount === 1 ? 'match' : 'matches' }}
       </span>
 
@@ -59,7 +59,7 @@
 
     <!-- Log body -->
     <div ref="scroller" class="min-h-0 flex-1 overflow-auto bg-base" @scroll="onScroll">
-      <div v-if="lines.length === 0" class="px-4 py-8 text-center text-label text-ink-3">
+      <div v-if="lines.length === 0" class="px-4 py-8 text-center text-label text-ink-2">
         No log output yet.
       </div>
       <table v-else class="w-full border-collapse font-mono text-meta leading-[18px]">
@@ -99,7 +99,7 @@
     </div>
 
     <!-- Footer -->
-    <div class="flex items-center justify-between border-t border-line px-3 py-1.5 text-meta text-ink-3">
+    <div class="flex items-center justify-between border-t border-line px-3 py-1.5 text-meta text-ink-2">
       <span class="tabular-nums">{{ lines.length.toLocaleString() }} lines</span>
       <span v-if="query" class="tabular-nums">showing {{ visibleLines.length.toLocaleString() }} matching</span>
     </div>

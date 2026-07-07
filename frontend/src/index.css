@@ -11,6 +11,8 @@
   --border-strong: #2e2e33;
   --text-primary: #f4f4f5;
   --text-secondary: #a1a1aa;
+  /* Decoration only (icons, gutters, placeholders): ~3.7:1 on --bg-base, below
+     the 4.5:1 bar in uiux-spec B5. Readable text must use --text-secondary. */
   --text-muted: #6b6b74;
   --status-ok: #22c55e;
   --status-warn: #f59e0b;

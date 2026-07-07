@@ -41,7 +41,7 @@
 
             <!-- Plain-language consequence list (spec B5) -->
             <div v-if="consequences?.length || $slots.consequences">
-              <p class="mb-1.5 text-meta font-medium uppercase tracking-wide text-ink-3">
+              <p class="mb-1.5 text-meta font-medium uppercase tracking-wide text-ink-2">
                 This will:
               </p>
               <slot name="consequences">

@@ -8,7 +8,7 @@
             type="button"
             class="fdm-focus flex items-center gap-2 rounded px-1 py-0.5 text-label transition"
             :class="[
-              i === active ? 'font-semibold text-ink-1' : i < active ? 'text-ink-2' : 'text-ink-3',
+              i === active ? 'font-semibold text-ink-1' : 'text-ink-2',
               i < active ? 'cursor-pointer hover:text-ink-1' : 'cursor-default',
             ]"
             :disabled="i > active"
@@ -22,7 +22,7 @@
                   ? 'border-ink-1 bg-[var(--text-primary)] text-[var(--bg-base)]'
                   : i === active
                     ? 'border-line-strong text-ink-1'
-                    : 'border-line text-ink-3'
+                    : 'border-line text-ink-2'
               "
             >
               <LucideCheck v-if="i < active" class="h-3 w-3" />
@@ -53,7 +53,7 @@
         @click="goTo(active - 1)"
       />
       <div class="flex items-center gap-3">
-        <span class="text-meta tabular-nums text-ink-3">
+        <span class="text-meta tabular-nums text-ink-2">
           Step {{ active + 1 }} of {{ steps.length }}
         </span>
         <Button

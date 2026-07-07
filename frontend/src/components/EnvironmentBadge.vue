@@ -1,6 +1,6 @@
 <template>
   <span
-    class="inline-flex items-center rounded border px-1.5 py-px text-[11px] font-semibold uppercase tracking-wider"
+    class="inline-flex items-center rounded border px-1.5 py-px text-meta font-semibold uppercase tracking-wider"
     :class="styles[env]"
   >
     {{ env === 'prod' ? 'PROD' : env === 'staging' ? 'STAGING' : 'DEV' }}

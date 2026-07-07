@@ -36,7 +36,7 @@
           <span
             class="text-body"
             :class="{
-              'text-ink-3': step.status === 'pending',
+              'text-ink-2': step.status === 'pending',
               'font-medium text-ink-1': step.status === 'running' || step.status === 'failed',
               'text-ink-1': step.status === 'done',
             }"
@@ -46,7 +46,7 @@
           <span v-if="step.status === 'running'" class="text-meta tabular-nums text-run">
             {{ elapsedFor(step) }}
           </span>
-          <span v-else-if="step.status === 'done' && step.duration" class="text-meta tabular-nums text-ink-3">
+          <span v-else-if="step.status === 'done' && step.duration" class="text-meta tabular-nums text-ink-2">
             {{ step.duration }}
           </span>
           <span v-else-if="step.status === 'failed'" class="text-meta font-medium text-err">Failed</span>
