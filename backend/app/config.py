@@ -24,6 +24,16 @@ class Settings(BaseSettings):
     fdm_secret_key: str = "change-me-generate-a-fernet-key"
     jwt_secret: str = "change-me-long-random-string"
 
+    # Session lifetimes (CLAUDE.md: access 15m, refresh 7d).
+    access_token_ttl_seconds: int = 15 * 60
+    refresh_token_ttl_seconds: int = 7 * 24 * 3600
+    # Secure cookies require HTTPS; set COOKIE_SECURE=false only for plain-HTTP dev.
+    cookie_secure: bool = True
+
+    # Login throttling: the Nth consecutive failure locks the (email, IP) pair.
+    login_lockout_threshold: int = 6
+    login_lockout_seconds: int = 10 * 60
+
     # Comma-separated list of allowed browser origins.
     cors_origins: str = "http://localhost:5173"
 

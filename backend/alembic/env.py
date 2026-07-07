@@ -15,6 +15,8 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Import model modules here as they appear so autogenerate sees them.
+import app.models  # noqa: E402,F401
+
 target_metadata = Base.metadata
 
 
