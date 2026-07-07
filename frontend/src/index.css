@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* FDM design tokens (dark default) — full spec in docs/uiux-spec.md */
+:root {
+  --bg-base: #0a0a0b;
+  --bg-surface: #111113;
+  --bg-raised: #17171a;
+  --border: #232326;
+  --border-strong: #2e2e33;
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #6b6b74;
+  --status-ok: #22c55e;
+  --status-warn: #f59e0b;
+  --status-err: #ef4444;
+  --status-info: #3b82f6;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+}

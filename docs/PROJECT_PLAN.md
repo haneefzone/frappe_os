@@ -8,7 +8,7 @@ Reference: `CLAUDE.md` (rules), `docs/implementation-plan.md` (architecture), `d
 
 ## Phase 0 — Scaffold & Foundation
 
-- [ ] **0.1 Monorepo scaffold.** Repo layout per CLAUDE.md, FastAPI skeleton with `/api/health`, Vite+Vue3+TS+frappe-ui+Tailwind app shell (dark default), docker-compose.dev.yml (Postgres+Redis), Makefile, .env.example, README.
+- [x] **0.1 Monorepo scaffold.** Repo layout per CLAUDE.md, FastAPI skeleton with `/api/health`, Vite+Vue3+TS+frappe-ui+Tailwind app shell (dark default), docker-compose.dev.yml (Postgres+Redis), Makefile, .env.example, README.
   *Accept:* `make dev` boots API + SPA; health returns `{"status":"ok"}`; browser shows dark app shell.
 - [ ] **0.2 Config, DB, app skeleton.** Pydantic Settings, SQLAlchemy 2 + Alembic wired (empty first migration), structured JSON logging, global error handlers, CORS; frontend router + sidebar layout with all nav groups (empty placeholder pages), light/dark toggle.
   *Accept:* `alembic upgrade head` runs; all sidebar routes render placeholders; toggle persists.
