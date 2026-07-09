@@ -239,7 +239,7 @@ const emit = defineEmits<{ close: []; created: [ServerCreated]; view: [number] }
 
 const el = ref<HTMLElement>()
 const { activate, deactivate } = useFocusTrap(el)
-watch(() => props.open, (open) => (open ? activate() : deactivate()))
+watch(() => props.open, (open) => (open ? activate() : deactivate()), { flush: 'post' })
 
 type Method = 'paste' | 'upload' | 'generate' | 'password'
 type RowStatus = 'pending' | 'running' | 'ok' | 'fail' | 'skipped'
