@@ -134,6 +134,16 @@ def update_server(
                 status_code=409, detail=f"A server named {body.name!r} already exists."
             )
         server.name = body.name
+    # A hostname change points the credential at a different host, so the pinned
+    # TOFU key belongs to the old machine. Drop it (fail-open on rotation) so the
+    # next test re-pins against the new host instead of reporting a false MITM.
+    if (
+        body.hostname is not None
+        and body.hostname != server.hostname
+        and server.credential is not None
+    ):
+        server.credential.known_host_key = None
+
     for field in ("hostname", "ssh_port", "env_tag", "tags", "notes"):
         value = getattr(body, field)
         if value is not None:

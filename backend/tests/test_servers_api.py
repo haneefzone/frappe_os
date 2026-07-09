@@ -135,6 +135,72 @@ def test_streamed_test_connection_updates_status_and_pins_key(client, db_session
     assert server["credential"]["host_key_pinned"] is True
 
 
+def test_changing_hostname_clears_pinned_host_key(client, db_session):
+    """Rotating a server to a new hostname must drop the old TOFU pin so the next
+    test re-pins the new host instead of tripping a false MITM mismatch."""
+    login(client, "admin@example.com")
+    server_id = _create(client, _generate_body(name="vm-rotate")).json()["id"]
+
+    # Pin a host key by running a successful test against the original host.
+    conn = _FakeConn(STORED_KEY, HAPPY_RESPONSES)
+
+    async def connector(**kwargs):
+        return conn
+
+    client.app.dependency_overrides[get_ssh_service] = lambda: SSHService(
+        get_secrets_service(), connector=connector
+    )
+    try:
+        client.post(f"/api/servers/{server_id}/test", headers=csrf_headers(client))
+    finally:
+        client.app.dependency_overrides.pop(get_ssh_service, None)
+    assert client.get(f"/api/servers/{server_id}").json()["credential"]["host_key_pinned"] is True
+
+    # Point the server at a new hostname; the stale pin must be cleared.
+    resp = client.patch(
+        f"/api/servers/{server_id}",
+        json={"hostname": "10.0.0.99"},
+        headers=csrf_headers(client),
+    )
+    assert resp.status_code == 200, resp.text
+    server = client.get(f"/api/servers/{server_id}").json()
+    assert server["hostname"] == "10.0.0.99"
+    assert server["credential"]["host_key_pinned"] is False
+
+    cred = db_session.query(SSHCredential).filter_by(server_id=server_id).one()
+    db_session.refresh(cred)
+    assert cred.known_host_key is None
+
+
+def test_same_hostname_patch_keeps_pinned_host_key(client, db_session):
+    """A no-op / unrelated PATCH must not disturb an existing valid pin."""
+    login(client, "admin@example.com")
+    server_id = _create(client, _generate_body(name="vm-keep")).json()["id"]
+
+    conn = _FakeConn(STORED_KEY, HAPPY_RESPONSES)
+
+    async def connector(**kwargs):
+        return conn
+
+    client.app.dependency_overrides[get_ssh_service] = lambda: SSHService(
+        get_secrets_service(), connector=connector
+    )
+    try:
+        client.post(f"/api/servers/{server_id}/test", headers=csrf_headers(client))
+    finally:
+        client.app.dependency_overrides.pop(get_ssh_service, None)
+
+    # Change only the notes; hostname is unchanged, so the pin survives.
+    resp = client.patch(
+        f"/api/servers/{server_id}",
+        json={"notes": "renamed for clarity"},
+        headers=csrf_headers(client),
+    )
+    assert resp.status_code == 200, resp.text
+    server = client.get(f"/api/servers/{server_id}").json()
+    assert server["credential"]["host_key_pinned"] is True
+
+
 def test_readonly_cannot_test(client):
     login(client, "admin@example.com")
     server_id = _create(client, _generate_body(name="vm-ro")).json()["id"]
