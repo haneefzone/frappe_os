@@ -25,7 +25,7 @@ from app.core.streaming import (
     channel_for,
     job_log_stream,
 )
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.models import CommandJob
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -52,17 +52,21 @@ def _require_job(db: Session, job_id: int) -> CommandJob:
 async def stream_job_logs(
     job_id: int,
     request: Request,
-    db: DbSession,
     _: Annotated[object, Depends(require(READ))],
     after_seq: int = Query(default=0, ge=0),
 ) -> StreamingResponse:
     """Server-Sent Events of a job's log lines (see core/streaming.py)."""
-    _require_job(db, job_id)  # 404 before we open a stream
+    # 404 pre-check on a short-lived session, released immediately. We deliberately
+    # do NOT take Depends(get_db) here: a request-scoped session closes only after
+    # the response body is consumed, which for an SSE stream is its entire (hours-
+    # long) life — that would pin a pooled DB connection idle per open stream and
+    # starve the pool. The generator opens its own per-check sessions (streaming.py).
+    with SessionLocal() as db:
+        _require_job(db, job_id)
 
     import redis.asyncio as aioredis
 
     from app.config import get_settings
-    from app.db import SessionLocal
 
     async def event_source():
         conn = aioredis.Redis.from_url(get_settings().redis_url)
