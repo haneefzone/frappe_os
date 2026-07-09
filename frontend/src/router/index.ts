@@ -41,6 +41,13 @@ export const router = createRouter({
       meta: { label: 'Server' },
     },
     {
+      // Literal route before the :id param route so "new" isn't read as an id.
+      name: 'bench-create',
+      path: '/benches/new',
+      component: () => import('../pages/CreateBenchPage.vue'),
+      meta: { label: 'Create bench' },
+    },
+    {
       name: 'bench-detail',
       path: '/benches/:id',
       component: () => import('../pages/BenchDetailPage.vue'),

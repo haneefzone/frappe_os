@@ -65,3 +65,46 @@ class DiscoverRequest(BaseModel):
 
     base_paths: list[str] = Field(default_factory=list)
     priority: str = "default"
+
+
+# --- Guided bench creation (session 1.7) --------------------------------- #
+
+# The bench parent path defaults to the conventional bench-owner home; the
+# operator can override it in the wizard.
+DEFAULT_BENCH_PARENT = "/home/frappe"
+
+
+class VersionMatrixEntryOut(BaseModel):
+    """One row of the Frappe version matrix, for the wizard's radio cards."""
+
+    major: str
+    branch: str
+    python: str
+    node: str
+    mariadb: str
+    tooling: str
+    line: str
+
+
+class VersionMatrixOut(BaseModel):
+    entries: list[VersionMatrixEntryOut]
+
+
+class PreflightRequest(BaseModel):
+    """Launch the wizard's live, re-runnable pre-flight for a candidate bench."""
+
+    server_id: int
+    frappe_version: str
+    path: str = DEFAULT_BENCH_PARENT
+    priority: str = "default"
+
+
+class CreateBenchRequest(BaseModel):
+    """Create a bench: pre-flight -> bench init -> register, as one job."""
+
+    server_id: int
+    frappe_version: str
+    name: str
+    path: str = DEFAULT_BENCH_PARENT
+    # bench init is long-running; default it to the high queue (spec 1.7).
+    priority: str = "high"

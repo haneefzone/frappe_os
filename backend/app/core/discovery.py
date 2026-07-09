@@ -338,6 +338,44 @@ async def gather(
 # --------------------------------------------------------------------------- #
 
 
+def _apply_info(bench: Bench, info: BenchInfo, now: datetime) -> None:
+    """Copy a discovered BenchInfo onto a Bench row (shared by the full-scan
+    `persist` and the single-bench `upsert_one`)."""
+    bench.name = info.name
+    bench.is_production = info.is_production
+    bench.frappe_version = info.frappe_version
+    bench.python_version = info.python_version
+    bench.node_version = info.node_version
+    bench.webserver_port = info.ports.get("webserver_port")
+    bench.socketio_port = info.ports.get("socketio_port")
+    bench.redis_cache_port = info.ports.get("redis_cache_port")
+    bench.redis_queue_port = info.ports.get("redis_queue_port")
+    bench.redis_socketio_port = info.ports.get("redis_socketio_port")
+    bench.file_watcher_port = info.ports.get("file_watcher_port")
+    bench.status = "active"
+    bench.discovered_at = now
+
+
+def upsert_one(
+    db: Session, server_id: int, info: BenchInfo, *, now: datetime | None = None
+) -> Bench:
+    """Insert or refresh a single bench row keyed on (server_id, path) WITHOUT
+    the vanish pass — used to register a bench the platform just created
+    (session 1.7). Unlike `persist`, it never touches sibling benches, so
+    registering one newly-created bench cannot mark the others missing."""
+    now = now or datetime.now(UTC)
+    bench = db.scalars(
+        select(Bench).where(Bench.server_id == server_id, Bench.path == info.path)
+    ).first()
+    if bench is None:
+        bench = Bench(server_id=server_id, path=info.path)
+        db.add(bench)
+    _apply_info(bench, info, now)
+    db.commit()
+    db.refresh(bench)
+    return bench
+
+
 def persist(
     db: Session,
     server_id: int,
@@ -365,19 +403,7 @@ def persist(
             summary.added += 1
         else:
             summary.updated += 1
-        bench.name = info.name
-        bench.is_production = info.is_production
-        bench.frappe_version = info.frappe_version
-        bench.python_version = info.python_version
-        bench.node_version = info.node_version
-        bench.webserver_port = info.ports.get("webserver_port")
-        bench.socketio_port = info.ports.get("socketio_port")
-        bench.redis_cache_port = info.ports.get("redis_cache_port")
-        bench.redis_queue_port = info.ports.get("redis_queue_port")
-        bench.redis_socketio_port = info.ports.get("redis_socketio_port")
-        bench.file_watcher_port = info.ports.get("file_watcher_port")
-        bench.status = "active"
-        bench.discovered_at = now
+        _apply_info(bench, info, now)
 
     for path, bench in existing.items():
         if path not in seen_paths and bench.status != "missing":

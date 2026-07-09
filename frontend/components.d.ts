@@ -27,6 +27,7 @@ declare module 'vue' {
     Sparkline: typeof import('./src/components/Sparkline.vue')['default']
     StatusBadge: typeof import('./src/components/StatusBadge.vue')['default']
     StatusDot: typeof import('./src/components/StatusDot.vue')['default']
+    TerminalTab: typeof import('./src/components/TerminalTab.vue')['default']
     ToastHost: typeof import('./src/components/ToastHost.vue')['default']
     Wizard: typeof import('./src/components/Wizard.vue')['default']
   }

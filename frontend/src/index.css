@@ -75,3 +75,10 @@ body {
   outline: 1px solid var(--text-primary);
   outline-offset: 2px;
 }
+
+/* Same ring, driven by a focused descendant — for radio/checkbox option cards
+   whose real input is visually inside the label. */
+.fdm-focus-within:focus-within {
+  outline: 1px solid var(--text-primary);
+  outline-offset: 2px;
+}

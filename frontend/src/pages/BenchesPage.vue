@@ -5,6 +5,15 @@
         <h1 class="text-lg font-semibold text-ink-1">Benches</h1>
         <p class="text-meta text-ink-2">Frappe benches discovered across your servers.</p>
       </div>
+      <Button
+        v-if="canCreate"
+        variant="solid"
+        theme="gray"
+        label="Create bench"
+        @click="router.push('/benches/new')"
+      >
+        <template #prefix><LucidePlus class="h-4 w-4" /></template>
+      </Button>
     </header>
 
     <div class="min-h-0 flex-1 overflow-y-auto p-8">
@@ -153,6 +162,7 @@
 import { Button } from 'frappe-ui'
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import LucidePlus from '~icons/lucide/plus'
 import LucideRadar from '~icons/lucide/radar'
 import { ApiError } from '../api/client'
 import { benchesApi, type Bench } from '../api/benches'
@@ -178,6 +188,9 @@ const auth = useAuthStore()
 // Discovery launches a bench.discover job (server:manage), the same gate the
 // backend enforces; hide the button for roles that would only get a 403.
 const canOperate = auth.hasPermission('server:manage')
+// Guided create launches a bench.create job (bench:operate), the same gate the
+// backend enforces; hide the button for roles that would only get a 403.
+const canCreate = auth.hasPermission('bench:operate')
 
 const servers = ref<Server[]>([])
 const benches = ref<Bench[]>([])

@@ -10,6 +10,7 @@ the rows. Listing is read-only (RBAC `read`); launching needs `server:manage`,
 declared by the template and checked here the same way POST /api/jobs does.
 """
 
+import posixpath
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -23,10 +24,18 @@ from app.core.commands import RenderError, get_template
 from app.core.discovery import DiscoveryError, validate_base_paths
 from app.core.jobs import JobRunner, LockConflict
 from app.core.permissions import READ, role_allows
+from app.core.version_matrix import MATRIX
 from app.db import get_db
 from app.models import Server
 from app.models.bench import Bench
-from app.schemas.bench import BenchOut, DiscoverRequest
+from app.schemas.bench import (
+    BenchOut,
+    CreateBenchRequest,
+    DiscoverRequest,
+    PreflightRequest,
+    VersionMatrixEntryOut,
+    VersionMatrixOut,
+)
 from app.schemas.job import JobDetail
 
 router = APIRouter(prefix="/api", tags=["benches"])
@@ -35,6 +44,33 @@ DbSession = Annotated[Session, Depends(get_db)]
 Runner = Annotated[JobRunner, Depends(get_job_runner)]
 
 DISCOVER_ACTION = "bench.discover"
+PREFLIGHT_ACTION = "bench.preflight"
+CREATE_ACTION = "bench.create"
+
+
+def _require_action_permission(user, action_name: str) -> None:
+    """Enforce the RBAC action-class the template declares (golden rule 7), the
+    same gate POST /api/jobs applies."""
+    template = get_template(action_name)
+    if not role_allows(list(user.role.permissions or []), template.required_permission):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Role {user.role.name!r} lacks the "
+            f"{template.required_permission!r} permission for this action.",
+        )
+
+
+def _conflict(exc: LockConflict, message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": {
+                "code": "conflict",
+                "message": message,
+                "blocking_job_id": exc.blocking_job_id,
+            }
+        },
+    )
 
 
 @router.get("/benches", response_model=list[BenchOut])
@@ -49,6 +85,28 @@ def list_benches(
     if server is not None:
         stmt = stmt.where(Bench.server_id == server)
     return [BenchOut.from_model(b) for b in db.scalars(stmt).all()]
+
+
+@router.get("/benches/version-matrix", response_model=VersionMatrixOut)
+def version_matrix(_: Annotated[object, Depends(require(READ))]) -> VersionMatrixOut:
+    """The Frappe version matrix (single source of truth). The Create-Bench
+    wizard renders its radio cards from this so the UI and the server-side
+    pre-flight can never disagree. Declared before `/benches/{bench_id}` so the
+    literal path wins over the int route."""
+    return VersionMatrixOut(
+        entries=[
+            VersionMatrixEntryOut(
+                major=e.major,
+                branch=e.branch,
+                python=e.python_display,
+                node=e.node_display,
+                mariadb=e.mariadb_display,
+                tooling=e.tooling,
+                line=e.line,
+            )
+            for e in MATRIX
+        ]
+    )
 
 
 @router.get("/benches/{bench_id}", response_model=BenchOut)
@@ -116,6 +174,81 @@ def discover_benches(
                     "blocking_job_id": exc.blocking_job_id,
                 }
             },
+        )
+
+    db.refresh(job)
+    return JobDetail.from_model(job)
+
+
+@router.post("/benches/preflight", status_code=201, response_model=JobDetail)
+def preflight_bench(
+    body: PreflightRequest, db: DbSession, runner: Runner, user: CurrentUser
+):
+    """Launch the wizard's live, re-runnable pre-flight for a candidate bench.
+    Read-only probes; the job always finishes, and its `PREFLIGHT_RESULT` log
+    line carries the verdict the wizard renders."""
+    if db.get(Server, body.server_id) is None:
+        raise HTTPException(status_code=404, detail="Server not found.")
+    _require_action_permission(user, PREFLIGHT_ACTION)
+
+    try:
+        job = runner.create(
+            db,
+            action_name=PREFLIGHT_ACTION,
+            server_id=body.server_id,
+            target_type="server",
+            target_id=None,
+            params={"frappe_version": body.frappe_version, "path": body.path},
+            priority=body.priority,
+            created_by=user.id,
+        )
+    except RenderError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LockConflict as exc:  # lock-free template, but stay defensive
+        return _conflict(exc, "A pre-flight is already running for this target.")
+
+    db.refresh(job)
+    return JobDetail.from_model(job)
+
+
+@router.post("/benches", status_code=201, response_model=JobDetail)
+def create_bench(
+    body: CreateBenchRequest, db: DbSession, runner: Runner, user: CurrentUser
+):
+    """Create a bench end to end (session 1.7): one `bench.create` job runs the
+    pre-flight, then `bench init`, then registers the new bench. A blocking
+    pre-flight failure fails the job before init (never a half-install). The
+    frontend navigates to the returned job's detail to watch it stream."""
+    if db.get(Server, body.server_id) is None:
+        raise HTTPException(status_code=404, detail="Server not found.")
+    _require_action_permission(user, CREATE_ACTION)
+
+    # Lock keyed on the concrete new bench path so two creates of the same bench
+    # conflict, while different benches on the server run independently (rule 4).
+    target_id = posixpath.join(body.path, body.name)
+
+    try:
+        job = runner.create(
+            db,
+            action_name=CREATE_ACTION,
+            server_id=body.server_id,
+            target_type="bench",
+            target_id=target_id,
+            params={
+                "frappe_version": body.frappe_version,
+                "name": body.name,
+                "path": body.path,
+            },
+            priority=body.priority,
+            created_by=user.id,
+        )
+    except RenderError as exc:
+        # Rejects an invalid version / bad name / bad path (injection guard) at
+        # the boundary — nothing runs on the server.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LockConflict as exc:
+        return _conflict(
+            exc, f"A create job is already running for bench {target_id!r}."
         )
 
     db.refresh(job)

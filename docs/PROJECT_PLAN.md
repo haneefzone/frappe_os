@@ -32,7 +32,7 @@ Reference: `CLAUDE.md` (rules), `docs/implementation-plan.md` (architecture), `d
   *Accept:* open terminal to the VM, run `htop`, resize works, idle disconnect fires, session appears in audit log.
 - [x] **1.6 Bench discovery & list.** Discovery job: scan for benches, parse `sites/common_site_config.json` (ports), `bench version`; Bench model + list UI grouped by server with version chips and port map.
   *Accept:* existing v15/v16 benches on the VM appear with correct versions and ports.
-- [ ] **1.7 Bench create.** Wizard (server → version radio cards showing the matrix → streamed pre-flight job: uv/node/mariadb/wkhtmltopdf present, ports free, disk → name/path → review with exact commands → job). Encode version matrix + gotchas #1–#6 from CLAUDE.md.
+- [x] **1.7 Bench create.** Wizard (server → version radio cards showing the matrix → streamed pre-flight job: uv/node/mariadb/wkhtmltopdf present, ports free, disk → name/path → review with exact commands → job). Encode version matrix + gotchas #1–#6 from CLAUDE.md.
   *Accept:* create a fresh v16 bench on the VM end-to-end from the UI with live logs; pre-flight blocks when uv is missing.
 - [ ] **1.8 Site list & create.** Site model; create wizard (bench → validated name → generated admin password → review → job) using gotcha #4 flags; handles dev-bench Redis gotcha #3 (start 11000/13000, stop after); site list with health dot + scheduler state; site detail Overview with quick actions (open ↗, maintenance toggle, scheduler toggle).
   *Accept:* create `test1.localhost` on the v16 bench from UI; site loads in browser; no interactive prompt ever hangs the job.
