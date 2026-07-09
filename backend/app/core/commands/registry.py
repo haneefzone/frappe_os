@@ -8,7 +8,11 @@ Starter templates (session 1.3):
 
 from __future__ import annotations
 
-from app.core.commands.actions import DetectToolsAction, EchoDemoAction
+from app.core.commands.actions import (
+    DetectToolsAction,
+    DiscoverBenchesAction,
+    EchoDemoAction,
+)
 from app.core.commands.templates import (
     CommandTemplate,
     ParamSpec,
@@ -20,6 +24,11 @@ from app.core.permissions import SERVER_MANAGE
 # marks. Excludes ; ` $ ( ) & | < > \n and quotes, so shell metacharacters and
 # command substitution can never pass validation.
 SAFE_TEXT = r"[\w .,:@/=+-]{1,200}"
+
+# A comma-separated list of absolute base paths for bench discovery. Each path
+# is only alnum + . _ - / — no shell metacharacters can pass, and the action
+# re-validates every element before it reaches the server.
+BASE_PATHS = r"(/[\w./-]{0,300})(,/[\w./-]{0,300})*"
 
 
 _TEMPLATES: dict[str, CommandTemplate] = {}
@@ -51,6 +60,22 @@ register(
         params=(ParamSpec("message", regex=SAFE_TEXT),),
         action_class=EchoDemoAction,
         idempotent=True,
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="bench.discover",
+        argv=("true",),  # nominal; DiscoverBenchesAction runs its own commands.
+        cwd=None,
+        params=(ParamSpec("base_paths", regex=BASE_PATHS, required=False),),
+        action_class=DiscoverBenchesAction,
+        idempotent=True,
+        # A per-server lock (target_type=server) so two discoveries can't race
+        # the upsert/vanish pass on the same server's benches.
         requires_lock=True,
         required_permission=SERVER_MANAGE,
         run_as=None,

@@ -1,6 +1,7 @@
 import type { Component } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import { allNavItems } from '../navigation'
+import BenchesPage from '../pages/BenchesPage.vue'
 import JobsPage from '../pages/JobsPage.vue'
 import PlaceholderPage from '../pages/PlaceholderPage.vue'
 import ServersPage from '../pages/ServersPage.vue'
@@ -9,6 +10,7 @@ import TerminalPage from '../pages/TerminalPage.vue'
 // Real screens replace the placeholder as each session lands one.
 const pageOverrides: Record<string, Component> = {
   servers: ServersPage,
+  benches: BenchesPage,
   jobs: JobsPage,
   terminal: TerminalPage,
 }
@@ -37,6 +39,12 @@ export const router = createRouter({
       path: '/servers/:id',
       component: () => import('../pages/ServerDetailPage.vue'),
       meta: { label: 'Server' },
+    },
+    {
+      name: 'bench-detail',
+      path: '/benches/:id',
+      component: () => import('../pages/BenchDetailPage.vue'),
+      meta: { label: 'Bench' },
     },
     {
       name: 'job-detail',

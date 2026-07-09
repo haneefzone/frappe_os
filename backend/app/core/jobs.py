@@ -230,6 +230,17 @@ class LogWriter:
 # --------------------------------------------------------------------------- #
 
 
+@dataclass
+class CaptureResult:
+    """A fully-collected command result, for actions that must parse output
+    (e.g. bench discovery reading `bench version --format json`) rather than
+    only stream it line by line."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
+
+
 class RemoteExecutor(Protocol):
     async def run(
         self,
@@ -240,6 +251,12 @@ class RemoteExecutor(Protocol):
         on_line: Callable[[str, str], Awaitable[None] | None],
         cancel_check: Callable[[], bool] | None,
     ) -> int: ...
+
+    async def capture(
+        self, argv: list[str], *, cwd: str | None = None, timeout: float = 120.0
+    ) -> CaptureResult:
+        """Run a fixed argv and return its collected output (no streaming)."""
+        ...
 
 
 class JobContextImpl:
@@ -268,6 +285,17 @@ class JobContextImpl:
         # steps that reuse an order across auto-retries for the timeline UI (DOO-96).
         self._attempt = attempt
         self._order = 0
+
+    @property
+    def session(self) -> Session:
+        """The worker's DB session. Only inventory/discovery actions that produce
+        rows (e.g. `bench.discover` upserting Bench rows) use this; command
+        actions stay DB-free and talk only to steps/stream/emit."""
+        return self._db
+
+    @property
+    def server_id(self) -> int:
+        return self._job.server_id
 
     def _cancelled(self) -> bool:
         return self._backend is not None and self._backend.is_cancel_requested(self._job.id)
@@ -318,6 +346,11 @@ class JobContextImpl:
             cancel_check=self._cancelled,
         )
 
+    async def capture(
+        self, argv: list[str], *, cwd: str | None = None, timeout: float = 120.0
+    ) -> CaptureResult:
+        return await self._executor.capture(argv, cwd=cwd, timeout=timeout)
+
     async def emit(self, text: str, stream: str = "system") -> None:
         self._log.append(stream, text)
 
@@ -360,6 +393,14 @@ class SSHRemoteExecutor:
             on_line=on_line,
             cancel_check=cancel_check,
             timeout=JOB_TIMEOUT_SECONDS,
+        )
+
+    async def capture(
+        self, argv: list[str], *, cwd: str | None = None, timeout: float = 120.0
+    ) -> CaptureResult:
+        out = await self._ssh.run(self._conn, argv, cwd=cwd, timeout=timeout)
+        return CaptureResult(
+            exit_code=out.exit_status, stdout=out.stdout, stderr=out.stderr
         )
 
 
