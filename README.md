@@ -18,7 +18,7 @@ Read `CLAUDE.md` first — it is the project constitution.
 On a fresh Ubuntu 22.04 / 24.04 server:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Duncan-and-Ross/fdm-platform/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/main/install.sh | sudo bash
 ```
 
 > On an air-gapped box, run the identical installer from a checkout instead:
