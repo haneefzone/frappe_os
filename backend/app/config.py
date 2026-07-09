@@ -1,6 +1,14 @@
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Shipped defaults are placeholders, not credentials: unless DEBUG=true,
+# Settings refuses to boot until the operator replaces them (SEC-H1, DOO-66).
+JWT_SECRET_PLACEHOLDER = "change-me-long-random-string"
+FDM_SECRET_KEY_PLACEHOLDER = "change-me-generate-a-fernet-key"
+# RFC 7518 §3.2: HS256 keys must be at least as long as the hash output.
+MIN_JWT_SECRET_BYTES = 32
 
 
 class Settings(BaseSettings):
@@ -21,8 +29,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # Master key for Fernet secrets-at-rest; never stored in DB.
-    fdm_secret_key: str = "change-me-generate-a-fernet-key"
-    jwt_secret: str = "change-me-long-random-string"
+    fdm_secret_key: str = FDM_SECRET_KEY_PLACEHOLDER
+    jwt_secret: str = JWT_SECRET_PLACEHOLDER
 
     # Session lifetimes (CLAUDE.md: access 15m, refresh 7d).
     access_token_ttl_seconds: int = 15 * 60
@@ -42,6 +50,37 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @model_validator(mode="after")
+    def _require_real_secrets_outside_debug(self) -> "Settings":
+        """Fail closed (SEC-H1): with DEBUG unset/false, refuse to start on
+        placeholder or weak signing secrets — a forged token would grant Admin."""
+        if self.debug:
+            return self
+        problems = []
+        if (
+            self.jwt_secret == JWT_SECRET_PLACEHOLDER
+            or len(self.jwt_secret.encode("utf-8")) < MIN_JWT_SECRET_BYTES
+        ):
+            problems.append(
+                "JWT_SECRET is the placeholder or shorter than 32 bytes"
+                " (RFC 7518 §3.2). Generate one with:"
+                " python3 -c \"import secrets; print(secrets.token_urlsafe(48))\""
+            )
+        if self.fdm_secret_key == FDM_SECRET_KEY_PLACEHOLDER:
+            problems.append(
+                "FDM_SECRET_KEY is the placeholder. Generate one with:"
+                " python3 -c \"from cryptography.fernet import Fernet;"
+                " print(Fernet.generate_key().decode())\""
+            )
+        if problems:
+            raise ValueError(
+                "Refusing to start with DEBUG=false: "
+                + " | ".join(problems)
+                + " | Put the generated value(s) in your environment or .env file"
+                " (see .env.example). Set DEBUG=true only for local development."
+            )
+        return self
 
 
 @lru_cache

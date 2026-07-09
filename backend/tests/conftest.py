@@ -11,8 +11,11 @@ from app.config import get_settings
 
 # TestClient talks plain http://testserver, and httpx's cookie jar drops
 # Secure cookies over http — so tests run with the dev override. Must be set
-# before create_app() reads settings.
+# before create_app() reads settings. DEBUG=true opts out of the fail-closed
+# placeholder-secret check (SEC-H1, DOO-66); tests covering that check pass
+# debug=False explicitly.
 os.environ["COOKIE_SECURE"] = "false"
+os.environ["DEBUG"] = "true"
 get_settings.cache_clear()
 
 from app.api.deps import require  # noqa: E402

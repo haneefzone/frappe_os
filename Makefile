@@ -12,8 +12,10 @@ dev:
 	$(COMPOSE) up -d
 	$(MAKE) -j2 backend frontend
 
+# DEBUG=true skips the fail-closed placeholder-secret startup check (dev only,
+# never set it in production).
 backend:
-	cd backend && .venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+	cd backend && DEBUG=true .venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 frontend:
 	cd frontend && npm run dev
