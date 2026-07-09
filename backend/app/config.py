@@ -75,7 +75,9 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _require_real_secrets_outside_debug(self) -> "Settings":
         """Fail closed (SEC-H1): with DEBUG unset/false, refuse to start on
-        placeholder or weak signing secrets — a forged token would grant Admin."""
+        placeholder or weak signing secrets — a forged token would grant Admin —
+        or an FDM_SECRET_KEY that is not a valid Fernet key (SecretsService would
+        otherwise fail only on first use, silently storing unreadable rows)."""
         if self.debug:
             return self
         problems = []
@@ -94,6 +96,17 @@ class Settings(BaseSettings):
                 " python3 -c \"from cryptography.fernet import Fernet;"
                 " print(Fernet.generate_key().decode())\""
             )
+        else:
+            from cryptography.fernet import Fernet
+
+            try:
+                Fernet(self.fdm_secret_key.encode())
+            except (ValueError, TypeError):
+                problems.append(
+                    "FDM_SECRET_KEY is not a valid Fernet key. Generate one with:"
+                    " python3 -c \"from cryptography.fernet import Fernet;"
+                    " print(Fernet.generate_key().decode())\""
+                )
         if problems:
             raise ValueError(
                 "Refusing to start with DEBUG=false: "

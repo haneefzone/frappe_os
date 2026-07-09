@@ -1,12 +1,19 @@
+import type { Component } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import { allNavItems } from '../navigation'
 import PlaceholderPage from '../pages/PlaceholderPage.vue'
+import ServersPage from '../pages/ServersPage.vue'
 
-// One route per sidebar item; all render the placeholder until real screens land.
+// Real screens replace the placeholder as each session lands one.
+const pageOverrides: Record<string, Component> = {
+  servers: ServersPage,
+}
+
+// One route per sidebar item; unbuilt ones render the placeholder.
 const routes = allNavItems.map((item) => ({
   name: item.name,
   path: item.path,
-  component: PlaceholderPage,
+  component: pageOverrides[item.name] ?? PlaceholderPage,
   meta: { label: item.label, description: item.description },
 }))
 
@@ -21,6 +28,12 @@ export const router = createRouter({
       meta: { label: 'Sign in', public: true },
     },
     ...routes,
+    {
+      name: 'server-detail',
+      path: '/servers/:id',
+      component: () => import('../pages/ServerDetailPage.vue'),
+      meta: { label: 'Server' },
+    },
     {
       // Living demo of the component library — not in the sidebar on purpose.
       name: 'styleguide',

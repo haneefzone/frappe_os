@@ -1,6 +1,7 @@
 import os
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -16,6 +17,9 @@ from app.config import get_settings
 # debug=False explicitly.
 os.environ["COOKIE_SECURE"] = "false"
 os.environ["DEBUG"] = "true"
+# A real Fernet key so SecretsService (server-registry secrets) round-trips in
+# tests instead of failing on the placeholder key.
+os.environ.setdefault("FDM_SECRET_KEY", Fernet.generate_key().decode())
 get_settings.cache_clear()
 
 from app.api.deps import require  # noqa: E402

@@ -8,6 +8,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AddServerSheet: typeof import('./src/components/AddServerSheet.vue')['default']
     AppSidebar: typeof import('./src/components/layout/AppSidebar.vue')['default']
     AppTopbar: typeof import('./src/components/layout/AppTopbar.vue')['default']
     ConfirmModal: typeof import('./src/components/ConfirmModal.vue')['default']
@@ -20,6 +21,7 @@ declare module 'vue' {
     LogViewer: typeof import('./src/components/LogViewer.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    SheetField: typeof import('./src/components/SheetField.vue')['default']
     SidebarLink: typeof import('./src/components/layout/SidebarLink.vue')['default']
     Sparkline: typeof import('./src/components/Sparkline.vue')['default']
     StatusBadge: typeof import('./src/components/StatusBadge.vue')['default']

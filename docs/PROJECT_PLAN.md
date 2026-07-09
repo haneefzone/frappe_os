@@ -21,7 +21,7 @@ Reference: `CLAUDE.md` (rules), `docs/implementation-plan.md` (architecture), `d
 
 - [x] **1.1 Auth & RBAC.** User/Role/ApiToken models + migration; argon2; JWT httpOnly cookies + CSRF; login/logout/me endpoints; RBAC dependency; seed admin CLI; login page; route guards; user menu.
   *Accept:* login works; Read-only user gets 403 on a mutating endpoint; wrong password rate-limited.
-- [ ] **1.2 Server registry & SSH test.** Server + SSHCredential models; Fernet SecretsService; AsyncSSH service with pooling + known-host pinning; Add Server sheet wizard (identity → auth: paste/upload/generate keypair with copy-pubkey instructions → live streamed Test Connection: SSH ✓, sudo ✓, OS ✓, detected tools table); servers list + detail Overview tab.
+- [x] **1.2 Server registry & SSH test.** Server + SSHCredential models; Fernet SecretsService; AsyncSSH service with pooling + known-host pinning; Add Server sheet wizard (identity → auth: paste/upload/generate keypair with copy-pubkey instructions → live streamed Test Connection: SSH ✓, sudo ✓, OS ✓, detected tools table); servers list + detail Overview tab.
   *Accept:* register the Hyper-V VM; test connection streams checks and stores results; private key unreadable in DB (Fernet token).
 - [ ] **1.3 Job engine core.** CommandJob/CommandStep/LogEntry models; RQ queues high/default/low; JobRunner + ctx.step; command template registry with validators + secret masking; Redis job locking (409 on conflict); 202+job_id pattern; retry (3×, idempotent only); jobs list/detail API; 4h timeout + graceful worker shutdown configured.
   *Accept:* a demo `echo`-over-SSH job runs through the full lifecycle; concurrent duplicate returns 409; unit tests prove injection-unsafe input is rejected.

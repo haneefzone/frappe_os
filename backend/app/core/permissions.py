@@ -26,6 +26,7 @@ DEFAULT_ROLES: dict[str, list[str]] = {
     "Admin": [ALL],
     "Developer": [
         READ,
+        SERVER_MANAGE,
         BENCH_OPERATE,
         SITE_OPERATE,
         APP_MANAGE,
