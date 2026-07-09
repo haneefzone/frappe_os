@@ -26,7 +26,7 @@ from typing import Protocol
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload, sessionmaker
 
-from app.core.commands import RenderedCommand, RenderError, get_template, render
+from app.core.commands import RenderedCommand, get_template, render
 from app.core.ssh import SSHService
 from app.models import CommandJob, CommandStep, LogEntry, Server
 
@@ -421,12 +421,24 @@ class JobRunner:
         ssh: SSHService | None = None,
         enqueue: Callable[[CommandJob], str | None] | None = None,
         executor_factory: Callable[[Server], object] | None = None,
+        secrets=None,
     ) -> None:
         self._sf = session_factory
         self._backend = backend
         self._ssh = ssh
         self._enqueue = enqueue if enqueue is not None else self._default_enqueue
         self._executor_factory = executor_factory
+        self._secrets = secrets
+
+    def _secrets_service(self):
+        """The Fernet SecretsService for resolving secret params at render time
+        (session 1.8). Falls back to the process-wide service so tests and the
+        production runner share one validated key."""
+        if self._secrets is None:
+            from app.core.security import get_secrets_service
+
+            self._secrets = get_secrets_service()
+        return self._secrets
 
     # -- creation ------------------------------------------------------------ #
 
@@ -447,16 +459,42 @@ class JobRunner:
         params: dict,
         priority: str,
         created_by: int | None,
+        user_secrets: dict[str, str] | None = None,
         _from_sanitized: bool = False,
     ) -> CommandJob:
         """Validate + persist + lock + enqueue. Raises RenderError (422),
-        UnknownAction (404) or LockConflict (409). Returns the pending job.
+        UnknownAction (404), LockConflict (409) or SecretResolutionError (422).
+        Returns the pending job.
+
+        `user_secrets` carries secret params the operator supplied (e.g. a site's
+        admin password); they are validated by rendering the real command, then
+        Fernet-encrypted onto the job (`secrets_enc`) for the worker — never
+        stored in the clear. Server-sourced secrets (e.g. the MariaDB root
+        password) are resolved from the Server row here only to validate, and are
+        re-resolved by the worker, so they never touch the job row (rule 6).
 
         `_from_sanitized=True` (set only by `retry`) tells render() the params
         came from a masked `params_sanitized` map, so a secret-bearing template
         fails loud (SecretParamUnresolved) instead of running with `••••`."""
         template = get_template(action_name)  # UnknownAction if missing
-        rendered = render(template, params, from_sanitized=_from_sanitized)  # RenderError
+
+        secrets_enc: str | None = None
+        if not _from_sanitized and template.secret_sources:
+            from app.core.secrets_resolve import encrypt_job_secrets, resolve_secrets
+
+            svc = self._secrets_service()
+            server = db.get(Server, server_id)
+            # Encrypt the user-supplied job secrets, then resolve every declared
+            # secret (job + server-sourced) so render validates against real
+            # values. SecretResolutionError bubbles up (a missing server secret
+            # or admin password) and the API maps it to HTTP 422.
+            secrets_enc = encrypt_job_secrets(svc, user_secrets or {})
+            resolved = resolve_secrets(
+                template, secrets_enc=secrets_enc, server=server, secrets=svc
+            )
+            rendered = render(template, {**params, **resolved}, from_sanitized=False)
+        else:
+            rendered = render(template, params, from_sanitized=_from_sanitized)
 
         job = CommandJob(
             server_id=server_id,
@@ -466,6 +504,7 @@ class JobRunner:
             priority=priority,
             status="pending",
             params_sanitized=rendered.params_sanitized,
+            secrets_enc=secrets_enc,
             retry_count=0,
             created_by=created_by,
         )
@@ -590,14 +629,39 @@ class JobRunner:
                 return
 
             template = get_template(job.action_name)
+            server = db.scalars(
+                select(Server)
+                .options(joinedload(Server.credential))
+                .where(Server.id == job.server_id)
+            ).first()
             try:
-                # The worker only has the masked params_sanitized to work from,
-                # so a secret-bearing template can't be re-rendered safely here
-                # yet — fail loud instead of executing with a `••••` mask.
-                rendered = render(
-                    template, dict(job.params_sanitized or {}), from_sanitized=True
-                )
-            except RenderError as exc:
+                # The worker only persists the masked params_sanitized. For a
+                # template that declares secret sources, resolve each secret's
+                # plaintext (job bundle + the Server row) and render with the real
+                # values (session 1.8). Otherwise a secret-bearing template can't
+                # be re-rendered safely — fail loud instead of running with `••••`.
+                if template.secret_sources:
+                    from app.core.secrets_resolve import resolve_secrets
+
+                    resolved = resolve_secrets(
+                        template,
+                        secrets_enc=job.secrets_enc,
+                        server=server,
+                        secrets=self._secrets_service(),
+                    )
+                    rendered = render(
+                        template,
+                        {**(job.params_sanitized or {}), **resolved},
+                        from_sanitized=False,
+                    )
+                else:
+                    rendered = render(
+                        template, dict(job.params_sanitized or {}), from_sanitized=True
+                    )
+            except Exception as exc:
+                # RenderError (bad/masked params) or SecretResolutionError (a
+                # missing server secret) — a determinate start failure, not a
+                # transient one; record a breadcrumb and fail without retrying.
                 job.status = "running"
                 job.started_at = _now()
                 db.commit()
@@ -606,11 +670,6 @@ class JobRunner:
                 breadcrumb.flush()
                 self._to_terminal(db, job, "failure", exit_code=1)
                 return
-            server = db.scalars(
-                select(Server)
-                .options(joinedload(Server.credential))
-                .where(Server.id == job.server_id)
-            ).first()
 
             job.status = "running"
             job.started_at = _now()
@@ -685,10 +744,12 @@ def build_runner() -> JobRunner:
     from app.db import SessionLocal
 
     conn = Redis.from_url(get_settings().redis_url)
+    secrets = get_secrets_service()
     return JobRunner(
         SessionLocal,
         RedisJobBackend(conn),
-        ssh=SSHService(get_secrets_service()),
+        ssh=SSHService(secrets),
+        secrets=secrets,
     )
 
 

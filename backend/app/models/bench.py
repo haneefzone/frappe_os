@@ -22,7 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 
@@ -74,4 +74,12 @@ class Bench(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    # Sites discovered inside this bench (session 1.8). Cascade-delete so a bench
+    # row going away takes its site rows with it.
+    sites: Mapped[list["Site"]] = relationship(  # noqa: F821
+        back_populates="bench",
+        cascade="all, delete-orphan",
+        order_by="Site.name",
     )

@@ -55,6 +55,9 @@ class ServerCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
     notes: str | None = None
     credential: CredentialIn
+    # Write-only. The host's MariaDB root password, used server-side by
+    # `bench new-site` (gotcha #4); Fernet-encrypted at rest, never returned.
+    mariadb_root_password: str | None = Field(default=None, max_length=128)
 
 
 class ServerUpdate(BaseModel):
@@ -67,6 +70,9 @@ class ServerUpdate(BaseModel):
     tags: list[str] | None = None
     notes: str | None = None
     credential: CredentialIn | None = None
+    # Write-only. Set the host's MariaDB root password (gotcha #4). An empty
+    # string clears it; None leaves it unchanged.
+    mariadb_root_password: str | None = Field(default=None, max_length=128)
 
 
 class CredentialOut(BaseModel):
@@ -104,6 +110,8 @@ class ServerOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     credential: CredentialOut | None
+    # Boolean only — the platform never echoes the MariaDB root password back.
+    has_mariadb_root_password: bool
 
     @classmethod
     def from_model(cls, server: Server) -> "ServerOut":
@@ -121,6 +129,7 @@ class ServerOut(BaseModel):
             created_at=server.created_at,
             updated_at=server.updated_at,
             credential=CredentialOut.from_model(server.credential) if server.credential else None,
+            has_mariadb_root_password=bool(server.mariadb_root_password_enc),
         )
 
 

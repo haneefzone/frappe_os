@@ -254,6 +254,198 @@ class CreateBenchAction(Action):
             )
 
 
+# --------------------------------------------------------------------------- #
+# Sites (session 1.8)
+# --------------------------------------------------------------------------- #
+
+# Default dev-bench Redis ports (CLAUDE.md gotcha #3): queue :11000, cache
+# :13000. Used for the shutdown-after only when the discovered bench row doesn't
+# carry its own ports.
+DEFAULT_REDIS_QUEUE_PORT = 11000
+DEFAULT_REDIS_CACHE_PORT = 13000
+
+# Fixed dev/prod probe: a production bench has supervisor/systemd unit files.
+# No user input — the only variable is the cwd (the validated bench path).
+_MODE_PROBE = (
+    "if [ -f config/supervisor.conf ] || [ -f config/systemd/frappe-web.service ]; "
+    "then echo PROD; else echo DEV; fi"
+)
+
+
+def _load_bench(ctx: JobContext, bench_path: str):
+    """Fetch the discovered Bench row for this job's server + path, or None."""
+    from sqlalchemy import select
+
+    from app.models.bench import Bench
+
+    return ctx.session.scalars(
+        select(Bench).where(
+            Bench.server_id == ctx.server_id, Bench.path == bench_path
+        )
+    ).first()
+
+
+class CreateSiteAction(Action):
+    """`site.create` — create a Frappe site, wrapping `bench new-site` (gotcha #4)
+    in the dev-bench Redis dance (gotcha #3) as explicit steps in ONE job.
+
+    Steps: (1) detect dev vs production from supervisor/systemd presence; (2) on
+    a DEV bench, start the bench's own Redis (queue + cache) — else `new-site`
+    fails `Error 111 connecting to 127.0.0.1:11000`; (3) run the non-interactive
+    `bench new-site` (root + admin passwords supplied as flags so nothing ever
+    prompts and hangs the job); (4) register the site row; (5) on a DEV bench,
+    shut the Redis back down so a later `bench start` can bind — even if the
+    create failed (the shutdown is in a `finally`).
+
+    Non-idempotent: a determinate `new-site` failure is never auto-retried on top
+    of a half-created site. Secrets (db_root_pw, admin_pw) are resolved from the
+    job's secret sources at render time and redacted from every log line."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import discovery
+        from app.core.commands import get_template, render
+
+        params = ctx.rendered.params_sanitized
+        secrets = ctx.rendered.secret_map
+        site = params["site"]
+        bench_path = params["bench_path"]
+
+        bench = _load_bench(ctx, bench_path)
+        queue_port = (bench.redis_queue_port if bench else None) or DEFAULT_REDIS_QUEUE_PORT
+        cache_port = (bench.redis_cache_port if bench else None) or DEFAULT_REDIS_CACHE_PORT
+
+        # 1) Detect dev vs production (supervisor conf presence).
+        is_dev = True
+        with ctx.step("Detect bench mode"):
+            res = await ctx.capture(["bash", "-c", _MODE_PROBE], cwd=bench_path)
+            is_dev = "PROD" not in res.stdout
+            await ctx.emit(
+                f"Bench mode: {'development' if is_dev else 'production'} "
+                f"({res.stdout.strip() or 'unknown'})."
+            )
+
+        # Build the real `bench new-site` argv through the safe registry using the
+        # resolved secrets — never string interpolation, secrets redacted in logs.
+        new_site = render(
+            get_template("site.new"),
+            {
+                "site": site,
+                "db_root_pw": secrets["db_root_pw"],
+                "admin_pw": secrets["admin_pw"],
+                "bench_path": bench_path,
+            },
+        )
+
+        started_redis = False
+        try:
+            # 2) Dev bench: start bench-owned Redis before the site op (gotcha #3).
+            if is_dev:
+                with ctx.step("Start dev bench Redis (queue + cache)"):
+                    for conf in ("config/redis_queue.conf", "config/redis_cache.conf"):
+                        await ctx.emit(f"$ redis-server {conf} --daemonize yes")
+                        # Best-effort: already-running Redis exits non-zero; that's
+                        # fine, the port we need is up either way.
+                        code = await ctx.stream(
+                            ["redis-server", conf, "--daemonize", "yes"], cwd=bench_path
+                        )
+                        await ctx.emit(f"redis-server {conf} exited {code}.")
+                    started_redis = True
+
+            # 3) The actual, non-interactive site creation (gotcha #4).
+            with ctx.step("Create site (bench new-site)"):
+                await ctx.emit(f"$ {new_site.display}")
+                code = await ctx.stream(new_site.argv, cwd=new_site.cwd)
+                if code != 0:
+                    raise RuntimeError(f"bench new-site exited with status {code}")
+
+            # 4) Register the new site in the platform inventory.
+            with ctx.step("Register site"):
+                if bench is None:
+                    await ctx.emit(
+                        "Bench not in inventory yet — run a discovery to link this "
+                        "site to its bench."
+                    )
+                else:
+                    row = discovery.upsert_site_one(ctx.session, bench.id, site)
+                    await ctx.emit(f"Registered site #{row.id} ({site}).")
+        finally:
+            # 5) Dev bench: shut the Redis we started back down so `bench start`
+            #    can bind its ports later (gotcha #3). Best-effort (|| true).
+            if started_redis:
+                with ctx.step("Shut down dev bench Redis"):
+                    for port in (queue_port, cache_port):
+                        await ctx.emit(f"$ redis-cli -p {port} shutdown nosave")
+                        code = await ctx.stream(
+                            ["redis-cli", "-p", str(port), "shutdown", "nosave"]
+                        )
+                        await ctx.emit(f"redis-cli -p {port} shutdown exited {code}.")
+
+
+class _SiteToggleAction(Action):
+    """Shared base for the fast site toggles: run the single bench command, then
+    record the resulting state on the Site row so the UI reflects it without a
+    full re-discovery. `flag`/`value_from_state` say which column to set."""
+
+    flag: str = ""
+
+    def _new_value(self, state: str) -> bool:  # overridden per toggle
+        raise NotImplementedError
+
+    async def run(self, ctx: JobContext) -> None:
+        params = ctx.rendered.params_sanitized
+        site_name = params["site"]
+        bench_path = params["bench_path"]
+        state = params["state"]
+
+        with ctx.step("Run command"):
+            code = await ctx.stream(ctx.rendered.argv, cwd=ctx.rendered.cwd)
+            if code != 0:
+                raise RuntimeError(f"command exited with status {code}")
+
+        with ctx.step("Update site state"):
+            bench = _load_bench(ctx, bench_path)
+            site = None
+            if bench is not None:
+                from sqlalchemy import select
+
+                from app.models.site import Site
+
+                site = ctx.session.scalars(
+                    select(Site).where(
+                        Site.bench_id == bench.id, Site.name == site_name
+                    )
+                ).first()
+            if site is None:
+                await ctx.emit(
+                    f"Site {site_name!r} not in inventory — run a discovery to "
+                    "track its state."
+                )
+                return
+            setattr(site, self.flag, self._new_value(state))
+            ctx.session.commit()
+            await ctx.emit(f"{site_name}: {self.flag} = {getattr(site, self.flag)}.")
+
+
+class SetSchedulerAction(_SiteToggleAction):
+    """`site.set_scheduler` — `bench --site X scheduler enable|disable`, then set
+    `Site.scheduler_enabled`."""
+
+    flag = "scheduler_enabled"
+
+    def _new_value(self, state: str) -> bool:
+        return state == "enable"
+
+
+class SetMaintenanceAction(_SiteToggleAction):
+    """`site.set_maintenance` — `bench --site X set-maintenance-mode on|off`, then
+    set `Site.maintenance_mode`."""
+
+    flag = "maintenance_mode"
+
+    def _new_value(self, state: str) -> bool:
+        return state == "on"
+
+
 class DetectToolsAction(Action):
     """`server.detect_tools` — inventory the Frappe toolchain on the target.
 

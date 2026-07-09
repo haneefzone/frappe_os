@@ -35,6 +35,8 @@ export interface Server {
   created_at: string
   updated_at: string
   credential: CredentialInfo | null
+  /** Whether the host's MariaDB root password is set (used by `bench new-site`). */
+  has_mariadb_root_password: boolean
 }
 
 export interface ServerCreated extends Server {
@@ -60,6 +62,8 @@ export interface ServerCreatePayload {
   tags: string[]
   notes?: string | null
   credential: CredentialInput
+  /** Write-only: the host's MariaDB root password (empty string clears it). */
+  mariadb_root_password?: string | null
 }
 
 /** One streamed frame from POST /api/servers/{id}/test. */

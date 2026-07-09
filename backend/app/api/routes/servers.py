@@ -108,6 +108,8 @@ def create_server(
         tags=body.tags,
         notes=body.notes,
     )
+    if body.mariadb_root_password:
+        server.mariadb_root_password_enc = secrets.encrypt(body.mariadb_root_password)
     cred = SSHCredential(server=server)
     generated_public_key = _apply_credential(cred, body.credential, secrets)
     db.add(server)
@@ -148,6 +150,15 @@ def update_server(
         value = getattr(body, field)
         if value is not None:
             setattr(server, field, value)
+
+    # MariaDB root password: a value sets it, an empty string clears it, None
+    # (absent) leaves it untouched.
+    if body.mariadb_root_password is not None:
+        server.mariadb_root_password_enc = (
+            secrets.encrypt(body.mariadb_root_password)
+            if body.mariadb_root_password
+            else None
+        )
 
     generated_public_key: str | None = None
     if body.credential is not None:

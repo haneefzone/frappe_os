@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.core.commands.templates import has_dotdot_segment
 from app.models.bench import Bench
+from app.models.site import Site
 
 # Base paths scanned in addition to the SSH user's home (`$HOME`, resolved on
 # the server). Callers may override per discovery request.
@@ -40,7 +41,7 @@ DEFAULT_BASE_PATHS: tuple[str, ...] = ("/home", "/opt", "/srv")
 PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{0,300}$")
 
 # Marker lines used by the inspect script to delimit each captured section.
-_SECTIONS = ("COMMON_SITE_CONFIG", "BENCH_VERSION", "PYTHON", "NODE")
+_SECTIONS = ("COMMON_SITE_CONFIG", "BENCH_VERSION", "PYTHON", "NODE", "SITES")
 
 # Lists candidate bench dirs. Roots arrive as "$@" (argv after the `_` sentinel),
 # never spliced into the script. For each root we consider the root itself and
@@ -82,6 +83,18 @@ echo "---PYTHON---"
 "$b/env/bin/python" --version 2>&1 || true
 echo "---NODE---"
 (cd "$b" && node --version 2>&1) || true
+echo "---SITES---"
+if [ -d "$b/sites" ]; then
+  for sd in "$b"/sites/*/; do
+    [ -d "$sd" ] || continue
+    s=$(basename "$sd")
+    case "$s" in assets) continue;; esac
+    c="$sd/site_config.json"
+    [ -f "$c" ] || continue
+    mm=$(sed -n 's/.*maintenance_mode[^0-9]*\([0-9]\).*/\1/p' "$c" 2>/dev/null | head -1)
+    printf 'SITE\t%s\t%s\n' "$s" "$mm"
+  done
+fi
 echo "---END---"
 """
 
@@ -91,6 +104,16 @@ BENCH_VERSION_PLAIN_ARGV = ("bench", "version")
 
 class DiscoveryError(ValueError):
     """A base path failed the absolute-path allowlist. Maps to HTTP 422."""
+
+
+@dataclass
+class SiteInfo:
+    """What discovery learned cheaply about one site (session 1.8): its name and
+    the maintenance flag read from site_config.json. Scheduler state and health
+    are not read here (they need the site DB / an HTTP ping)."""
+
+    name: str
+    maintenance_mode: bool = False
 
 
 @dataclass
@@ -104,6 +127,7 @@ class BenchInfo:
     python_version: str | None = None
     node_version: str | None = None
     ports: dict[str, int | None] = field(default_factory=dict)
+    sites: list[SiteInfo] = field(default_factory=list)
 
 
 @dataclass
@@ -266,6 +290,28 @@ def parse_bench_version_plain(text: str) -> str | None:
     return None
 
 
+_TRUE_TOKENS = {"1", "true", "True", "yes", "on"}
+
+
+def parse_sites(text: str) -> list[SiteInfo]:
+    """Pull the `SITE\\t<name>\\t<maintenance>` lines out of the SITES section,
+    de-duped and order-stable. The maintenance token is the raw value scraped
+    from site_config.json (empty when the key is absent -> not in maintenance)."""
+    out: list[SiteInfo] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        if not line.startswith("SITE\t"):
+            continue
+        parts = line.split("\t")
+        name = parts[1].strip() if len(parts) > 1 else ""
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        mm = parts[2].strip() if len(parts) > 2 else ""
+        out.append(SiteInfo(name=name, maintenance_mode=mm in _TRUE_TOKENS))
+    return out
+
+
 def _first_version_token(text: str) -> str | None:
     """Pull an `X.Y.Z`-ish token out of a `--version` line."""
     m = re.search(r"\d+\.\d+(?:\.\d+)?", text)
@@ -285,6 +331,7 @@ def parse_inspect(stdout: str, bench_path: str) -> BenchInfo:
     info.frappe_version = parse_bench_version(sections.get("BENCH_VERSION", ""))
     info.python_version = _first_version_token(sections.get("PYTHON", ""))
     info.node_version = _first_version_token(sections.get("NODE", ""))
+    info.sites = parse_sites(sections.get("SITES", ""))
     return info
 
 
@@ -361,6 +408,34 @@ def _apply_info(bench: Bench, info: BenchInfo, now: datetime) -> None:
     bench.discovered_at = now
 
 
+def _persist_sites(
+    db: Session, bench: Bench, site_infos: list[SiteInfo], now: datetime
+) -> None:
+    """Upsert one Site row per discovered site under a bench and mark any
+    previously-active site whose dir has vanished as `missing`. Discovery only
+    knows the maintenance flag cheaply, so it never clobbers a site's
+    scheduler_enabled / health (those come from toggle jobs / a later health
+    session)."""
+    db.flush()  # ensure bench.id is assigned for the FK
+    existing = {
+        s.name: s
+        for s in db.scalars(select(Site).where(Site.bench_id == bench.id)).all()
+    }
+    seen: set[str] = set()
+    for si in site_infos:
+        seen.add(si.name)
+        site = existing.get(si.name)
+        if site is None:
+            site = Site(bench_id=bench.id, name=si.name)
+            db.add(site)
+        site.maintenance_mode = si.maintenance_mode
+        site.status = "active"
+        site.discovered_at = now
+    for name, site in existing.items():
+        if name not in seen and site.status != "missing":
+            site.status = "missing"
+
+
 def upsert_one(
     db: Session, server_id: int, info: BenchInfo, *, now: datetime | None = None
 ) -> Bench:
@@ -376,9 +451,36 @@ def upsert_one(
         bench = Bench(server_id=server_id, path=info.path)
         db.add(bench)
     _apply_info(bench, info, now)
+    _persist_sites(db, bench, info.sites, now)
     db.commit()
     db.refresh(bench)
     return bench
+
+
+def upsert_site_one(
+    db: Session,
+    bench_id: int,
+    name: str,
+    *,
+    maintenance_mode: bool = False,
+    now: datetime | None = None,
+) -> Site:
+    """Insert or refresh a single site row keyed on (bench_id, name) — used to
+    register a site the platform just created (session 1.8), without a vanish
+    pass over the bench's other sites."""
+    now = now or datetime.now(UTC)
+    site = db.scalars(
+        select(Site).where(Site.bench_id == bench_id, Site.name == name)
+    ).first()
+    if site is None:
+        site = Site(bench_id=bench_id, name=name)
+        db.add(site)
+    site.maintenance_mode = maintenance_mode
+    site.status = "active"
+    site.discovered_at = now
+    db.commit()
+    db.refresh(site)
+    return site
 
 
 def persist(
@@ -409,6 +511,7 @@ def persist(
         else:
             summary.updated += 1
         _apply_info(bench, info, now)
+        _persist_sites(db, bench, info.sites, now)
 
     for path, bench in existing.items():
         if path not in seen_paths and bench.status != "missing":

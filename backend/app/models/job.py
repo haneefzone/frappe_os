@@ -58,6 +58,13 @@ class CommandJob(Base):
 
     # Rendered params with every secret masked (rule 6) — safe to store/show.
     params_sanitized: Mapped[dict] = mapped_column(ParamsJSON, default=dict)
+    # User-supplied secret params (e.g. a new site's admin password) carried to
+    # the worker as ONE Fernet token encrypting a JSON map — decrypted only in
+    # memory at execution time and never persisted or logged in the clear (rule
+    # 6). NULL for actions with no user-supplied secrets. Server-sourced secrets
+    # (e.g. the MariaDB root password) are re-read from the Server row at run
+    # time instead, so they are never copied here.
+    secrets_enc: Mapped[str | None] = mapped_column(Text)
     # Redis lock this job holds while running; NULL for lock-free actions.
     lock_key: Mapped[str | None] = mapped_column(String(255))
 

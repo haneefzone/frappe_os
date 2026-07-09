@@ -100,6 +100,12 @@ class CommandTemplate:
     required_permission: str
     # OS user to run the command as (via `sudo -u`); None = the SSH login user.
     run_as: str | None = None
+    # Where each secret param's plaintext is resolved at execution time
+    # (session 1.8; see app/core/secrets_resolve.py). "job" = the user-supplied
+    # value carried encrypted on the job; "server:<column>" = a Fernet token on
+    # the Server row. A secret param NOT listed here is left unresolved, so the
+    # `from_sanitized` tripwire in render() still fails it loud.
+    secret_sources: dict[str, str] = field(default_factory=dict)
 
     @property
     def secret_params(self) -> set[str]:
@@ -114,6 +120,10 @@ class RenderedCommand:
     params_sanitized: dict[str, str] = field(default_factory=dict)
     # Plaintext secret values, for the log redactor — never persisted.
     secret_values: tuple[str, ...] = ()
+    # Plaintext secrets keyed by param name, for an action that must re-render a
+    # sub-template (e.g. site.create building the `bench new-site` argv). Lives
+    # only in memory on the worker; never persisted or displayed.
+    secret_map: dict[str, str] = field(default_factory=dict)
 
 
 def _substitute(token: str, values: dict[str, str]) -> str:
@@ -177,10 +187,12 @@ def render(
     if cwd is not None:
         display = f"cd {shlex.quote(cwd)} && {display}"
 
+    secret_map = {name: real[name] for name in template.secret_params if name in real}
     return RenderedCommand(
         argv=argv,
         cwd=cwd,
         display=display,
         params_sanitized=masked,
-        secret_values=tuple(real[name] for name in template.secret_params if name in real),
+        secret_values=tuple(secret_map.values()),
+        secret_map=secret_map,
     )

@@ -33,6 +33,11 @@ class Server(Base):
     env_tag: Mapped[str] = mapped_column(String(10), default="dev")
     tags: Mapped[list] = mapped_column(TagsJSON, default=list)
     notes: Mapped[str | None] = mapped_column(Text)
+    # The host's MariaDB root password, Fernet-encrypted at rest (rule 6). Used
+    # server-side by `bench new-site` (gotcha #4) so the browser never sends it;
+    # NULL until an operator sets it on the server's settings. Never returned in
+    # plaintext — the API exposes only a "is it set" boolean.
+    mariadb_root_password_enc: Mapped[str | None] = mapped_column(Text)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

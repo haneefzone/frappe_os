@@ -95,6 +95,38 @@
           </p>
         </section>
 
+        <!-- Database settings: the MariaDB root password used by bench new-site -->
+        <section v-if="canManage" class="rounded-lg border border-line bg-surface lg:col-span-2">
+          <h2 class="border-b border-line px-4 py-2.5 text-label font-semibold text-ink-1">Database</h2>
+          <div class="space-y-3 p-4">
+            <div class="flex items-center gap-2 text-label">
+              <StatusDot :status="server.has_mariadb_root_password ? 'ok' : 'muted'" />
+              <span class="text-ink-1">MariaDB root password</span>
+              <span class="text-meta text-ink-3">{{ server.has_mariadb_root_password ? 'set' : 'not set' }}</span>
+            </div>
+            <p class="text-meta text-ink-3">
+              Used server-side by <code class="font-mono">bench new-site</code> (gotcha #4). Stored
+              encrypted with Fernet; never sent to the browser or shown in logs.
+            </p>
+            <div class="flex items-center gap-2">
+              <input
+                v-model="mariadbPassword"
+                type="password"
+                :placeholder="server.has_mariadb_root_password ? 'Enter a new password to replace it' : 'Set the MariaDB root password'"
+                class="fdm-focus w-full max-w-md rounded-lg border border-line bg-base px-3 py-2 font-mono text-label text-ink-1 placeholder:text-ink-3"
+              />
+              <Button
+                variant="solid"
+                theme="gray"
+                :label="savingDbPw ? 'Saving…' : 'Save'"
+                :loading="savingDbPw"
+                :disabled="!mariadbPassword"
+                @click="saveMariadbPassword"
+              />
+            </div>
+          </div>
+        </section>
+
         <!-- Connection checks (appear while/after testing) -->
         <section v-if="hasRun" class="rounded-lg border border-line bg-surface lg:col-span-2">
           <h2 class="border-b border-line px-4 py-2.5 text-label font-semibold text-ink-1">Connection checks</h2>
@@ -142,6 +174,8 @@ const canManage = auth.hasPermission('server:manage')
 
 const serverId = Number(route.params.id)
 const launching = ref(false)
+const mariadbPassword = ref('')
+const savingDbPw = ref(false)
 const server = ref<Server | null>(null)
 const loading = ref(true)
 const loadError = ref('')
@@ -249,6 +283,21 @@ async function runDemoJob() {
     toast.error(message)
   } finally {
     launching.value = false
+  }
+}
+
+async function saveMariadbPassword() {
+  if (savingDbPw.value || !mariadbPassword.value) return
+  savingDbPw.value = true
+  try {
+    await serversApi.update(serverId, { mariadb_root_password: mariadbPassword.value })
+    mariadbPassword.value = ''
+    server.value = await serversApi.get(serverId)
+    toast.success('MariaDB root password saved.')
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not save the password.')
+  } finally {
+    savingDbPw.value = false
   }
 }
 

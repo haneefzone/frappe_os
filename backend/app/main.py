@@ -12,6 +12,7 @@ from app.api.routes.benches import router as benches_router
 from app.api.routes.job_logs import router as job_logs_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.servers import router as servers_router
+from app.api.routes.sites import router as sites_router
 from app.api.routes.terminal import router as terminal_router
 from app.config import get_settings
 from app.core.logging import configure_logging
@@ -59,6 +60,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(servers_router)
     app.include_router(benches_router)
+    app.include_router(sites_router)
     app.include_router(jobs_router)
     app.include_router(job_logs_router)
     app.include_router(terminal_router)

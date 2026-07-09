@@ -5,12 +5,14 @@ import BenchesPage from '../pages/BenchesPage.vue'
 import JobsPage from '../pages/JobsPage.vue'
 import PlaceholderPage from '../pages/PlaceholderPage.vue'
 import ServersPage from '../pages/ServersPage.vue'
+import SitesPage from '../pages/SitesPage.vue'
 import TerminalPage from '../pages/TerminalPage.vue'
 
 // Real screens replace the placeholder as each session lands one.
 const pageOverrides: Record<string, Component> = {
   servers: ServersPage,
   benches: BenchesPage,
+  sites: SitesPage,
   jobs: JobsPage,
   terminal: TerminalPage,
 }
@@ -52,6 +54,19 @@ export const router = createRouter({
       path: '/benches/:id',
       component: () => import('../pages/BenchDetailPage.vue'),
       meta: { label: 'Bench' },
+    },
+    {
+      // Literal route before the :id param route so "new" isn't read as an id.
+      name: 'site-create',
+      path: '/sites/new',
+      component: () => import('../pages/CreateSitePage.vue'),
+      meta: { label: 'Create site' },
+    },
+    {
+      name: 'site-detail',
+      path: '/sites/:id',
+      component: () => import('../pages/SiteDetailPage.vue'),
+      meta: { label: 'Site' },
     },
     {
       name: 'job-detail',
