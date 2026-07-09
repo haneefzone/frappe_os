@@ -28,7 +28,7 @@
             </div>
             <p v-if="job" class="mt-1 text-meta text-ink-3">
               {{ targetLabel }} · priority {{ job.priority }} · started
-              {{ relativeTime(job.started_at ?? job.created_at) }}
+              <span :title="absoluteTime(job.started_at ?? job.created_at)">{{ relativeTime(job.started_at ?? job.created_at) }}</span>
               <span v-if="job.retry_count"> · {{ job.retry_count }} auto-retries</span>
             </p>
           </div>
@@ -108,7 +108,23 @@
           />
         </section>
       </div>
-      <div v-else-if="loading" class="text-label text-ink-2">Loading job…</div>
+      <div v-else-if="loading" class="grid h-full min-h-0 gap-6 lg:grid-cols-[minmax(280px,380px)_1fr]">
+        <div class="rounded-lg border border-line bg-surface p-5">
+          <div class="mb-4 h-4 w-16 animate-pulse rounded bg-raised" />
+          <div class="space-y-4">
+            <div v-for="i in 4" :key="i" class="flex gap-3">
+              <div class="h-4 w-4 flex-none animate-pulse rounded-full bg-raised" />
+              <div class="h-4 flex-1 animate-pulse rounded bg-raised" />
+            </div>
+          </div>
+        </div>
+        <div class="rounded-lg border border-line bg-surface p-5">
+          <div class="mb-3 h-4 w-20 animate-pulse rounded bg-raised" />
+          <div class="space-y-2">
+            <div v-for="i in 8" :key="i" class="h-3 animate-pulse rounded bg-raised" />
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -126,7 +142,7 @@ import JobTimeline from '../components/JobTimeline.vue'
 import LogViewer from '../components/LogViewer.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { JOB_STATUS_LABEL, isTerminal, jobStatusDot, toTimelineSteps } from '../lib/jobs'
-import { relativeTime } from '../lib/servers'
+import { absoluteTime, relativeTime } from '../lib/servers'
 import { useAuthStore } from '../stores/auth'
 
 const route = useRoute()

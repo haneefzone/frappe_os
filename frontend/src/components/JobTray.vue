@@ -48,7 +48,7 @@
             <span class="min-w-0 flex-1">
               <span class="block truncate text-label text-ink-1">{{ job.action_name }}</span>
               <span class="block truncate text-meta text-ink-3">
-                {{ targetLabel(job) }} · {{ relativeTime(job.created_at) }}
+                {{ targetLabel(job) }} · <span :title="absoluteTime(job.created_at)">{{ relativeTime(job.created_at) }}</span>
               </span>
             </span>
             <span class="shrink-0 text-meta text-ink-2">{{ JOB_STATUS_LABEL[job.status] }}</span>
@@ -95,7 +95,7 @@ import LucideListChecks from '~icons/lucide/list-checks'
 import LucideLoader2 from '~icons/lucide/loader-2'
 import type { Job } from '../api/jobs'
 import { JOB_STATUS_LABEL, jobStatusDot } from '../lib/jobs'
-import { relativeTime } from '../lib/servers'
+import { absoluteTime, relativeTime } from '../lib/servers'
 import { useJobsStore } from '../stores/jobs'
 import StatusDot from './StatusDot.vue'
 
