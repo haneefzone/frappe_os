@@ -13,6 +13,39 @@ docs/       Architecture, UI/UX spec, session roadmap
 
 Read `CLAUDE.md` first — it is the project constitution.
 
+## Install (one command)
+
+On a fresh Ubuntu 22.04 / 24.04 server:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/doosly/fdm-platform/main/install.sh | sudo bash
+```
+
+> The raw URL goes live once this repo is published to GitHub (tracked on
+> DOO-72). Until then — or on an air-gapped box — run the identical installer
+> from a checkout: `sudo bash install.sh`
+
+The installer:
+
+- installs missing prerequisites: uv (+ managed Python 3.12+), Node 20
+  (frontend build only), PostgreSQL 16 (PGDG), Redis 7;
+- installs the backend, builds the frontend, and serves both from one port;
+- generates a `.env` with per-install secrets (Fernet key, JWT secret,
+  DB password) — nothing shared, nothing committed;
+- runs migrations, seeds the admin user, starts `fdm-api` + `fdm-worker`
+  under systemd, then prints the URL and one-time admin credentials.
+
+It is **idempotent**: re-running upgrades code and dependencies, re-runs
+migrations, and restarts services without touching secrets, the database,
+or the admin password. Tunables (`FDM_HOME`, `FDM_PORT`, `FDM_ADMIN_EMAIL`,
+`FDM_DATABASE_URL`, …) are documented in the header of `install.sh`.
+
+The install serves plain HTTP; before exposing it beyond a trusted network,
+put it behind an HTTPS reverse proxy and set `COOKIE_SECURE=true` in the
+generated `backend/.env`.
+
+Everything below is the **development** setup.
+
 ## Prerequisites
 
 | Tool | Version | Why |

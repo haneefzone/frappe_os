@@ -47,6 +47,10 @@ class Settings(BaseSettings):
 
     default_tz: str = "Asia/Dubai"
 
+    # Absolute path to the built SPA (frontend/dist). Empty (dev default) =
+    # do not serve static files; the Vite dev server owns the UI instead.
+    frontend_dist: str = ""
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
