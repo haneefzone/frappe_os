@@ -14,6 +14,7 @@ Security invariants (CLAUDE.md golden rule 1 + rule 6):
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import shlex
 from collections.abc import Awaitable, Callable
@@ -160,6 +161,56 @@ class SSHService:
             stdout=(result.stdout or "") if isinstance(result.stdout, str) else "",
             stderr=(result.stderr or "") if isinstance(result.stderr, str) else "",
         )
+
+    @staticmethod
+    def _wrap_command(argv: list[str], cwd: str | None, run_as: str | None) -> str:
+        """Build the remote shell command line from a fixed argv (rule 1): argv is
+        shlex-joined; an optional `run_as` runs it as another user via `sudo -n`;
+        an optional cwd `cd`s first. No user input is ever interpolated — argv
+        elements are already validated + quoted."""
+        command = shlex.join(argv)
+        if run_as:
+            command = f"sudo -n -u {shlex.quote(run_as)} -- {command}"
+        if cwd is not None:
+            command = f"cd {shlex.quote(cwd)} && {command}"
+        return command
+
+    async def stream(
+        self,
+        conn: asyncssh.SSHClientConnection,
+        argv: list[str],
+        *,
+        cwd: str | None = None,
+        run_as: str | None = None,
+        on_line: Callable[[str, str], Awaitable[None] | None],
+        cancel_check: Callable[[], bool] | None = None,
+        timeout: float = 4 * 3600,
+    ) -> int:
+        """Run a fixed argv and stream each stdout/stderr line to `on_line`
+        (stream name, text) as it arrives. Returns the exit status.
+
+        Cancellation is best-effort: if `cancel_check()` turns true the remote
+        process is signalled (terminate) and we stop reading.
+        """
+        command = self._wrap_command(argv, cwd, run_as)
+
+        async def pump(reader, stream_name: str) -> None:
+            async for line in reader:
+                text = line.rstrip("\n")
+                result = on_line(stream_name, text)
+                if result is not None:
+                    await result
+                if cancel_check is not None and cancel_check():
+                    process.terminate()
+                    return
+
+        async with conn.create_process(command) as process:
+            await asyncio.wait_for(
+                asyncio.gather(pump(process.stdout, "stdout"), pump(process.stderr, "stderr")),
+                timeout=timeout,
+            )
+            await process.wait()
+            return process.exit_status if process.exit_status is not None else -1
 
     async def check_connection(
         self, server: Server, cred: SSHCredential, emit: Emit | None = None

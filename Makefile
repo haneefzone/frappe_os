@@ -21,7 +21,7 @@ frontend:
 	cd frontend && npm run dev
 
 worker:
-	cd backend && .venv/bin/rq worker high default low
+	cd backend && .venv/bin/python -m app.workers.worker
 
 test:
 	cd backend && .venv/bin/pytest
