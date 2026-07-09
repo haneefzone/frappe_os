@@ -86,9 +86,19 @@ import LucideChevronRight from '~icons/lucide/chevron-right'
 import LucideX from '~icons/lucide/x'
 import type { JobStep } from './types'
 
-const props = defineProps<{ steps: JobStep[] }>()
+const props = withDefaults(
+  defineProps<{
+    steps: JobStep[]
+    /** Auto-open the error area of failed steps as they appear (job detail). */
+    autoExpandFailed?: boolean
+  }>(),
+  { autoExpandFailed: false },
+)
 
 const expanded = ref(new Set<number>())
+// Failed indices we have already auto-opened, so a user re-collapsing one stays
+// collapsed instead of being forced open again on the next steps update.
+const autoOpened = new Set<number>()
 
 function toggleError(i: number) {
   const next = new Set(expanded.value)
@@ -96,6 +106,22 @@ function toggleError(i: number) {
   else next.add(i)
   expanded.value = next
 }
+
+watch(
+  () => props.steps.map((s) => s.status),
+  () => {
+    if (!props.autoExpandFailed) return
+    const next = new Set(expanded.value)
+    props.steps.forEach((s, i) => {
+      if (s.status === 'failed' && !autoOpened.has(i)) {
+        autoOpened.add(i)
+        next.add(i)
+      }
+    })
+    expanded.value = next
+  },
+  { immediate: true },
+)
 
 // Live elapsed counter — ticks once a second, only while something is running.
 const now = ref(Date.now())

@@ -9,6 +9,8 @@
         <RouterView />
       </main>
     </div>
+    <!-- Global job tray: bottom-right, present on every authenticated screen. -->
+    <JobTray />
   </div>
   <ToastHost />
 </template>
@@ -18,6 +20,7 @@ import { ref } from 'vue'
 import { useRoute } from 'vue-router'
 import AppSidebar from './components/layout/AppSidebar.vue'
 import AppTopbar from './components/layout/AppTopbar.vue'
+import JobTray from './components/JobTray.vue'
 import ToastHost from './components/ToastHost.vue'
 
 const COLLAPSE_KEY = 'fdm-sidebar-collapsed'

@@ -17,6 +17,7 @@ declare module 'vue' {
     EmptyState: typeof import('./src/components/EmptyState.vue')['default']
     EnvironmentBadge: typeof import('./src/components/EnvironmentBadge.vue')['default']
     JobTimeline: typeof import('./src/components/JobTimeline.vue')['default']
+    JobTray: typeof import('./src/components/JobTray.vue')['default']
     KPICard: typeof import('./src/components/KPICard.vue')['default']
     LogViewer: typeof import('./src/components/LogViewer.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']

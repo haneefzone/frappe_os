@@ -1,12 +1,14 @@
 import type { Component } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import { allNavItems } from '../navigation'
+import JobsPage from '../pages/JobsPage.vue'
 import PlaceholderPage from '../pages/PlaceholderPage.vue'
 import ServersPage from '../pages/ServersPage.vue'
 
 // Real screens replace the placeholder as each session lands one.
 const pageOverrides: Record<string, Component> = {
   servers: ServersPage,
+  jobs: JobsPage,
 }
 
 // One route per sidebar item; unbuilt ones render the placeholder.
@@ -33,6 +35,12 @@ export const router = createRouter({
       path: '/servers/:id',
       component: () => import('../pages/ServerDetailPage.vue'),
       meta: { label: 'Server' },
+    },
+    {
+      name: 'job-detail',
+      path: '/jobs/:id',
+      component: () => import('../pages/JobDetailPage.vue'),
+      meta: { label: 'Job' },
     },
     {
       // Living demo of the component library — not in the sidebar on purpose.

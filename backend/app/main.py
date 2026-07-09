@@ -8,6 +8,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app import __version__
 from app.api.routes.auth import router as auth_router
+from app.api.routes.job_logs import router as job_logs_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.servers import router as servers_router
 from app.config import get_settings
@@ -56,6 +57,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(servers_router)
     app.include_router(jobs_router)
+    app.include_router(job_logs_router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

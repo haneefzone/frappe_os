@@ -14,16 +14,26 @@
         <h1 class="truncate text-lg font-semibold text-ink-1">{{ server?.name ?? 'Server' }}</h1>
         <EnvironmentBadge v-if="server" :env="server.env_tag" />
       </div>
-      <Button
-        v-if="server && canManage"
-        variant="subtle"
-        theme="gray"
-        :label="testing ? 'Testing…' : 'Re-test connection'"
-        :loading="testing"
-        @click="runTest"
-      >
-        <template #prefix><LucideRefreshCw class="h-4 w-4" /></template>
-      </Button>
+      <div v-if="server && canManage" class="flex shrink-0 items-center gap-2">
+        <Button
+          variant="subtle"
+          theme="gray"
+          :label="launching ? 'Starting…' : 'Run demo job'"
+          :loading="launching"
+          @click="runDemoJob"
+        >
+          <template #prefix><LucidePlay class="h-4 w-4" /></template>
+        </Button>
+        <Button
+          variant="subtle"
+          theme="gray"
+          :label="testing ? 'Testing…' : 'Re-test connection'"
+          :loading="testing"
+          @click="runTest"
+        >
+          <template #prefix><LucideRefreshCw class="h-4 w-4" /></template>
+        </Button>
+      </div>
     </header>
 
     <div class="min-h-0 flex-1 overflow-y-auto p-8">
@@ -109,22 +119,29 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import LucideArrowLeft from '~icons/lucide/arrow-left'
 import LucideLoader2 from '~icons/lucide/loader-2'
+import LucidePlay from '~icons/lucide/play'
 import LucideRefreshCw from '~icons/lucide/refresh-cw'
+import { jobsApi } from '../api/jobs'
 import { serversApi, streamServerTest, type CheckEvent, type Server } from '../api/servers'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
 import StatusDot from '../components/StatusDot.vue'
+import { toast } from '../components/toast'
 import type { Status } from '../components/types'
 import { STATUS_LABEL, absoluteTime, relativeTime, statusDot } from '../lib/servers'
+import { ApiError } from '../api/client'
 import { useAuthStore } from '../stores/auth'
+import { useJobsStore } from '../stores/jobs'
 
 type RowStatus = 'pending' | 'running' | 'ok' | 'fail' | 'skipped'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const jobsStore = useJobsStore()
 const canManage = auth.hasPermission('server:manage')
 
 const serverId = Number(route.params.id)
+const launching = ref(false)
 const server = ref<Server | null>(null)
 const loading = ref(true)
 const loadError = ref('')
@@ -206,6 +223,32 @@ async function runTest() {
       if (row.status === 'pending' || row.status === 'running') row.status = 'skipped'
     }
     testing.value = false
+  }
+}
+
+// Launch the harmless three-step demo action against this server and jump
+// straight to its live detail page — the end-to-end proof of the job engine.
+async function runDemoJob() {
+  if (launching.value) return
+  launching.value = true
+  try {
+    const job = await jobsApi.create({
+      action_name: 'system.echo_demo',
+      server_id: serverId,
+      params: { message: 'Hello from FDM' },
+    })
+    jobsStore.merge(job)
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'A demo job is already running on this server.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not start the demo job.'
+    toast.error(message)
+  } finally {
+    launching.value = false
   }
 }
 
