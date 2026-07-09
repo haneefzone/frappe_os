@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app import __version__
 from app.api.routes.auth import router as auth_router
@@ -34,6 +35,13 @@ def create_app() -> FastAPI:
     configure_logging(settings.log_level)
 
     app = FastAPI(title=settings.app_name, version=__version__)
+
+    # SEC-M1: rewrite request.client / scheme from X-Forwarded-* ONLY when the
+    # socket peer is one of the configured trusted proxies. With the default
+    # empty list the middleware is absent, so a client-sent X-Forwarded-For can
+    # never change the login-throttle key or audit source IP.
+    if settings.trusted_proxy_ip_list:
+        app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_ip_list)
 
     app.add_middleware(
         CORSMiddleware,

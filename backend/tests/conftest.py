@@ -41,14 +41,20 @@ def fake_clock():
     return clock
 
 
-@pytest.fixture
-def throttle(fake_clock):
+def make_throttle(clock):
     settings = get_settings()
     return LoginThrottle(
         threshold=settings.login_lockout_threshold,
         lockout_seconds=settings.login_lockout_seconds,
-        clock=fake_clock,
+        email_failure_limit=settings.login_email_failure_limit,
+        email_failure_window_seconds=settings.login_email_failure_window_seconds,
+        clock=clock,
     )
+
+
+@pytest.fixture
+def throttle(fake_clock):
+    return make_throttle(fake_clock)
 
 
 @pytest.fixture
@@ -105,6 +111,31 @@ def client(db_session, seeded_users, throttle):
     app.dependency_overrides[get_login_throttle] = lambda: throttle
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def proxy_client_factory(db_session, seeded_users, fake_clock, monkeypatch):
+    """Builds a TestClient with TRUSTED_PROXY_IPS set (SEC-M1). The TestClient
+    socket peer is the literal host 'testclient' — pass that to trust the
+    peer, anything else to exercise the untrusted-peer path."""
+    clients = []
+
+    def factory(trusted_proxy_ips: str) -> TestClient:
+        monkeypatch.setenv("TRUSTED_PROXY_IPS", trusted_proxy_ips)
+        get_settings.cache_clear()
+        app = create_app()
+        shared_throttle = make_throttle(fake_clock)
+        app.dependency_overrides[get_db] = lambda: db_session
+        app.dependency_overrides[get_login_throttle] = lambda: shared_throttle
+        test_client = TestClient(app)
+        test_client.__enter__()
+        clients.append(test_client)
+        return test_client
+
+    yield factory
+    for test_client in clients:
+        test_client.__exit__(None, None, None)
+    get_settings.cache_clear()
 
 
 def login(client: TestClient, email: str, password: str = PASSWORD):

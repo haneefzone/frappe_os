@@ -41,6 +41,19 @@ class Settings(BaseSettings):
     # Login throttling: the Nth consecutive failure locks the (email, IP) pair.
     login_lockout_threshold: int = 6
     login_lockout_seconds: int = 10 * 60
+    # Per-email cross-IP backstop (SEC-M1): this many failures inside the
+    # window — from ANY combination of source IPs — lock the account for
+    # login_lockout_seconds, so rotating IPs cannot spray one account forever.
+    login_email_failure_limit: int = 20
+    login_email_failure_window_seconds: int = 3600
+
+    # Reverse proxies whose X-Forwarded-For we honour (comma-separated IPs,
+    # CIDRs, or literals). Empty (default) = trust no proxy: the throttle keys
+    # on the socket peer address and any client-sent X-Forwarded-For is
+    # ignored. Behind the deploy/nginx.conf proxy set TRUSTED_PROXY_IPS to the
+    # proxy address (127.0.0.1 when nginx runs on the same host) — never "*"
+    # on an internet-facing service (SEC-M1).
+    trusted_proxy_ips: str = ""
 
     # Comma-separated list of allowed browser origins.
     cors_origins: str = "http://localhost:5173"
@@ -54,6 +67,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def trusted_proxy_ip_list(self) -> list[str]:
+        return [host.strip() for host in self.trusted_proxy_ips.split(",") if host.strip()]
 
     @model_validator(mode="after")
     def _require_real_secrets_outside_debug(self) -> "Settings":

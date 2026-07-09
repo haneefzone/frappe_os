@@ -25,6 +25,9 @@
 #   FDM_ADMIN_EMAIL    first admin      (default admin@example.com)
 #   FDM_DATABASE_URL   use an existing PostgreSQL instead of provisioning one
 #   FDM_REDIS_URL      use an existing Redis (default redis://127.0.0.1:6379/0)
+#   FDM_TRUSTED_PROXY_IPS  reverse-proxy IPs whose X-Forwarded-For the app
+#                      trusts (default empty = none; set 127.0.0.1 when using
+#                      deploy/nginx.conf — see deploy/README.md, SEC-M1)
 #
 # Non-root runs are supported for development/CI: apt/systemd steps are
 # skipped (prerequisites must already exist), services start via nohup.
@@ -53,6 +56,7 @@ FDM_REPO_URL="${FDM_REPO_URL:-https://github.com/haneefzone/frappe_os.git}"
 FDM_BRANCH="${FDM_BRANCH:-main}"
 FDM_ADMIN_EMAIL="${FDM_ADMIN_EMAIL:-admin@example.com}"
 FDM_REDIS_URL="${FDM_REDIS_URL:-redis://127.0.0.1:6379/0}"
+FDM_TRUSTED_PROXY_IPS="${FDM_TRUSTED_PROXY_IPS:-}"
 
 BACKEND_DIR="$FDM_HOME/backend"
 FRONTEND_DIR="$FDM_HOME/frontend"
@@ -244,6 +248,8 @@ CORS_ORIGINS=http://localhost:${FDM_PORT}
 # Once you put FDM behind an HTTPS reverse proxy, set COOKIE_SECURE=true.
 COOKIE_SECURE=false
 LOG_LEVEL=INFO
+# Reverse proxies whose X-Forwarded-For to trust; empty = none (SEC-M1).
+TRUSTED_PROXY_IPS=${FDM_TRUSTED_PROXY_IPS}
 EOF
     umask 022
     if [ "$IS_ROOT" -eq 1 ]; then chown "$RUN_USER:$RUN_USER" "$ENV_FILE"; fi
