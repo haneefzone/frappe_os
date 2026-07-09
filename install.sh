@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # FDM Platform — one-command installer.
 #
-#   curl -fsSL <raw-url>/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/Duncan-and-Ross/fdm-platform/main/install.sh | sudo bash
 #
 # or from a checkout:
 #
@@ -20,7 +20,7 @@
 # Tunables (env vars, all optional):
 #   FDM_HOME           install dir      (root: /opt/fdm-platform, else ~/.local/share/fdm-platform)
 #   FDM_PORT           HTTP port        (default 8000)
-#   FDM_REPO_URL       git source       (default https://github.com/doosly/fdm-platform.git)
+#   FDM_REPO_URL       git source       (default https://github.com/Duncan-and-Ross/fdm-platform.git)
 #   FDM_BRANCH         git branch       (default main)
 #   FDM_ADMIN_EMAIL    first admin      (default admin@example.com)
 #   FDM_DATABASE_URL   use an existing PostgreSQL instead of provisioning one
@@ -49,7 +49,7 @@ else
 fi
 
 FDM_PORT="${FDM_PORT:-8000}"
-FDM_REPO_URL="${FDM_REPO_URL:-https://github.com/doosly/fdm-platform.git}"
+FDM_REPO_URL="${FDM_REPO_URL:-https://github.com/Duncan-and-Ross/fdm-platform.git}"
 FDM_BRANCH="${FDM_BRANCH:-main}"
 FDM_ADMIN_EMAIL="${FDM_ADMIN_EMAIL:-admin@example.com}"
 FDM_REDIS_URL="${FDM_REDIS_URL:-redis://127.0.0.1:6379/0}"

@@ -18,12 +18,11 @@ Read `CLAUDE.md` first — it is the project constitution.
 On a fresh Ubuntu 22.04 / 24.04 server:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/doosly/fdm-platform/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Duncan-and-Ross/fdm-platform/main/install.sh | sudo bash
 ```
 
-> The raw URL goes live once this repo is published to GitHub (tracked on
-> DOO-72). Until then — or on an air-gapped box — run the identical installer
-> from a checkout: `sudo bash install.sh`
+> On an air-gapped box, run the identical installer from a checkout instead:
+> `sudo bash install.sh`
 
 The installer:
 
