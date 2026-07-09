@@ -153,6 +153,10 @@ def retry_job(
     job = _load_job(db, job_id)
     try:
         new_job = runner.retry(db, job, created_by=user.id)
+    except RenderError as exc:
+        # A secret-bearing template can't be re-rendered from masked params
+        # (SecretParamUnresolved) — a validation problem, not a state conflict.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LockConflict as exc:

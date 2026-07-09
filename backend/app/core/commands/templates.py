@@ -26,6 +26,14 @@ class RenderError(ValueError):
     """A parameter failed validation, or is missing/unknown. Maps to HTTP 422."""
 
 
+class SecretParamUnresolved(RenderError):
+    """A template has a `secret=True` param but render() was asked to build from
+    *sanitized* params (worker re-render or manual retry), where every secret is
+    masked as `••••`. Running with that mask would be a silent security bug, so
+    we refuse loudly until secret resolution from the Fernet credential store is
+    wired at render time. Subclasses RenderError -> maps to HTTP 422."""
+
+
 class UnknownAction(KeyError):
     """No template is registered for the requested action_name. Maps to 404."""
 
@@ -98,12 +106,33 @@ def _substitute(token: str, values: dict[str, str]) -> str:
     return token.format(**values)
 
 
-def render(template: CommandTemplate, params: dict[str, object]) -> RenderedCommand:
+def render(
+    template: CommandTemplate,
+    params: dict[str, object],
+    *,
+    from_sanitized: bool = False,
+) -> RenderedCommand:
     """Validate every parameter and build the final argv + masked display.
 
     Raises RenderError on a missing/unknown/invalid parameter — nothing is
     executed unless every value passed its whitelist.
+
+    `from_sanitized=True` marks that `params` came from a persisted
+    `params_sanitized` map (worker re-render / manual retry), where secrets are
+    masked. If the template declares any secret param, that mask cannot be
+    executed — raise `SecretParamUnresolved` instead of running with `••••`.
+    Callers on the create path pass real values (from_sanitized=False) and are
+    unaffected. This guard is the tripwire for a secret-bearing template landing
+    before the Fernet secret-resolution-at-render-time work exists.
     """
+    if from_sanitized and template.secret_params:
+        raise SecretParamUnresolved(
+            f"action {template.action_name!r} declares secret parameter(s) "
+            f"{sorted(template.secret_params)} that cannot be re-rendered from "
+            "masked params; secret resolution from the credential store is not "
+            "yet wired"
+        )
+
     known = {spec.name for spec in template.params}
     unknown = set(params) - known
     if unknown:

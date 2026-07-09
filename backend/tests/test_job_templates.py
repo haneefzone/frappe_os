@@ -82,6 +82,29 @@ def test_secret_is_masked_in_display_and_sanitized_params_but_real_in_argv():
     assert rendered.secret_values == ("hunter2",)
 
 
+def test_render_from_sanitized_refuses_secret_bearing_template():
+    # DOO-94 #1: re-rendering from a masked params_sanitized map (worker /
+    # retry) must never run a secret param as `••••`. Fail loud instead.
+    from app.core.commands import SecretParamUnresolved
+
+    with pytest.raises(SecretParamUnresolved) as exc:
+        render(SECRET_TMPL, {"password": MASK}, from_sanitized=True)
+    # Names the offending param, and never leaks a value.
+    assert "password" in str(exc.value)
+    assert MASK not in str(exc.value)
+    # SecretParamUnresolved is a RenderError, so routes map it to 422.
+    assert isinstance(exc.value, RenderError)
+
+
+def test_render_from_sanitized_is_a_noop_for_secretless_templates():
+    # The guard only trips on secret params; the real re-render paths (echo /
+    # detect_tools, no secrets) keep working unchanged.
+    assert render(ECHO, {"message": "hi"}, from_sanitized=True).argv == ["echo", "hi"]
+    assert render(get_template("server.detect_tools"), {}, from_sanitized=True).argv == [
+        "true"
+    ]
+
+
 def test_render_error_never_echoes_the_offending_value():
     try:
         render(ECHO, {"message": "; rm -rf /"})

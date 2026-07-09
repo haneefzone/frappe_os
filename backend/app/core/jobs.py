@@ -26,7 +26,7 @@ from typing import Protocol
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload, sessionmaker
 
-from app.core.commands import RenderedCommand, get_template, render
+from app.core.commands import RenderedCommand, RenderError, get_template, render
 from app.core.ssh import SSHService
 from app.models import CommandJob, CommandStep, LogEntry, Server
 
@@ -255,6 +255,7 @@ class JobContextImpl:
         executor: RemoteExecutor,
         log_writer: LogWriter,
         backend: JobBackend | None,
+        attempt: int = 1,
     ) -> None:
         self._db = db
         self._job = job
@@ -263,6 +264,9 @@ class JobContextImpl:
         self._executor = executor
         self._log = log_writer
         self._backend = backend
+        # `order` is per-attempt (restarts at 1 each retry); `attempt` disambiguates
+        # steps that reuse an order across auto-retries for the timeline UI (DOO-96).
+        self._attempt = attempt
         self._order = 0
 
     def _cancelled(self) -> bool:
@@ -276,6 +280,7 @@ class JobContextImpl:
         step = CommandStep(
             job_id=self._job.id,
             name=name,
+            attempt=self._attempt,
             order=self._order,
             status="running",
             started_at=_now(),
@@ -401,11 +406,16 @@ class JobRunner:
         params: dict,
         priority: str,
         created_by: int | None,
+        _from_sanitized: bool = False,
     ) -> CommandJob:
         """Validate + persist + lock + enqueue. Raises RenderError (422),
-        UnknownAction (404) or LockConflict (409). Returns the pending job."""
+        UnknownAction (404) or LockConflict (409). Returns the pending job.
+
+        `_from_sanitized=True` (set only by `retry`) tells render() the params
+        came from a masked `params_sanitized` map, so a secret-bearing template
+        fails loud (SecretParamUnresolved) instead of running with `••••`."""
         template = get_template(action_name)  # UnknownAction if missing
-        rendered = render(template, params)  # RenderError on bad input
+        rendered = render(template, params, from_sanitized=_from_sanitized)  # RenderError
 
         job = CommandJob(
             server_id=server_id,
@@ -497,6 +507,7 @@ class JobRunner:
             params=dict(job.params_sanitized or {}),
             priority=job.priority,
             created_by=created_by,
+            _from_sanitized=True,
         )
 
     @staticmethod
@@ -538,7 +549,22 @@ class JobRunner:
                 return
 
             template = get_template(job.action_name)
-            rendered = render(template, dict(job.params_sanitized or {}))
+            try:
+                # The worker only has the masked params_sanitized to work from,
+                # so a secret-bearing template can't be re-rendered safely here
+                # yet — fail loud instead of executing with a `••••` mask.
+                rendered = render(
+                    template, dict(job.params_sanitized or {}), from_sanitized=True
+                )
+            except RenderError as exc:
+                job.status = "running"
+                job.started_at = _now()
+                db.commit()
+                breadcrumb = LogWriter(db, job.id, backend=self._backend)
+                breadcrumb.append("system", f"cannot start job: {exc}")
+                breadcrumb.flush()
+                self._to_terminal(db, job, "failure", exit_code=1)
+                return
             server = db.scalars(
                 select(Server)
                 .options(joinedload(Server.credential))
@@ -585,6 +611,9 @@ class JobRunner:
                 ctx = JobContextImpl(
                     db, job, rendered, get_template(job.action_name).run_as,
                     executor, log_writer, self._backend,
+                    # retry_count is 0 on the initial run and is bumped *before*
+                    # each retry re-enters _run_once, so attempt is 1-based here.
+                    attempt=job.retry_count + 1,
                 )
                 await action.run(ctx)
 

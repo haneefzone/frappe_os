@@ -239,8 +239,16 @@ def test_idempotent_failure_retries_up_to_three_times(sf, server_id, monkeypatch
         job = db.get(CommandJob, job_id)
         assert job.status == "failure"
         assert job.retry_count == 3  # 1 initial + 3 retries, then give up
-        steps = db.scalars(select(CommandStep).where(CommandStep.job_id == job_id)).all()
+        steps = db.scalars(
+            select(CommandStep)
+            .where(CommandStep.job_id == job_id)
+            .order_by(CommandStep.attempt, CommandStep.order)
+        ).all()
         assert len(steps) == 4  # a step per attempt
+        # DOO-96: each attempt rebuilds the context so `order` restarts at 1;
+        # `attempt` (1..4) is what disambiguates the otherwise-identical rows.
+        assert [s.attempt for s in steps] == [1, 2, 3, 4]
+        assert [s.order for s in steps] == [1, 1, 1, 1]
 
 
 def test_non_idempotent_failure_does_not_retry(sf, server_id, monkeypatch):
@@ -250,6 +258,64 @@ def test_non_idempotent_failure_does_not_retry(sf, server_id, monkeypatch):
     runner.run_job(job_id, executor_factory=fake_factory(FakeExecutor()))
     with sf() as db:
         assert db.get(CommandJob, job_id).retry_count == 0
+
+
+# -- secret-param re-render guard (DOO-94 #1) -------------------------------- #
+
+
+class NoopAction(Action):
+    async def run(self, ctx):  # pragma: no cover - guard trips before we run
+        with ctx.step("noop"):
+            pass
+
+
+def _secret_tmpl(name):
+    from app.core.commands.templates import ParamSpec
+
+    return CommandTemplate(
+        action_name=name,
+        argv=("mysql", "--password={password}"),
+        cwd=None,
+        params=(ParamSpec("password", regex=r".{1,64}", secret=True),),
+        action_class=NoopAction,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=SERVER_MANAGE,
+    )
+
+
+def test_manual_retry_of_secret_job_fails_loud_not_masked(sf, server_id, monkeypatch):
+    # create() with the real secret succeeds; the persisted params are masked.
+    patch_templates(monkeypatch, [_secret_tmpl("test.secret_job")])
+    from app.core.commands import SecretParamUnresolved
+
+    runner = make_runner(sf)
+    job_id = _create(runner, sf, server_id, "test.secret_job", {"password": "hunter2"})
+    with sf() as db:
+        job = db.get(CommandJob, job_id)
+        assert job.params_sanitized == {"password": MASK}
+        job.status = "failure"
+        db.commit()
+    # Retrying re-renders from those masked params — must refuse, not run `••••`.
+    with sf() as db, pytest.raises(SecretParamUnresolved):
+        runner.retry(db, db.get(CommandJob, job_id), created_by=None)
+
+
+def test_worker_of_secret_job_fails_terminally_with_breadcrumb(sf, server_id, monkeypatch):
+    patch_templates(monkeypatch, [_secret_tmpl("test.secret_job")])
+    runner = make_runner(sf)
+    job_id = _create(runner, sf, server_id, "test.secret_job", {"password": "hunter2"})
+
+    runner.run_job(job_id, executor_factory=fake_factory(FakeExecutor()))
+
+    with sf() as db:
+        job = db.get(CommandJob, job_id)
+        assert job.status == "failure"
+        assert job.exit_code == 1
+        logs = db.scalars(select(LogEntry).where(LogEntry.job_id == job_id)).all()
+        assert any(log.content.startswith("cannot start job:") for log in logs)
+        # The mask never leaks into the breadcrumb.
+        assert all(MASK not in log.content for log in logs)
 
 
 # -- cancellation transitions ------------------------------------------------ #

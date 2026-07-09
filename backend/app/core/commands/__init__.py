@@ -13,6 +13,7 @@ from app.core.commands.templates import (
     ParamSpec,
     RenderedCommand,
     RenderError,
+    SecretParamUnresolved,
     UnknownAction,
     render,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "ParamSpec",
     "RenderError",
     "RenderedCommand",
+    "SecretParamUnresolved",
     "UnknownAction",
     "all_templates",
     "get_template",
