@@ -28,7 +28,26 @@
 
     <div class="min-h-0 flex-1 overflow-y-auto p-8">
       <p v-if="loadError" class="text-label text-err" role="alert">{{ loadError }}</p>
-      <div v-else-if="loading" class="text-label text-ink-2">Loading…</div>
+      <div v-else-if="loading" class="grid max-w-4xl gap-6 lg:grid-cols-2">
+        <div class="rounded-lg border border-line bg-surface">
+          <div class="border-b border-line px-4 py-2.5"><div class="h-3.5 w-24 animate-pulse rounded bg-raised" /></div>
+          <div class="divide-y divide-line">
+            <div v-for="i in 8" :key="i" class="flex items-center justify-between px-4 py-2">
+              <div class="h-3 w-24 animate-pulse rounded bg-raised" />
+              <div class="h-3 w-32 animate-pulse rounded bg-raised" />
+            </div>
+          </div>
+        </div>
+        <div class="rounded-lg border border-line bg-surface">
+          <div class="border-b border-line px-4 py-2.5"><div class="h-3.5 w-28 animate-pulse rounded bg-raised" /></div>
+          <div class="divide-y divide-line">
+            <div v-for="j in 8" :key="j" class="flex items-center justify-between px-4 py-2">
+              <div class="h-3 w-20 animate-pulse rounded bg-raised" />
+              <div class="h-3 w-16 animate-pulse rounded bg-raised" />
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div v-else-if="server" class="grid max-w-4xl gap-6 lg:grid-cols-2">
         <!-- Specs -->
@@ -46,7 +65,7 @@
         <section class="rounded-lg border border-line bg-surface">
           <h2 class="border-b border-line px-4 py-2.5 text-label font-semibold text-ink-1">Detected tools</h2>
           <table class="w-full text-left">
-            <tbody class="divide-y divide-line">
+            <tbody class="divide-y divide-line" aria-live="polite" :aria-busy="testing">
               <tr v-for="tool in toolRows" :key="tool.key" class="text-label">
                 <td class="px-4 py-2">
                   <span class="flex items-center gap-2">
@@ -69,7 +88,7 @@
         <!-- Connection checks (appear while/after testing) -->
         <section v-if="hasRun" class="rounded-lg border border-line bg-surface lg:col-span-2">
           <h2 class="border-b border-line px-4 py-2.5 text-label font-semibold text-ink-1">Connection checks</h2>
-          <ul class="grid gap-x-8 gap-y-1 px-4 py-3 sm:grid-cols-2">
+          <ul class="grid gap-x-8 gap-y-1 px-4 py-3 sm:grid-cols-2" aria-live="polite" :aria-busy="testing">
             <li v-for="c in coreRows" :key="c.key" class="flex items-center gap-2 text-label">
               <LucideLoader2 v-if="c.status === 'running'" class="h-3.5 w-3.5 animate-spin text-run" />
               <StatusDot v-else :status="dotOf(c.status)" />

@@ -15,6 +15,7 @@
           appear
         >
           <aside
+            ref="el"
             class="flex h-full w-full max-w-[520px] flex-col border-l border-line bg-base shadow-xl"
             role="dialog"
             aria-modal="true"
@@ -183,7 +184,7 @@
                       @click="runTest"
                     />
                   </div>
-                  <ul class="divide-y divide-line rounded-lg border border-line">
+                  <ul class="divide-y divide-line rounded-lg border border-line" aria-live="polite" :aria-busy="testing">
                     <li
                       v-for="row in rows"
                       :key="row.key"
@@ -226,6 +227,7 @@ import {
   type CredentialInput,
   type ServerCreated,
 } from '../api/servers'
+import { useFocusTrap } from '../composables/useFocusTrap'
 import CopyField from './CopyField.vue'
 import Field from './SheetField.vue'
 import StatusDot from './StatusDot.vue'
@@ -234,6 +236,10 @@ import Wizard from './Wizard.vue'
 
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: []; created: [ServerCreated]; view: [number] }>()
+
+const el = ref<HTMLElement>()
+const { activate, deactivate } = useFocusTrap(el)
+watch(() => props.open, (open) => (open ? activate() : deactivate()))
 
 type Method = 'paste' | 'upload' | 'generate' | 'password'
 type RowStatus = 'pending' | 'running' | 'ok' | 'fail' | 'skipped'
