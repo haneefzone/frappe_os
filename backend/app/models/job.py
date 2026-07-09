@@ -15,6 +15,7 @@ from sqlalchemy import (
     JSON,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -79,20 +80,33 @@ class CommandJob(Base):
     steps: Mapped[list["CommandStep"]] = relationship(
         back_populates="job",
         cascade="all, delete-orphan",
-        order_by="CommandStep.order",
+        order_by="(CommandStep.attempt, CommandStep.order)",
     )
 
 
 class CommandStep(Base):
-    """One ordered unit of work inside a job (`with ctx.step("..."): ...`)."""
+    """One ordered unit of work inside a job (`with ctx.step("..."): ...`).
+
+    `order` is 1-based *within a single attempt* — each idempotent auto-retry
+    rebuilds the job context so `order` restarts at 1. `attempt` (1-based, =
+    `CommandJob.retry_count + 1` when the step ran) disambiguates rows that share
+    an `order` across retries, so the step-timeline UI can group by attempt and
+    still render each attempt's steps in their natural order (DOO-96).
+    """
 
     __tablename__ = "command_steps"
+    __table_args__ = (
+        # The timeline fetches one job's steps ordered by (attempt, order).
+        Index("ix_command_steps_job_attempt_order", "job_id", "attempt", "step_order"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     job_id: Mapped[int] = mapped_column(
         ForeignKey("command_jobs.id", ondelete="CASCADE"), index=True
     )
     name: Mapped[str] = mapped_column(String(200))
+    # 1-based attempt number this step belongs to (initial run = 1, each retry +1).
+    attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     # "order" is a SQL keyword; keep the ORM attribute readable, store as step_order.
     order: Mapped[int] = mapped_column("step_order", Integer)
     status: Mapped[str] = mapped_column(String(20), default="pending")

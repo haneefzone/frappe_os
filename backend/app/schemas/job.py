@@ -23,6 +23,9 @@ class JobCreate(BaseModel):
 class StepOut(BaseModel):
     id: int
     name: str
+    # 1-based auto-retry attempt this step belongs to; `order` is per-attempt, so
+    # the timeline groups by `attempt` then renders steps in `order` (DOO-96).
+    attempt: int
     order: int
     status: str
     started_at: datetime | None
@@ -34,6 +37,7 @@ class StepOut(BaseModel):
         return cls(
             id=step.id,
             name=step.name,
+            attempt=step.attempt,
             order=step.order,
             status=step.status,
             started_at=step.started_at,
