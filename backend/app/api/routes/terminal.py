@@ -24,6 +24,7 @@ Security:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import secrets
 from datetime import UTC, datetime
@@ -40,6 +41,7 @@ from app.api.deps import require
 from app.config import get_settings
 from app.core.permissions import TERMINAL_ACCESS
 from app.core.security import get_secrets_service
+from app.core.ssh import host_key_string, normalize_host_key
 from app.db import SessionLocal, get_db
 from app.models import Server, SSHCredential, User
 from app.models.terminal import TerminalSession
@@ -224,11 +226,16 @@ def _finalize(session_id: int, reason: str, started_at: datetime) -> None:
 @router.websocket("/ws")
 async def terminal_ws(websocket: WebSocket, ticket: str | None = None) -> None:
     """WebSocket bridge: ticket → SSH PTY → bidirectional byte bridge."""
+    # 1) Accept first so that close codes (4003/4004) are delivered as proper
+    #    WS Close frames rather than an HTTP 4xx rejection (which browsers see
+    #    as close code 1006).
+    await websocket.accept()
+
     if not ticket:
         await websocket.close(code=4003, reason="ticket required")
         return
 
-    # 1) Consume ticket (single-use, atomic).
+    # 2) Consume ticket (single-use, atomic).
     payload = await _consume_ticket(ticket)
     if payload is None:
         await websocket.close(code=4003, reason="invalid or expired ticket")
@@ -237,7 +244,7 @@ async def terminal_ws(websocket: WebSocket, ticket: str | None = None) -> None:
     session_id: int = payload["session_id"]
     server_id: int = payload["server_id"]
 
-    # 2) Load server + credential from DB.
+    # 3) Load server + credential from DB.
     with SessionLocal() as db:
         server = db.scalars(
             select(Server)
@@ -259,7 +266,6 @@ async def terminal_ws(websocket: WebSocket, ticket: str | None = None) -> None:
             "port": server.ssh_port,
             "username": cred.username,
             "known_hosts": None,
-            "term_type": "xterm-256color",
         }
         if cred.auth_type == "password":
             connect_options["password"] = secrets_svc.decrypt(cred.password_enc or "")
@@ -270,12 +276,13 @@ async def terminal_ws(websocket: WebSocket, ticket: str | None = None) -> None:
             )
             connect_options["client_keys"] = [private_key]
 
+        # Snapshot host-key state for B2 pinning check (must happen before db closes).
+        known_host_key: str | None = cred.known_host_key
+        cred_id: int = cred.id
+
         # Snapshot what we need from the session row.
         session_row = db.get(TerminalSession, session_id)
         started_at = session_row.started_at if session_row else datetime.now(UTC)
-
-    # 3) Accept the WebSocket.
-    await websocket.accept()
 
     settings = get_settings()
     idle_timeout = settings.terminal_idle_timeout_seconds
@@ -284,14 +291,31 @@ async def terminal_ws(websocket: WebSocket, ticket: str | None = None) -> None:
     close_reason = "disconnected"
 
     try:
-        # 4) Open AsyncSSH PTY.
+        # 4) Open AsyncSSH connection with host-key pinning (mirrors SSHService._open).
         async with asyncssh.connect(**connect_options) as ssh_conn:
+            presented = host_key_string(ssh_conn)
+            if known_host_key:
+                if not hmac.compare_digest(
+                    normalize_host_key(known_host_key), presented
+                ):
+                    await websocket.close(code=4004, reason="host key mismatch")
+                    await asyncio.to_thread(_finalize, session_id, "host_key_mismatch", started_at)
+                    return
+            else:
+                # First connect: pin the key (trust-on-first-use, same as SSHService).
+                with SessionLocal() as pin_db:
+                    cred_row = pin_db.get(SSHCredential, cred_id)
+                    if cred_row is not None and not cred_row.known_host_key:
+                        cred_row.known_host_key = presented
+                        pin_db.commit()
+
             process = await ssh_conn.create_process(
                 term_type="xterm-256color",
                 request_pty=True,
+                encoding=None,
             )
 
-            idle_timer = asyncio.get_event_loop().time()
+            idle_timer = asyncio.get_running_loop().time()
             warned = False
 
             async def read_pty() -> None:
@@ -313,7 +337,7 @@ async def terminal_ws(websocket: WebSocket, ticket: str | None = None) -> None:
             try:
                 while True:
                     # Idle check: how long since last keypress?
-                    elapsed = asyncio.get_event_loop().time() - idle_timer
+                    elapsed = asyncio.get_running_loop().time() - idle_timer
 
                     remaining = idle_timeout - elapsed
                     if remaining <= 0:
@@ -331,6 +355,13 @@ async def terminal_ws(websocket: WebSocket, ticket: str | None = None) -> None:
                             f"Session closes in {_WARN_BEFORE_SECONDS}s of inactivity.\x1b[0m\r\n"
                         )
                         await websocket.send_bytes(warn_msg.encode())
+                        # Text control frame so the UI badge/indicator can react.
+                        await websocket.send_text(
+                            json.dumps({
+                                "type": "idle_warning",
+                                "remaining_seconds": _WARN_BEFORE_SECONDS,
+                            })
+                        )
                         warned = True
 
                     # Wait for a WS message with a poll interval so idle timer fires.
@@ -347,11 +378,11 @@ async def terminal_ws(websocket: WebSocket, ticket: str | None = None) -> None:
                         close_reason = "client_disconnect"
                         break
 
-                    # Bytes = raw terminal input.
+                    # Bytes = raw terminal input; pass as-is (encoding=None on process).
                     if data.get("bytes"):
-                        idle_timer = asyncio.get_event_loop().time()
+                        idle_timer = asyncio.get_running_loop().time()
                         warned = False
-                        process.stdin.write(data["bytes"].decode("utf-8", errors="replace"))
+                        process.stdin.write(data["bytes"])
 
                     # Text = control JSON {"type":"resize","cols":N,"rows":N}
                     elif data.get("text"):

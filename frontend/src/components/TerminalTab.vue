@@ -123,9 +123,17 @@ function connect(wsUrl: string) {
     if (ev.data instanceof ArrayBuffer) {
       term.write(new Uint8Array(ev.data))
     } else if (typeof ev.data === 'string') {
-      // Check for inline idle warning injected by the backend.
-      if (ev.data.includes('[FDM] Idle for')) {
-        emit('idle-warning')
+      // Structured control frame from backend (text frame, not terminal bytes).
+      try {
+        const ctrl = JSON.parse(ev.data) as { type?: string }
+        if (ctrl.type === 'idle_warning') {
+          emit('idle-warning')
+          return
+        }
+        // Other control frame types: consume without writing to terminal.
+        if (ctrl.type) return
+      } catch {
+        // Not JSON — fall through and write to terminal as-is.
       }
       term.write(ev.data)
     }
