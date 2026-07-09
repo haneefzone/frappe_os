@@ -1,3 +1,4 @@
+import secrets
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -124,7 +125,7 @@ def refresh(request: Request, response: Response, db: DbSession) -> UserOut:
     if claims is None:
         raise HTTPException(status_code=401, detail="Session expired or invalid.")
     header = request.headers.get(CSRF_HEADER)
-    if not header or header != claims.get("csrf"):
+    if not header or not secrets.compare_digest(header, claims.get("csrf") or ""):
         raise HTTPException(status_code=403, detail="CSRF token missing or invalid.")
 
     user = db.get(User, int(claims["sub"]))

@@ -1,5 +1,6 @@
 """Auth + RBAC dependencies. Every protected router uses `require(<permission>)`."""
 
+import secrets
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
@@ -42,7 +43,7 @@ def get_current_user(request: Request, db: Annotated[Session, Depends(get_db)]) 
 
     if request.method not in _SAFE_METHODS:
         header = request.headers.get(CSRF_HEADER)
-        if not header or header != claims.get("csrf"):
+        if not header or not secrets.compare_digest(header, claims.get("csrf") or ""):
             raise HTTPException(status_code=403, detail="CSRF token missing or invalid.")
 
     user = db.get(User, int(claims["sub"]))
