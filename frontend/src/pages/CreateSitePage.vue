@@ -138,7 +138,7 @@
               </div>
             </dl>
 
-            <details class="rounded-lg border border-line bg-surface" open>
+            <details class="rounded-lg border border-line bg-surface">
               <summary class="fdm-focus cursor-pointer px-4 py-2.5 text-label font-medium text-ink-1">
                 Show exact command
               </summary>
