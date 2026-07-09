@@ -11,6 +11,9 @@
   "dependencies": {
     "@fontsource/inter": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
+    "@xterm/addon-attach": "^0.12.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "frappe-ui": "^0.1.278",
     "pinia": "^3.0.4",
     "vue": "^3.5.13",

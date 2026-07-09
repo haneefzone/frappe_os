@@ -60,6 +60,12 @@ class Settings(BaseSettings):
 
     default_tz: str = "Asia/Dubai"
 
+    # Terminal idle timeout: WS closes if no input within this window. Warning
+    # message is injected 60s before. Set via TERMINAL_IDLE_TIMEOUT_SECONDS.
+    terminal_idle_timeout_seconds: int = 15 * 60
+    # Short-lived ticket TTL (seconds). Single-use, stored in Redis.
+    terminal_ticket_ttl_seconds: int = 60
+
     # Absolute path to the built SPA (frontend/dist). Empty (dev default) =
     # do not serve static files; the Vite dev server owns the UI instead.
     frontend_dist: str = ""

@@ -4,11 +4,13 @@ import { allNavItems } from '../navigation'
 import JobsPage from '../pages/JobsPage.vue'
 import PlaceholderPage from '../pages/PlaceholderPage.vue'
 import ServersPage from '../pages/ServersPage.vue'
+import TerminalPage from '../pages/TerminalPage.vue'
 
 // Real screens replace the placeholder as each session lands one.
 const pageOverrides: Record<string, Component> = {
   servers: ServersPage,
   jobs: JobsPage,
+  terminal: TerminalPage,
 }
 
 // One route per sidebar item; unbuilt ones render the placeholder.
