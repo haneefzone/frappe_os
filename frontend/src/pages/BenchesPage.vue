@@ -131,7 +131,7 @@
                     </button>
                     <div
                       v-if="openPorts === bench.id"
-                      class="absolute left-0 top-6 z-10 w-52 rounded-lg border border-line bg-raised p-3 shadow-lg"
+                      class="absolute left-0 top-6 z-10 w-52 rounded-lg border border-line-strong bg-raised p-3"
                     >
                       <dl class="space-y-1">
                         <div v-for="p in ports(bench)" :key="p.label" class="flex justify-between text-meta">

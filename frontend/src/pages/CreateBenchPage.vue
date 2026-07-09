@@ -22,9 +22,14 @@
         >
           <!-- 1. Server -->
           <template #step-server>
-            <p v-if="!servers.length" class="text-label text-ink-2">
-              No servers registered yet. Add a server first.
-            </p>
+            <EmptyState
+              v-if="!servers.length"
+              :icon="LucideServer"
+              title="No servers yet"
+              message="Register an Ubuntu server before you can create a bench on it."
+              cta-label="Add a server"
+              @cta="router.push('/servers')"
+            />
             <div v-else class="space-y-2">
               <label
                 v-for="s in servers"
@@ -215,6 +220,7 @@ import { Button } from 'frappe-ui'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import LucideRadar from '~icons/lucide/radar'
+import LucideServer from '~icons/lucide/server'
 import { ApiError } from '../api/client'
 import {
   benchesApi,
@@ -225,6 +231,7 @@ import {
 } from '../api/benches'
 import { streamJobLogs } from '../api/jobs'
 import { serversApi, type Server } from '../api/servers'
+import EmptyState from '../components/EmptyState.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { toast } from '../components/toast'
