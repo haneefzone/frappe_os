@@ -30,7 +30,7 @@ Reference: `CLAUDE.md` (rules), `docs/implementation-plan.md` (architecture), `d
   *Carry-in (DOO-94 #2 → owned by DOO-96):* on idempotent auto-retry, each attempt restarts `CommandStep.order` at 1, so a 3-step action retried writes orders 1,2,3,1,2,3 — the step-timeline UI can't tell attempts apart. DOO-96 adds a 1-based `CommandStep.attempt` discriminator (Alembic migration + `StepOut.attempt`); build the timeline to group by `attempt` then render each attempt's steps in `order`.
 - [ ] **1.5 Browser SSH terminal.** POST /terminal/sessions issues short-lived ticket; WS bridges xterm.js ↔ AsyncSSH PTY; resize handling; multiple tabs; context bar; idle timeout; Developer+ only; audit row per session.
   *Accept:* open terminal to the VM, run `htop`, resize works, idle disconnect fires, session appears in audit log.
-- [ ] **1.6 Bench discovery & list.** Discovery job: scan for benches, parse `sites/common_site_config.json` (ports), `bench version`; Bench model + list UI grouped by server with version chips and port map.
+- [x] **1.6 Bench discovery & list.** Discovery job: scan for benches, parse `sites/common_site_config.json` (ports), `bench version`; Bench model + list UI grouped by server with version chips and port map.
   *Accept:* existing v15/v16 benches on the VM appear with correct versions and ports.
 - [ ] **1.7 Bench create.** Wizard (server → version radio cards showing the matrix → streamed pre-flight job: uv/node/mariadb/wkhtmltopdf present, ports free, disk → name/path → review with exact commands → job). Encode version matrix + gotchas #1–#6 from CLAUDE.md.
   *Accept:* create a fresh v16 bench on the VM end-to-end from the UI with live logs; pre-flight blocks when uv is missing.
