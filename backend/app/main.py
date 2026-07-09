@@ -8,6 +8,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app import __version__
 from app.api.routes.auth import router as auth_router
+from app.api.routes.benches import router as benches_router
 from app.api.routes.job_logs import router as job_logs_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.servers import router as servers_router
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
     app.include_router(auth_router)
     app.include_router(servers_router)
+    app.include_router(benches_router)
     app.include_router(jobs_router)
     app.include_router(job_logs_router)
     app.include_router(terminal_router)
