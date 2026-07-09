@@ -34,6 +34,7 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from app.core.commands.templates import has_dotdot_segment
 from app.core.discovery import PATH_RE, DiscoveryError
 from app.core.version_matrix import MatrixEntry, get_entry
 
@@ -107,6 +108,8 @@ def disk_argv(path: str) -> list[str]:
     and passed as its own argv element."""
     if not PATH_RE.match(path):
         raise DiscoveryError(f"path {path!r} is not a valid absolute path")
+    if has_dotdot_segment(path):
+        raise DiscoveryError(f"path {path!r} must not contain '..' segments")
     return ["df", "-B1", "--output=avail", path]
 
 

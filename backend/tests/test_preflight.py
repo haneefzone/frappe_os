@@ -5,9 +5,13 @@ the create orchestration relies on to gate `bench init`."""
 
 import asyncio
 
+import pytest
+
+from app.core.discovery import DiscoveryError
 from app.core.jobs import CaptureResult
 from app.core.preflight import (
     DEFAULT_BENCH_PORTS,
+    disk_argv,
     evaluate_disk,
     evaluate_mariadb,
     evaluate_node,
@@ -23,6 +27,20 @@ from app.core.preflight import (
     wkhtmltopdf_is_patched,
 )
 from app.core.version_matrix import get_entry
+
+# -- command builders -------------------------------------------------------- #
+
+
+def test_disk_argv_builds_df_command():
+    assert disk_argv("/home/frappe") == ["df", "-B1", "--output=avail", "/home/frappe"]
+
+
+def test_disk_argv_rejects_bad_and_dotdot_paths():
+    with pytest.raises(DiscoveryError):
+        disk_argv("relative/path")
+    with pytest.raises(DiscoveryError, match="'\\.\\.'"):  # DOO-107
+        disk_argv("/home/frappe/../etc")
+
 
 # -- pure parsers ------------------------------------------------------------ #
 

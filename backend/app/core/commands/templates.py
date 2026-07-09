@@ -22,6 +22,18 @@ from dataclasses import dataclass, field
 MASK = "••••"
 
 
+def has_dotdot_segment(path: str) -> bool:
+    """True if any '/'-delimited segment of ``path`` is exactly ``..``.
+
+    The absolute-path allowlists (`ABS_PATH`, discovery's `PATH_RE`) permit `.`
+    and `/`, so a validated path can still climb out of its intended parent via
+    `..` even though no shell metacharacter can pass. This is not an injection
+    (the path is always its own argv element) but it defeats the "stays under
+    the given parent" intent, so path validators reject it at the boundary.
+    """
+    return any(seg == ".." for seg in path.split("/"))
+
+
 class RenderError(ValueError):
     """A parameter failed validation, or is missing/unknown. Maps to HTTP 422."""
 
@@ -51,6 +63,9 @@ class ParamSpec:
     enum: tuple[str, ...] | None = None
     secret: bool = False
     required: bool = True
+    # For path params: reject `..` segments even though the regex allows `.`/`/`,
+    # so a validated path cannot traverse out of its intended parent directory.
+    is_path: bool = False
 
     def validate(self, value: str) -> str:
         if self.enum is not None and value not in self.enum:
@@ -61,6 +76,10 @@ class ParamSpec:
             # Deliberately do NOT echo the offending value — it may be a secret,
             # and error messages must never leak shell-injection attempts back.
             raise RenderError(f"parameter {self.name!r} contains disallowed characters")
+        if self.is_path and has_dotdot_segment(value):
+            raise RenderError(
+                f"parameter {self.name!r} must not contain '..' path segments"
+            )
         return value
 
 

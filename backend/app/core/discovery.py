@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.commands.templates import has_dotdot_segment
 from app.models.bench import Bench
 
 # Base paths scanned in addition to the SSH user's home (`$HOME`, resolved on
@@ -131,6 +132,8 @@ def validate_base_paths(base_paths: list[str] | None) -> list[str]:
         p = (raw or "").strip().rstrip("/") or "/"
         if not PATH_RE.match(p):
             raise DiscoveryError(f"base path {raw!r} is not a valid absolute path")
+        if has_dotdot_segment(p):
+            raise DiscoveryError(f"base path {raw!r} must not contain '..' segments")
         if p not in seen:
             seen.append(p)
     return seen
@@ -144,6 +147,8 @@ def build_inventory_argv(base_paths: list[str]) -> list[str]:
 def build_inspect_argv(bench_path: str) -> list[str]:
     if not PATH_RE.match(bench_path):
         raise DiscoveryError(f"bench path {bench_path!r} is not a valid absolute path")
+    if has_dotdot_segment(bench_path):
+        raise DiscoveryError(f"bench path {bench_path!r} must not contain '..' segments")
     return ["bash", "-c", INSPECT_SCRIPT, "_", bench_path]
 
 

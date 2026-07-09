@@ -143,9 +143,18 @@ def test_validate_base_paths_defaults_and_dedups():
     assert validate_base_paths(["/opt/", "/opt", "/srv"]) == ["/opt", "/srv"]
 
 
+@pytest.mark.parametrize("bad", ["/home/../opt", "/..", "/opt/.."])
+def test_validate_base_paths_rejects_dotdot(bad):
+    # DOO-107: keep discovery consistent with the create/preflight path guard.
+    with pytest.raises(DiscoveryError, match="'\\.\\.'"):
+        validate_base_paths([bad])
+
+
 def test_build_inspect_argv_rejects_bad_path():
     with pytest.raises(DiscoveryError):
         build_inspect_argv("/home/`whoami`")
+    with pytest.raises(DiscoveryError, match="'\\.\\.'"):
+        build_inspect_argv("/home/frappe/../etc")
 
 
 # -- gather (SSH half over a fake capture) ----------------------------------- #

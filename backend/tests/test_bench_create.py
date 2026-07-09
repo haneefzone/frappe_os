@@ -206,6 +206,32 @@ def test_bench_create_rejects_malicious_paths(bad_path):
         render(get_template("bench.create"), params)
 
 
+@pytest.mark.parametrize(
+    "bad_path",
+    ["/home/frappe/../etc", "/home/../root", "/..", "/home/frappe/..", "/../"],
+)
+def test_bench_create_rejects_dotdot_paths(bad_path):
+    # DOO-107: the path allowlist permits `.` and `/`, so `..` traversal must be
+    # rejected explicitly even though it is not a shell-injection vector.
+    params = {"frappe_version": "16", "name": "ok", "path": bad_path}
+    with pytest.raises(RenderError, match="'\\.\\.'"):
+        render(get_template("bench.create"), params)
+    # Same guard on the raw init template and the read-only pre-flight.
+    with pytest.raises(RenderError, match="'\\.\\.'"):
+        render(get_template("bench.init"), {"branch": "version-16", "name": "ok", "path": bad_path})
+    with pytest.raises(RenderError, match="'\\.\\.'"):
+        render(get_template("bench.preflight"), {"frappe_version": "16", "path": bad_path})
+
+
+def test_bench_create_allows_dotfile_paths():
+    # A single-dot segment or a dotfile dir name is fine — only `..` is refused.
+    rc = render(
+        get_template("bench.create"),
+        {"frappe_version": "16", "name": "ok", "path": "/home/.frappe/benches"},
+    )
+    assert rc.params_sanitized["path"] == "/home/.frappe/benches"
+
+
 def test_bench_create_rejects_unknown_version():
     params = {"frappe_version": "17", "name": "ok", "path": "/home/frappe"}
     with pytest.raises(RenderError):

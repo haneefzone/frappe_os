@@ -105,7 +105,7 @@ register(
         cwd=None,
         params=(
             ParamSpec("frappe_version", enum=SUPPORTED_MAJORS),
-            ParamSpec("path", regex=ABS_PATH),
+            ParamSpec("path", regex=ABS_PATH, is_path=True),
         ),
         action_class=BenchPreflightAction,
         idempotent=True,
@@ -126,7 +126,7 @@ register(
         params=(
             ParamSpec("branch", enum=SUPPORTED_BRANCHES),
             ParamSpec("name", regex=BENCH_NAME),
-            ParamSpec("path", regex=ABS_PATH),
+            ParamSpec("path", regex=ABS_PATH, is_path=True),
         ),
         action_class=CreateBenchAction,  # unused directly; see note above.
         idempotent=False,  # creating a bench is not safely auto-retried.
@@ -146,7 +146,7 @@ register(
         params=(
             ParamSpec("frappe_version", enum=SUPPORTED_MAJORS),
             ParamSpec("name", regex=BENCH_NAME),
-            ParamSpec("path", regex=ABS_PATH),
+            ParamSpec("path", regex=ABS_PATH, is_path=True),
         ),
         action_class=CreateBenchAction,
         idempotent=False,
