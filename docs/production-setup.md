@@ -100,20 +100,40 @@ extra grant.
 writable by a non-root user — otherwise the single-command drop-in would be a
 privilege-escalation vector. A stock Frappe host installs `bench` under the bench
 user's home (e.g. `/home/frappe/.local/bin/bench`), which **fails this check**.
-On such a host, install bench into a **root-owned** location so the path named in
-the drop-in cannot be rewritten by the bench user, **once per server, as root**:
+On such a host, provide a bench whose **binary *and* its interpreter are
+root-owned**, so the path named in the drop-in cannot be rewritten by the bench
+user, **once per server, as root**.
+
+> **Do not just copy the wrapper.** On a uv-installed host `bench` is a
+> console-script whose shebang points at the bench user's interpreter, e.g.
+> `#!/home/frappe/.local/share/uv/tools/frappe-bench/bin/python`. Copying only
+> that wrapper to a root-owned path (`sudo install … "$(command -v bench)"
+> /usr/local/bin/bench`) makes it **pass `assert_secure_path`** — the file and its
+> ancestors are root-owned — while, run as root, it still execs the
+> **bench-user-writable interpreter**, leaving the substituted-code hole wide open
+> (see the residual note below). Pin a bench backed by a root-owned interpreter
+> instead.
 
 ```bash
-# Install bench to a root-owned bin on the fixed SECURE_PATH (auto-discovered),
-# owned by root and not writable by the bench user:
-sudo install -m 0755 -o root -g root "$(command -v bench)" /usr/local/bin/bench
+# Install bench into a root-owned virtualenv so BOTH the launcher and the
+# interpreter its shebang targets are owned by root and not bench-user-writable.
+# (The venv path is on the fixed SECURE_PATH once you pin it in step two.)
+sudo python3 -m venv /opt/fdm-bench            # root-owned interpreter + venv
+sudo /opt/fdm-bench/bin/pip install --upgrade pip frappe-bench
+# /opt/fdm-bench/bin/bench now has a shebang into /opt/fdm-bench/bin/python,
+# both root-owned. Verify: head -1 /opt/fdm-bench/bin/bench && ls -l "$(readlink -f /opt/fdm-bench/bin/python)"
 
-# …or pin an already-root-owned absolute bench path explicitly:
+# Pin that absolute, root-owned bench path explicitly:
 sudo install -d -m 0755 -o root -g root /etc/fdm-platform
-echo /usr/local/bin/bench | sudo tee /etc/fdm-platform/bench-bin
+echo /opt/fdm-bench/bin/bench | sudo tee /etc/fdm-platform/bench-bin
 sudo chown root:root /etc/fdm-platform/bench-bin
 sudo chmod 0644 /etc/fdm-platform/bench-bin
 ```
+
+`assert_secure_path` checks the launcher and its ancestor directories; it does
+**not** follow the shebang. It is therefore your responsibility to ensure the
+interpreter behind that launcher is root-owned too — copying a stock wrapper
+satisfies the check without satisfying the intent.
 
 > **Scope of this check (and its inherent limit).** The hardening removes the
 > *avoidable* risk: the sudoers line can no longer name a caller-chosen or
@@ -124,8 +144,13 @@ sudo chmod 0644 /etc/fdm-platform/bench-bin
 > `bench setup production` and was the accepted Phase 2.5 tradeoff; keep it
 > bounded the way DOO-131 does — the grant is single-command and revoked in the
 > job's `finally`, never standing. Do **not** paper over the check with a
-> root-owned wrapper that `exec`s a bench-user-writable target: that satisfies
-> the path check while leaving the substituted-code hole wide open.
+> root-owned wrapper that `exec`s a bench-user-writable target (e.g. copying the
+> stock console-script to `/usr/local/bin/bench` — its shebang still points at the
+> bench user's interpreter): that satisfies the path check while leaving the
+> substituted-code hole wide open. Pin a bench whose interpreter is root-owned
+> too, per the install step above — that closes the wrapper-swap vector; only the
+> *inherent* "root runs bench-owned code" residual (when the interpreter itself is
+> legitimately the bench user's) remains, and that is the accepted 2.5 tradeoff.
 
 ## Rollback
 
