@@ -162,6 +162,30 @@ class SSHService:
             stderr=(result.stderr or "") if isinstance(result.stderr, str) else "",
         )
 
+    async def stream_file(
+        self,
+        server: Server,
+        cred: SSHCredential,
+        path: str,
+        *,
+        chunk_size: int = 65536,
+    ):
+        """Yield the raw bytes of a remote file over SSH (`cat`), in chunks — for
+        streaming a backup artifact to the browser without buffering the whole
+        file (session 1.11 download endpoint). `path` is an absolute artifact path
+        the platform itself recorded; it is still shell-quoted as its own argv.
+        Binary-safe: the process uses no text decoding."""
+        conn = await self._open(server, cred)
+        self._pool[server.id] = conn
+        command = f"cat -- {shlex.quote(path)}"
+        async with conn.create_process(command, encoding=None) as process:
+            while True:
+                chunk = await process.stdout.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+            await process.wait()
+
     @staticmethod
     def _wrap_command(argv: list[str], cwd: str | None, run_as: str | None) -> str:
         """Build the remote shell command line from a fixed argv (rule 1): argv is

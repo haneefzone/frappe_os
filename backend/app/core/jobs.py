@@ -297,6 +297,10 @@ class JobContextImpl:
     def server_id(self) -> int:
         return self._job.server_id
 
+    @property
+    def job_id(self) -> int:
+        return self._job.id
+
     def _cancelled(self) -> bool:
         return self._backend is not None and self._backend.is_cancel_requested(self._job.id)
 

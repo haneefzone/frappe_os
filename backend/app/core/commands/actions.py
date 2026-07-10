@@ -24,6 +24,9 @@ class JobContext(Protocol):
     # The server this job runs against; inventory actions (bench discovery) key
     # their upserts on it. Command actions can ignore it.
     server_id: int
+    # This job's id — actions that write rows referencing the job (e.g. a Backup
+    # row's `taken_by_job_id`) read it; command actions can ignore it.
+    job_id: int
 
     @property
     def session(self):
@@ -282,6 +285,19 @@ def _load_bench(ctx: JobContext, bench_path: str):
         select(Bench).where(
             Bench.server_id == ctx.server_id, Bench.path == bench_path
         )
+    ).first()
+
+
+def _load_site(ctx: JobContext, bench, site_name: str):
+    """Fetch the Site row for a bench + name, or None (bench may be None)."""
+    if bench is None:
+        return None
+    from sqlalchemy import select
+
+    from app.models.site import Site
+
+    return ctx.session.scalars(
+        select(Site).where(Site.bench_id == bench.id, Site.name == site_name)
     ).first()
 
 
@@ -880,14 +896,16 @@ class SiteMaintenanceAction(Action):
 
 
 class SiteBackupAction(Action):
-    """`site.backup` — `bench --site X backup` (db-only, lightweight). Registered
-    so the update orchestrator renders the safety backup through the safe
-    registry. The full backup engine (artifact parsing, Backup rows, checksums)
-    lands in session 1.11; here it only runs the command as a safety pre-step."""
+    """`site.backup_db` / `site.backup_files` — the raw `bench backup` command.
+
+    Registered so the bench.update safety pre-step and the 1.11 BackupAction
+    engine render the real backup command through the safe registry. Runs the
+    single command as one step (no artifact parsing / Backup row — that is the
+    engine's job); not launched on its own path."""
 
     async def run(self, ctx: JobContext) -> None:
         site = ctx.rendered.params_sanitized["site"]
-        with ctx.step(f"Backup {site} (db-only)"):
+        with ctx.step(f"Backup {site}"):
             await ctx.emit(f"$ {ctx.rendered.display}")
             code = await ctx.stream(ctx.rendered.argv, cwd=ctx.rendered.cwd)
             if code != 0:
@@ -1058,7 +1076,7 @@ class BenchUpdateAction(Action):
                     )
                 for site in sites:
                     bkp = render(
-                        get_template("site.backup"),
+                        get_template("site.backup_db"),
                         {"site": site.name, "bench_path": bench_path},
                     )
                     await ctx.emit(f"$ {bkp.display}")
@@ -1075,6 +1093,366 @@ class BenchUpdateAction(Action):
                 code = await ctx.stream(ctx.rendered.argv, cwd=ctx.rendered.cwd)
                 if code != 0:
                     raise RuntimeError(f"bench update exited with status {code}")
+        finally:
+            if started_redis:
+                await _stop_dev_redis(ctx, queue_port, cache_port)
+
+
+# --------------------------------------------------------------------------- #
+# Backup & guided restore (session 1.11)
+# --------------------------------------------------------------------------- #
+
+
+async def _run_backup(
+    ctx: JobContext,
+    *,
+    site: str,
+    bench_path: str,
+    bench,
+    with_files: bool,
+    backup_id: str | None = None,
+    step_label: str | None = None,
+):
+    """Run `bench backup [--with-files]` and record a `Backup` row from the
+    parsed artifacts. Shared by `BackupAction` (the standalone backup engine) and
+    `RestoreAction` (its automatic pre-restore backup). Assumes the dev-bench
+    Redis dance is already handled by the caller.
+
+    Returns the (updated) Backup row, or None if the site/bench isn't in
+    inventory yet (the artifacts still get captured and logged, just not stored).
+    """
+    from app.core import backups as bk
+    from app.core.commands import get_template, render
+    from app.models.backup import Backup
+
+    backup_type = "with-files" if with_files else "db"
+    row = ctx.session.get(Backup, int(backup_id)) if backup_id else None
+    site_row = _load_site(ctx, bench, site)
+    if row is None and site_row is not None and bench is not None:
+        row = bk.create_pending_backup(
+            ctx.session,
+            site_id=site_row.id,
+            bench_id=bench.id,
+            backup_type=backup_type,
+            taken_by_job_id=ctx.job_id,
+        )
+
+    tmpl = "site.backup_files" if with_files else "site.backup_db"
+    cmd = render(get_template(tmpl), {"site": site, "bench_path": bench_path})
+    label = step_label or f"Back up {site} ({'with files' if with_files else 'db-only'})"
+    try:
+        with ctx.step(label):
+            await ctx.emit(f"$ {cmd.display}")
+            code = await ctx.stream(cmd.argv, cwd=cmd.cwd)
+            if code != 0:
+                raise RuntimeError(f"bench backup exited with status {code}")
+
+        with ctx.step("Capture backup artifacts"):
+            res = await ctx.capture(
+                ["bash", "-c", bk.ARTIFACT_INSPECT_SCRIPT, "_", site], cwd=bench_path
+            )
+            parsed = bk.parse_artifacts(res.stdout)
+            frappe_version = getattr(bench, "frappe_version", None) if bench else None
+            produced_type = "with-files" if parsed.has_files else "db"
+            if row is not None:
+                bk.record_backup(
+                    ctx.session,
+                    backup=row,
+                    parsed=parsed,
+                    backup_type=produced_type,
+                    frappe_version=frappe_version,
+                )
+            total_mb = parsed.total_size / (1024 * 1024)
+            await ctx.emit(
+                f"Captured {len(parsed.artifacts)} artifact(s), "
+                f"{total_mb:.1f} MB total; sha256 recorded per artifact."
+            )
+            for art in parsed.artifacts:
+                await ctx.emit(
+                    f"  {art.kind}: {art.path} "
+                    f"({art.size_bytes} B, sha256 {art.checksum_sha256[:12]}…)"
+                )
+    except Exception:
+        # Leave a visible failed record instead of a vanished backup.
+        if row is not None:
+            row.status = "failed"
+            ctx.session.commit()
+        raise
+    return row
+
+
+class BackupAction(Action):
+    """`site.backup` — the full backup engine (session 1.11).
+
+    Detects dev vs production, runs the dev-bench Redis dance (gotcha #3) around
+    `bench backup [--with-files]`, then inspects the site's backups dir to capture
+    each artifact's absolute path, size and sha256 and record a `Backup` row. The
+    API pre-creates a `pending` Backup row and passes its id so a failed backup
+    still leaves a visible failed record. Non-idempotent: one row per run."""
+
+    async def run(self, ctx: JobContext) -> None:
+        params = ctx.rendered.params_sanitized
+        site = params["site"]
+        bench_path = params["bench_path"]
+        with_files = params.get("with_files") == "1"
+        backup_id = params.get("backup_id")
+
+        bench = _load_bench(ctx, bench_path)
+        queue_port, cache_port = _redis_ports(bench)
+        is_dev = await _detect_bench_mode(ctx, bench_path)
+
+        started_redis = False
+        try:
+            if is_dev:
+                await _start_dev_redis(ctx, bench_path)
+                started_redis = True
+            await _run_backup(
+                ctx,
+                site=site,
+                bench_path=bench_path,
+                bench=bench,
+                with_files=with_files,
+                backup_id=backup_id,
+            )
+        finally:
+            if started_redis:
+                await _stop_dev_redis(ctx, queue_port, cache_port)
+
+
+class ValidateBackupAction(Action):
+    """`backup.validate` — re-verify a backup's integrity (session 1.11).
+
+    Loads the Backup row, recomputes the sha256 of every stored artifact on the
+    server, compares it to what was recorded, and reports the type/version.
+    Read-only (no server writes, no Redis); emits a machine-readable
+    `VALIDATE_RESULT <json>` line the restore wizard tails before letting the
+    operator continue. Idempotent: a transient SSH blip auto-retries."""
+
+    async def run(self, ctx: JobContext) -> None:
+        import json
+
+        from app.core import backups as bk
+        from app.models.backup import Backup
+
+        params = ctx.rendered.params_sanitized
+        backup_id = int(params["backup_id"])
+        backup = ctx.session.get(Backup, backup_id)
+        if backup is None:
+            with ctx.step("Load backup"):
+                await ctx.emit(f"Backup #{backup_id} not found.")
+                raise RuntimeError(f"backup {backup_id} not found")
+
+        paths = [a.get("path", "") for a in (backup.artifacts or []) if a.get("path")]
+        verdicts: list = []
+        with ctx.step("Verify artifact checksums"):
+            if not paths:
+                await ctx.emit("This backup has no recorded artifacts to verify.")
+            else:
+                res = await ctx.capture(
+                    ["bash", "-c", bk.CHECKSUM_VERIFY_SCRIPT, "_", *paths]
+                )
+                recomputed = bk.parse_checksums(res.stdout)
+                verdicts = bk.verify_backup(backup, recomputed)
+                for v in verdicts:
+                    icon = "✓" if v.ok else ("✗" if v.actual is not None else "?")
+                    state = (
+                        "match" if v.ok else ("MISSING" if v.actual is None else "MISMATCH")
+                    )
+                    await ctx.emit(f"[{icon}] {v.kind}: {state} ({v.path})")
+
+        all_ok = bool(verdicts) and all(v.ok for v in verdicts)
+        result = {
+            "backup_id": backup_id,
+            "type": backup.type,
+            "frappe_version": backup.frappe_version,
+            "size_bytes": backup.size_bytes,
+            "artifact_count": len(paths),
+            "all_ok": all_ok,
+            "artifacts": [
+                {"kind": v.kind, "ok": v.ok, "missing": v.actual is None}
+                for v in verdicts
+            ],
+        }
+        await ctx.emit("VALIDATE_RESULT " + json.dumps(result), stream="result")
+        await ctx.emit(
+            "Backup verified — all checksums match."
+            if all_ok
+            else "Backup verification found problems — see the artifact lines above."
+        )
+
+
+class RestoreAction(Action):
+    """`site.restore` — the guided restore orchestrator (session 1.11, gotcha #7).
+
+    One non-idempotent job locked on the target site. Ordered steps:
+      1. (new_site mode) create the target site with `bench new-site` first;
+      2. (target exists) an AUTOMATIC pre-restore backup, with files, recorded as
+         a Backup row so it is visible in the timeline and recoverable;
+      3. `bench --site X --force restore <db> [--with-*-files]`;
+      4. copy the source `encryption_key` from the backup's config artifact into
+         the target site_config (`bench set-config encryption_key`);
+      5. `bench --site X migrate` — gotcha #7 exactly;
+      6. mark the source backup `restore_tested` and register the target site.
+
+    All wrapped once in the dev-bench Redis dance. Non-idempotent: a restore is
+    destructive and is never auto-retried on top of a half-restored site."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import backups as bk
+        from app.core.commands import get_template, render
+        from app.models.backup import Backup
+
+        params = ctx.rendered.params_sanitized
+        secrets = ctx.rendered.secret_map
+        site = params["site"]
+        bench_path = params["bench_path"]
+        mode = params["mode"]
+        with_files = params.get("with_files") == "1"
+        backup_id = params.get("backup_id")
+        db_path = params["db_path"]
+        public_files = params.get("public_files")
+        private_files = params.get("private_files")
+        config_path = params.get("config_path")
+
+        bench = _load_bench(ctx, bench_path)
+        queue_port, cache_port = _redis_ports(bench)
+        is_dev = await _detect_bench_mode(ctx, bench_path)
+
+        started_redis = False
+        try:
+            if is_dev:
+                await _start_dev_redis(ctx, bench_path)
+                started_redis = True
+
+            # 1) new_site: create the target first (gotcha #4), then restore into it.
+            if mode == "new_site":
+                admin_pw = secrets.get("admin_pw")
+                db_root_pw = secrets.get("db_root_pw")
+                if not admin_pw or not db_root_pw:
+                    raise RuntimeError(
+                        "restoring into a new site needs an admin password and the "
+                        "server's MariaDB root password"
+                    )
+                new_site = render(
+                    get_template("site.new"),
+                    {
+                        "site": site,
+                        "db_root_pw": db_root_pw,
+                        "admin_pw": admin_pw,
+                        "bench_path": bench_path,
+                    },
+                )
+                with ctx.step("Create target site (bench new-site)"):
+                    await ctx.emit(f"$ {new_site.display}")
+                    code = await ctx.stream(new_site.argv, cwd=new_site.cwd)
+                    if code != 0:
+                        raise RuntimeError(f"bench new-site exited with status {code}")
+            else:
+                # 2) Target exists → automatic pre-restore backup FIRST (with files),
+                #    recorded as its own Backup row and visible in the timeline.
+                await ctx.emit(
+                    "Target site already exists — taking an automatic pre-restore "
+                    "backup before overwriting it."
+                )
+                try:
+                    await _run_backup(
+                        ctx,
+                        site=site,
+                        bench_path=bench_path,
+                        bench=bench,
+                        with_files=True,
+                        step_label="Pre-restore backup (with files)",
+                    )
+                except Exception as exc:  # noqa: BLE001 — no restore without a safety net
+                    raise RuntimeError(
+                        f"pre-restore backup failed ({exc}); not restoring over the site"
+                    ) from exc
+
+            # 3) The restore itself (db, plus files when the backup carried them).
+            if with_files and public_files and private_files:
+                rst = render(
+                    get_template("site.restore_files"),
+                    {
+                        "site": site,
+                        "bench_path": bench_path,
+                        "db_path": db_path,
+                        "public_files": public_files,
+                        "private_files": private_files,
+                    },
+                )
+                restore_label = "Restore database + files"
+            else:
+                rst = render(
+                    get_template("site.restore_db"),
+                    {"site": site, "bench_path": bench_path, "db_path": db_path},
+                )
+                restore_label = "Restore database"
+            with ctx.step(restore_label):
+                await ctx.emit(f"$ {rst.display}")
+                code = await ctx.stream(rst.argv, cwd=rst.cwd)
+                if code != 0:
+                    raise RuntimeError(f"bench restore exited with status {code}")
+
+            # 4) gotcha #7: copy the source encryption_key into the target config.
+            with ctx.step("Copy encryption_key into target site_config (gotcha #7)"):
+                if not config_path:
+                    await ctx.emit(
+                        "No config artifact in this backup — the source site had no "
+                        "site_config backup; skipping the encryption_key copy."
+                    )
+                else:
+                    res = await ctx.capture(["cat", config_path])
+                    key = bk.parse_encryption_key(res.stdout)
+                    if not key:
+                        await ctx.emit(
+                            "Source config backup carried no encryption_key — "
+                            "nothing to copy (the site had none)."
+                        )
+                    else:
+                        setcfg = render(
+                            get_template("site.set_encryption_key"),
+                            {"site": site, "bench_path": bench_path, "key": key},
+                        )
+                        await ctx.emit(f"$ {setcfg.display}")
+                        code = await ctx.stream(setcfg.argv, cwd=setcfg.cwd)
+                        if code != 0:
+                            raise RuntimeError(
+                                f"set-config encryption_key exited with status {code}"
+                            )
+                        await ctx.emit(
+                            "encryption_key copied — encrypted fields will decrypt "
+                            "after migrate."
+                        )
+
+            # 5) gotcha #7: migrate the restored site.
+            mig = render(
+                get_template("site.migrate"),
+                {"site": site, "bench_path": bench_path},
+            )
+            with ctx.step("Migrate restored site (bench migrate)"):
+                await ctx.emit(f"$ {mig.display}")
+                code = await ctx.stream(mig.argv, cwd=mig.cwd)
+                if code != 0:
+                    raise RuntimeError(f"bench migrate exited with status {code}")
+
+            # 6) Mark the source backup restore-tested + register the target site.
+            with ctx.step("Finalize restore"):
+                if backup_id:
+                    backup = ctx.session.get(Backup, int(backup_id))
+                    if backup is not None:
+                        backup.restore_tested = True
+                        ctx.session.commit()
+                        await ctx.emit(f"Backup #{backup.id} marked restore-tested.")
+                if bench is not None:
+                    from app.core import discovery
+
+                    row = discovery.upsert_site_one(ctx.session, bench.id, site)
+                    await ctx.emit(f"Target site #{row.id} ({site}) is ready.")
+                else:
+                    await ctx.emit(
+                        "Bench not in inventory — run a discovery to track the "
+                        "restored site."
+                    )
         finally:
             if started_redis:
                 await _stop_dev_redis(ctx, queue_port, cache_port)

@@ -110,6 +110,15 @@
               </p>
               <div class="mt-2 flex flex-wrap gap-2">
                 <Button
+                  v-if="canBackup"
+                  variant="subtle"
+                  theme="gray"
+                  label="Back up"
+                  :disabled="!!busy || maintLaunching || backingUp"
+                  :loading="backingUp"
+                  @click="backupNow"
+                />
+                <Button
                   variant="subtle"
                   theme="gray"
                   label="Migrate"
@@ -375,6 +384,7 @@ import LucideExternalLink from '~icons/lucide/external-link'
 import LucidePackage from '~icons/lucide/package'
 import LucidePackagePlus from '~icons/lucide/package-plus'
 import { appsApi, parseBranchesLine, type AppSource, type InstalledApp } from '../api/apps'
+import { backupsApi } from '../api/backups'
 import { ApiError } from '../api/client'
 import { jobsApi, streamJobLogs } from '../api/jobs'
 import { sitesApi, type Site } from '../api/sites'
@@ -399,6 +409,8 @@ const auth = useAuthStore()
 const canOperate = auth.hasPermission('site:operate')
 const canManage = auth.hasPermission('app:manage')
 const canRemove = auth.hasPermission('danger')
+const canBackup = auth.hasPermission('backup:create')
+const backingUp = ref(false)
 
 const site = ref<Site | null>(null)
 const loading = ref(true)
@@ -689,6 +701,25 @@ const maintConfig = computed(() => MAINT_META[maintKind.value])
 function askMaint(kind: MaintKind) {
   maintKind.value = kind
   maintOpen.value = true
+}
+
+async function backupNow() {
+  if (backingUp.value || busy.value) return
+  backingUp.value = true
+  try {
+    const job = await backupsApi.create(siteId, { with_files: true })
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'A job is already running on this site.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not start the backup.'
+    toast.error(message)
+  } finally {
+    backingUp.value = false
+  }
 }
 
 async function confirmMaint() {

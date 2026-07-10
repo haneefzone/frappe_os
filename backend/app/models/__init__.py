@@ -1,5 +1,6 @@
 from app.models.app import AppSource, InstalledApp
 from app.models.auth import ApiToken, Role, User
+from app.models.backup import Backup
 from app.models.bench import Bench
 from app.models.job import CommandJob, CommandStep, LogEntry
 from app.models.server import Server, SSHCredential
@@ -9,6 +10,7 @@ from app.models.terminal import TerminalSession
 __all__ = [
     "ApiToken",
     "AppSource",
+    "Backup",
     "Bench",
     "CommandJob",
     "CommandStep",

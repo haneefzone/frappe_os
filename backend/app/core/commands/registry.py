@@ -9,6 +9,7 @@ Starter templates (session 1.3):
 from __future__ import annotations
 
 from app.core.commands.actions import (
+    BackupAction,
     BenchBuildAction,
     BenchPreflightAction,
     BenchRestartAction,
@@ -22,11 +23,13 @@ from app.core.commands.actions import (
     InstallAppOnSiteAction,
     ListBranchesAction,
     MigrateAllSitesAction,
+    RestoreAction,
     SetMaintenanceAction,
     SetSchedulerAction,
     SiteBackupAction,
     SiteMaintenanceAction,
     UninstallAppAction,
+    ValidateBackupAction,
 )
 from app.core.commands.templates import (
     CommandTemplate,
@@ -36,6 +39,7 @@ from app.core.commands.templates import (
 from app.core.permissions import (
     APP_MANAGE,
     BACKUP_CREATE,
+    BACKUP_RESTORE,
     BENCH_OPERATE,
     DANGER,
     SERVER_MANAGE,
@@ -527,13 +531,12 @@ register(
 )
 
 # `bench --site X backup` — a lightweight db-only safety backup (no --with-files).
-# Registered so the bench.update orchestrator renders its safety pre-step through
-# the safe registry. The full backup engine (artifact parsing, Backup rows,
-# checksums) lands in session 1.11 — this template only runs the command as a
-# safety net; it is not launched on its own path this session.
+# Registered so the bench.update orchestrator (and the 1.11 backup engine) render
+# their db-only pre-step through the safe registry. Not launched on its own path;
+# SiteBackupAction only runs the command as a safety net (no Backup row).
 register(
     CommandTemplate(
-        action_name="site.backup",
+        action_name="site.backup_db",
         argv=("bench", "--site", "{site}", "backup"),
         cwd="{bench_path}",
         params=(
@@ -542,6 +545,26 @@ register(
         ),
         action_class=SiteBackupAction,
         idempotent=True,  # a db dump is safely repeatable.
+        requires_lock=True,
+        required_permission=BACKUP_CREATE,
+        run_as=None,
+    )
+)
+
+# `bench --site X backup --with-files` — a full backup (db + public + private
+# files). Rendered as a sub-step by the 1.11 BackupAction engine; never launched
+# on its own path.
+register(
+    CommandTemplate(
+        action_name="site.backup_files",
+        argv=("bench", "--site", "{site}", "backup", "--with-files"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=SiteBackupAction,
+        idempotent=True,
         requires_lock=True,
         required_permission=BACKUP_CREATE,
         run_as=None,
@@ -635,5 +658,174 @@ register(
         requires_lock=True,
         required_permission=BENCH_OPERATE,
         run_as=None,
+    )
+)
+
+
+# --- Backup & guided restore (session 1.11) ----------------------------- #
+
+# A backup id (digits) the validate/restore actions load the Backup row by.
+BACKUP_ID = r"[0-9]{1,12}"
+# --with-files toggle carried as an enum so nothing but "0"/"1" reaches the CLI.
+WITH_FILES = ("0", "1")
+# The restore target mode; each drives a distinct orchestration path.
+RESTORE_MODES = ("same_site", "new_site", "different_bench")
+# A base64 Fernet-style encryption_key copied from a source site_config backup
+# into the target site_config (gotcha #7). Passed as its own argv element to
+# `bench set-config` (execve, no shell); this is only a shell-safe sanity bound.
+ENCRYPTION_KEY = r"[A-Za-z0-9+/=_-]{1,120}"
+
+# The full backup engine POST /api/sites/{id}/backups launches: run `bench
+# backup [--with-files]` wrapped in the dev-bench Redis dance, then inspect the
+# backups dir to capture each artifact's path/size/sha256 and record a Backup
+# row. Locked per site so two backups of the same site can't race the artifact
+# parse. Non-idempotent: a Backup row is created per run, so an auto-retry must
+# not silently produce a duplicate half-recorded row.
+register(
+    CommandTemplate(
+        action_name="site.backup",
+        argv=("true",),  # nominal; BackupAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("with_files", enum=WITH_FILES),
+            # The pending Backup row created by the API before the job runs, so a
+            # failed backup still leaves a visible (failed) record.
+            ParamSpec("backup_id", regex=BACKUP_ID, required=False),
+        ),
+        action_class=BackupAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BACKUP_CREATE,
+        run_as=None,
+    )
+)
+
+# `backup.validate` — re-verify every stored artifact checksum against the file
+# on the server and read the config backup's encryption_key presence + version.
+# Read-only (no writes to the server); idempotent so a transient SSH blip retries.
+register(
+    CommandTemplate(
+        action_name="backup.validate",
+        argv=("true",),  # nominal; ValidateBackupAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("backup_id", regex=BACKUP_ID),
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=ValidateBackupAction,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=BACKUP_CREATE,
+        run_as=None,
+    )
+)
+
+# Internal restore sub-commands, rendered by RestoreAction (never launched on
+# their own path). `--force` per gotcha #7; paths are absolute artifact paths.
+register(
+    CommandTemplate(
+        action_name="site.restore_db",
+        argv=("bench", "--site", "{site}", "--force", "restore", "{db_path}"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("db_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=RestoreAction,  # unused directly; see note above.
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BACKUP_RESTORE,
+        run_as=None,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="site.restore_files",
+        argv=(
+            "bench", "--site", "{site}", "--force", "restore", "{db_path}",
+            "--with-public-files", "{public_files}",
+            "--with-private-files", "{private_files}",
+        ),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("db_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("public_files", regex=ABS_PATH, is_path=True),
+            ParamSpec("private_files", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=RestoreAction,  # unused directly; see note above.
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BACKUP_RESTORE,
+        run_as=None,
+    )
+)
+
+# `bench --site X set-config encryption_key <key>` — copy the source site's
+# encryption_key into the target site_config (gotcha #7). The key is a secret:
+# masked in the display, never streamed or persisted.
+register(
+    CommandTemplate(
+        action_name="site.set_encryption_key",
+        argv=(
+            "bench", "--site", "{site}", "set-config", "encryption_key", "{key}",
+        ),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("key", regex=ENCRYPTION_KEY, secret=True),
+        ),
+        action_class=RestoreAction,  # unused directly; see note above.
+        idempotent=True,  # writing the same key twice is harmless.
+        requires_lock=True,
+        required_permission=BACKUP_RESTORE,
+        run_as=None,
+    )
+)
+
+# The guided restore orchestrator POST /api/restores launches: (optional) create
+# the target site (new_site mode), an automatic pre-restore backup if the target
+# already holds data, `bench --force restore` (db [+ files]), copy the source
+# encryption_key into the target site_config, then `bench migrate` — gotcha #7
+# exactly. Wrapped once in the dev-bench Redis dance. Locked per target site.
+# BACKUP_RESTORE launches it; a destructive same-site/over-existing restore also
+# requires the typed-site-name confirm, enforced in the API.
+register(
+    CommandTemplate(
+        action_name="site.restore",
+        argv=("true",),  # nominal; RestoreAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("mode", enum=RESTORE_MODES),
+            ParamSpec("with_files", enum=WITH_FILES),
+            ParamSpec("backup_id", regex=BACKUP_ID),
+            ParamSpec("db_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("public_files", regex=ABS_PATH, is_path=True, required=False),
+            ParamSpec("private_files", regex=ABS_PATH, is_path=True, required=False),
+            ParamSpec("config_path", regex=ABS_PATH, is_path=True, required=False),
+            # new_site mode only: create the target first (gotcha #4).
+            ParamSpec("admin_pw", regex=SECRET_TEXT, secret=True, required=False),
+            ParamSpec("db_root_pw", regex=SECRET_TEXT, secret=True, required=False),
+        ),
+        action_class=RestoreAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BACKUP_RESTORE,
+        run_as=None,
+        secret_sources={
+            # Supplied by the operator (new_site mode), carried encrypted on the job.
+            "admin_pw": "job",
+            # Pulled from the server settings, server-side, never the browser.
+            "db_root_pw": "server:mariadb_root_password_enc",
+        },
     )
 )

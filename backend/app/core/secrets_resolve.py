@@ -100,20 +100,30 @@ def resolve_secrets(
         source = sources.get(name)
         if source is None:
             continue
+        is_optional = name in optional
         if source == "job":
             if job_bundle is None:
                 job_bundle = decrypt_job_secrets(secrets, secrets_enc)
             # An OPTIONAL job secret that the operator didn't supply (e.g. no
-            # deploy key for a public repo) is simply left unresolved — the
-            # action treats its absence as "not applicable". A REQUIRED one still
-            # fails loud in `_resolve_one`.
-            if name not in job_bundle and name in optional:
+            # deploy key for a public repo, or no admin password on a same-site
+            # restore) is simply left unresolved — the action treats its absence
+            # as "not applicable". A REQUIRED one still fails loud below.
+            if name not in job_bundle and is_optional:
                 continue
-        resolved[name] = _resolve_one(
-            name,
-            source,
-            job_bundle=job_bundle or {},
-            server=server,
-            secrets=secrets,
-        )
+        try:
+            resolved[name] = _resolve_one(
+                name,
+                source,
+                job_bundle=job_bundle or {},
+                server=server,
+                secrets=secrets,
+            )
+        except SecretResolutionError:
+            # An OPTIONAL secret whose source can't be resolved (e.g. a
+            # server-sourced db root password on a same-site restore that never
+            # needs it) is skipped; the action enforces presence when the path
+            # actually requires it. A REQUIRED one propagates.
+            if is_optional:
+                continue
+            raise
     return resolved
