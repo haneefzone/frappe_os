@@ -19,7 +19,9 @@ from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.job_logs import router as job_logs_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.monitoring import router as monitoring_router
+from app.api.routes.notifications import router as notifications_router
 from app.api.routes.schedules import router as schedules_router
+from app.api.routes.search import router as search_router
 from app.api.routes.servers import router as servers_router
 from app.api.routes.settings import router as settings_router
 from app.api.routes.sites import router as sites_router
@@ -157,6 +159,8 @@ def create_app() -> FastAPI:
     app.include_router(settings_router)
     app.include_router(ai_settings_router)
     app.include_router(audit_router)
+    app.include_router(notifications_router)
+    app.include_router(search_router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

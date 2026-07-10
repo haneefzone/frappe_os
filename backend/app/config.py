@@ -104,6 +104,20 @@ class Settings(BaseSettings):
     # it). The CommandJobs each fire then land on the schedule's own priority.
     scheduler_queue: str = "default"
 
+    # Notifications (session 2.8): minimal SMTP + signed webhook channels.
+    # SMTP: set SMTP_HOST to enable email. TLS defaults on (STARTTLS).
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_tls: bool = True
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "noreply@fdm.local"
+
+    # Webhook: NOTIFICATION_WEBHOOK_URL is the platform-level default target;
+    # per-user prefs can override it. HMAC-SHA256 signed with this secret.
+    notification_webhook_url: str = ""
+    notification_webhook_secret: str = ""
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

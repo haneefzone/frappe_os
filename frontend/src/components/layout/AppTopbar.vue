@@ -13,22 +13,28 @@
       <LucidePanelLeft class="h-5 w-5" />
     </button>
 
-    <!-- Placeholder search — becomes the ⌘K command palette in a later session. -->
-    <div
-      class="flex h-8 w-full max-w-md items-center gap-2 rounded-md border px-3 text-sm"
+    <!-- ⌘K search / command palette trigger -->
+    <button
+      type="button"
+      class="flex h-8 w-full max-w-md items-center gap-2 rounded-md border px-3 text-sm text-left transition-colors duration-150 ease-out hover:border-opacity-80"
       :style="{ borderColor: 'var(--border)', color: 'var(--text-muted)', background: 'var(--bg-base)' }"
+      aria-label="Open command palette"
+      @click="$emit('open-palette')"
     >
       <LucideSearch class="h-4 w-4 shrink-0" />
-      <span class="flex-1 truncate text-left">Search servers, sites, jobs…</span>
+      <span class="flex-1 truncate">Search servers, sites, jobs…</span>
       <kbd
         class="rounded border px-1.5 py-0.5 text-[10px]"
         :style="{ borderColor: 'var(--border-strong)' }"
       >
         ⌘K
       </kbd>
-    </div>
+    </button>
 
     <div class="flex-1" />
+
+    <!-- Notification bell -->
+    <NotificationDrawer />
 
     <button
       type="button"
@@ -88,10 +94,11 @@ import LucideMoon from '~icons/lucide/moon'
 import LucidePanelLeft from '~icons/lucide/panel-left'
 import LucideSearch from '~icons/lucide/search'
 import LucideSun from '~icons/lucide/sun'
+import NotificationDrawer from '../NotificationDrawer.vue'
 import { useTheme } from '../../composables/useTheme'
 import { useAuthStore } from '../../stores/auth'
 
-defineEmits<{ 'toggle-sidebar': [] }>()
+defineEmits<{ 'toggle-sidebar': []; 'open-palette': [] }>()
 
 const { theme, toggle } = useTheme()
 const auth = useAuthStore()

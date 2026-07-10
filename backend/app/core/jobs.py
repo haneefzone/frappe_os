@@ -757,6 +757,17 @@ class JobRunner:
             job.exit_code = exit_code
         self._release(job)
         db.commit()
+        # Dispatch in-app / email / webhook notifications for terminal states
+        # (success + failure). Import lazily so tests that don't load the full
+        # notification stack continue to work without extra fixtures.
+        try:
+            from app.core.notifications import dispatch_job_event
+            dispatch_job_event(db, job_id=job.id, action_name=job.action_name, status=status)
+        except Exception:  # noqa: BLE001 — notification failure must never crash the job engine
+            import logging
+            logging.getLogger("app.jobs").exception(
+                "notification dispatch failed for job %s", job.id
+            )
 
 
 def build_runner() -> JobRunner:

@@ -131,6 +131,14 @@ def store_uptime_sample(
     `site.health` is denormalised from the latest check ("ok"/"err") so the Sites
     list and dashboard read the current state without touching this table.
     """
+    # Capture the previous health state before overwriting it so we can detect a
+    # state flip (ok→err or err→ok) for notification dispatch.
+    prev_up: bool | None = None
+    if site.health == "ok":
+        prev_up = True
+    elif site.health == "err":
+        prev_up = False
+
     sample = UptimeSample(
         site_id=site.id,
         up=result.up,
@@ -143,6 +151,19 @@ def store_uptime_sample(
     site.health = "ok" if result.up else "err"
     db.commit()
     db.refresh(sample)
+
+    # Fire uptime notifications on state flip (2.8). Import lazily so tests
+    # that skip the notification stack continue to work without extra fixtures.
+    try:
+        from app.core.notifications import dispatch_uptime_event
+        dispatch_uptime_event(
+            db, site_id=site.id, site_name=site.name, up=result.up, was_up=prev_up
+        )
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger("app.uptime").exception(
+            "notification dispatch failed for site %s", site.id
+        )
 
     cutoff = datetime.now(UTC) - timedelta(hours=retention_hours)
     # synchronize_session=False: a bulk prune never needs to reconcile in-session
