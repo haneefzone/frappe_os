@@ -1,3 +1,5 @@
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -8,17 +10,63 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app import __version__
 from app.api.routes.apps import router as apps_router
+from app.api.routes.audit import router as audit_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.backups import router as backups_router
 from app.api.routes.benches import router as benches_router
+from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.job_logs import router as job_logs_router
 from app.api.routes.jobs import router as jobs_router
+from app.api.routes.monitoring import router as monitoring_router
 from app.api.routes.servers import router as servers_router
+from app.api.routes.settings import router as settings_router
 from app.api.routes.sites import router as sites_router
 from app.api.routes.terminal import router as terminal_router
 from app.config import get_settings
 from app.core.logging import configure_logging
 from app.errors import register_exception_handlers
+
+logger = logging.getLogger("app.main")
+
+
+def _build_monitoring_poller():
+    """Construct the background monitoring poller from settings, or None when it
+    is disabled. A Redis lease elects a single poller across API workers; if
+    Redis is unreachable the poller falls back to single-process polling."""
+    settings = get_settings()
+    if not settings.monitoring_enabled:
+        return None
+    from app.core.monitoring import MonitoringPoller
+    from app.core.ssh import get_ssh_service
+    from app.db import SessionLocal
+
+    redis_client = None
+    try:
+        from redis import Redis
+
+        redis_client = Redis.from_url(settings.redis_url)
+    except Exception:  # noqa: BLE001 — no Redis in dev/tests: single-process poll.
+        redis_client = None
+
+    return MonitoringPoller(
+        get_ssh_service(),
+        SessionLocal,
+        interval_seconds=settings.monitoring_interval_seconds,
+        retention_hours=settings.monitoring_retention_hours,
+        redis_client=redis_client,
+    )
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    poller = _build_monitoring_poller()
+    if poller is not None:
+        poller.start()
+    try:
+        yield
+    finally:
+        if poller is not None:
+            await poller.stop()
 
 
 class SPAStaticFiles(StaticFiles):
@@ -42,7 +90,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    app = FastAPI(title=settings.app_name, version=__version__)
+    app = FastAPI(title=settings.app_name, version=__version__, lifespan=_lifespan)
 
     # SEC-M1: rewrite request.client / scheme from X-Forwarded-* ONLY when the
     # socket peer is one of the configured trusted proxies. With the default
@@ -68,6 +116,10 @@ def create_app() -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(job_logs_router)
     app.include_router(terminal_router)
+    app.include_router(monitoring_router)
+    app.include_router(dashboard_router)
+    app.include_router(settings_router)
+    app.include_router(audit_router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

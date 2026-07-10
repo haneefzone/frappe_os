@@ -23,6 +23,7 @@ from app.core.commands.actions import (
     InstallAppOnSiteAction,
     ListBranchesAction,
     MigrateAllSitesAction,
+    RestartServiceAction,
     RestoreAction,
     SetMaintenanceAction,
     SetSchedulerAction,
@@ -827,5 +828,28 @@ register(
             # Pulled from the server settings, server-side, never the browser.
             "db_root_pw": "server:mariadb_root_password_enc",
         },
+    )
+)
+
+# --- Monitoring: restart a managed service (session 1.12) ---------------- #
+
+# The four services the monitoring grid shows and can restart. Passed as its own
+# argv element to `sudo -n systemctl restart <service>` (execve, no shell); the
+# enum is the whitelist and it matches the ratified sudoers allowlist lines.
+SERVICE_NAMES = ("nginx", "mariadb", "redis-server", "supervisor")
+
+register(
+    CommandTemplate(
+        action_name="server.restart_service",
+        argv=("sudo", "-n", "systemctl", "restart", "{service}"),
+        cwd=None,
+        params=(ParamSpec("service", enum=SERVICE_NAMES),),
+        action_class=RestartServiceAction,
+        # A failed restart must not silently retry; the operator re-clicks.
+        idempotent=False,
+        # Per (server, service) lock: never restart the same service twice at once.
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
     )
 )

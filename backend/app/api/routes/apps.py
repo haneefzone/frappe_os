@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, require
 from app.api.routes.jobs import get_job_runner
+from app.audit import Audit
 from app.core.appsources import RepoSourceError, validate_repo_source
 from app.core.commands import RenderError, get_template
 from app.core.jobs import JobRunner, LockConflict
@@ -100,7 +101,7 @@ def list_app_sources(
 
 @router.post("/app-sources", status_code=201, response_model=AppSourceOut)
 def create_app_source(
-    body: CreateAppSourceRequest, db: DbSession, user: CurrentUser
+    body: CreateAppSourceRequest, db: DbSession, user: CurrentUser, audit: Audit
 ) -> AppSourceOut:
     _require_action_permission(user, INSTALL_ACTION)  # app:manage
     kind = _classify_and_validate(body.repo_url)
@@ -125,6 +126,13 @@ def create_app_source(
     db.add(source)
     db.commit()
     db.refresh(source)
+    audit.record(
+        action="app_source.create",
+        summary=f"Added app source {source.name} ({source.kind})",
+        entity_type="app_source",
+        entity_id=source.id,
+        params={"name": source.name, "repo_url": source.repo_url, "kind": source.kind},
+    )
     return AppSourceOut.from_model(source)
 
 
@@ -140,7 +148,7 @@ def get_app_source(
 
 @router.patch("/app-sources/{source_id}", response_model=AppSourceOut)
 def update_app_source(
-    source_id: int, body: UpdateAppSourceRequest, db: DbSession, user: CurrentUser
+    source_id: int, body: UpdateAppSourceRequest, db: DbSession, user: CurrentUser, audit: Audit
 ) -> AppSourceOut:
     _require_action_permission(user, INSTALL_ACTION)
     source = db.get(AppSource, source_id)
@@ -175,17 +183,30 @@ def update_app_source(
         )
     db.commit()
     db.refresh(source)
+    audit.record(
+        action="app_source.update",
+        summary=f"Updated app source {source.name}",
+        entity_type="app_source",
+        entity_id=source.id,
+    )
     return AppSourceOut.from_model(source)
 
 
 @router.delete("/app-sources/{source_id}", status_code=204)
-def delete_app_source(source_id: int, db: DbSession, user: CurrentUser) -> None:
+def delete_app_source(source_id: int, db: DbSession, user: CurrentUser, audit: Audit) -> None:
     _require_action_permission(user, INSTALL_ACTION)
     source = db.get(AppSource, source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="App source not found.")
+    name = source.name
     db.delete(source)
     db.commit()
+    audit.record(
+        action="app_source.delete",
+        summary=f"Deleted app source {name}",
+        entity_type="app_source",
+        entity_id=source_id,
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import CurrentUser, require
 from app.api.routes.jobs import get_job_runner
+from app.audit import Audit
 from app.core import backups as bk
 from app.core.commands import RenderError, get_template
 from app.core.jobs import JobRunner, LockConflict
@@ -258,12 +259,12 @@ async def download_artifact(
     backup_id: int,
     db: DbSession,
     ssh: Ssh,
+    audit: Audit,
     user: Annotated[object, Depends(require(BACKUP_RESTORE))],
     artifact: str = Query(...),
 ) -> StreamingResponse:
     """Stream one backup artifact to the browser. Developer+ (`backup:restore`);
-    each download is recorded to the audit logger (first-class audit trail lands
-    in session 1.12)."""
+    each download writes a first-class audit row (session 1.12)."""
     backup = db.get(Backup, backup_id)
     if backup is None:
         raise HTTPException(status_code=404, detail="Backup not found.")
@@ -297,12 +298,12 @@ async def download_artifact(
         )
 
     filename = posixpath.basename(path)
-    logger.info(
-        "backup.download user=%s backup=%s artifact=%s path=%s",
-        getattr(user, "id", "?"),
-        backup_id,
-        artifact,
-        path,
+    audit.record(
+        action="backup.download",
+        summary=f"Downloaded {artifact} artifact of backup #{backup_id}",
+        entity_type="backup",
+        entity_id=backup_id,
+        params={"artifact": artifact, "filename": filename},
     )
     return StreamingResponse(
         ssh.stream_file(server, server.credential, path),

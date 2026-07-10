@@ -75,6 +75,17 @@ class Settings(BaseSettings):
     # do not serve static files; the Vite dev server owns the UI instead.
     frontend_dist: str = ""
 
+    # Directory for operator uploads (currently the white-label logo). A relative
+    # path resolves from the backend working directory. Set via UPLOADS_DIR.
+    uploads_dir: str = "uploads"
+
+    # Monitoring poller (session 1.12): how often each server is SSH-polled and
+    # how long samples are retained. Set MONITORING_ENABLED=false to run a
+    # dedicated poller elsewhere instead of the in-process loop.
+    monitoring_enabled: bool = True
+    monitoring_interval_seconds: int = 60
+    monitoring_retention_hours: int = 168  # 7 days
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

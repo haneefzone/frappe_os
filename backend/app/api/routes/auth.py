@@ -13,6 +13,7 @@ from app.api.deps import (
     REFRESH_COOKIE,
     CurrentUser,
 )
+from app.audit import record_audit
 from app.config import Settings, get_settings
 from app.core.ratelimit import LoginThrottle, get_login_throttle
 from app.core.security import (
@@ -95,6 +96,16 @@ def login(
     # Same failure path whether the email exists or not (no user enumeration).
     if user is None or not verify_password(user.password_hash, body.password):
         throttle.register_failure(email, ip)
+        record_audit(
+            db,
+            action="auth.login",
+            summary=f"Failed login for {email}",
+            user_id=user.id if user else None,
+            entity_type="session",
+            entity_id=email,
+            result="denied",
+            source_ip=ip,
+        )
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     if not user.is_active:
         raise HTTPException(status_code=401, detail="Account is disabled.")
@@ -103,6 +114,16 @@ def login(
     user.last_login = datetime.now(UTC)
     db.commit()
 
+    record_audit(
+        db,
+        action="auth.login",
+        summary=f"Signed in as {email}",
+        user_id=user.id,
+        entity_type="session",
+        entity_id=email,
+        result="ok",
+        source_ip=ip,
+    )
     settings = get_settings()
     _set_session_cookies(response, user.id, settings)
     return UserOut.from_user(user)

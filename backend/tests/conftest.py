@@ -17,6 +17,10 @@ from app.config import get_settings
 # debug=False explicitly.
 os.environ["COOKIE_SECURE"] = "false"
 os.environ["DEBUG"] = "true"
+# The in-process monitoring poller (session 1.12) would start on the TestClient
+# lifespan and try to reach Redis/SSH; disable it so tests drive the poll
+# functions directly (test_monitoring.py) instead of the background loop.
+os.environ["MONITORING_ENABLED"] = "false"
 # A real Fernet key so SecretsService (server-registry secrets) round-trips in
 # tests instead of failing on the placeholder key.
 os.environ.setdefault("FDM_SECRET_KEY", Fernet.generate_key().decode())

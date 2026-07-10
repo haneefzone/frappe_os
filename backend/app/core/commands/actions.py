@@ -1477,3 +1477,25 @@ class RestoreAction(Action):
         finally:
             if started_redis:
                 await _stop_dev_redis(ctx, queue_port, cache_port)
+
+
+class RestartServiceAction(Action):
+    """`server.restart_service` — restart one managed system service from the
+    monitoring services grid (session 1.12).
+
+    Runs `sudo -n systemctl restart <service>` where <service> is one of the four
+    allowlisted names (nginx, mariadb, redis-server, supervisor). `sudo -n` never
+    prompts: it fails loudly if the ratified `/etc/sudoers.d/fdm-platform`
+    allowlist line (`systemctl restart <svc>`) isn't installed, so a
+    mis-provisioned server surfaces a clear error rather than hanging."""
+
+    async def run(self, ctx: JobContext) -> None:
+        service = ctx.rendered.params_sanitized["service"]
+        with ctx.step(f"Restart {service}"):
+            await ctx.emit(f"$ {ctx.rendered.display}")
+            code = await ctx.stream(ctx.rendered.argv, cwd=ctx.rendered.cwd)
+            if code != 0:
+                raise RuntimeError(
+                    f"systemctl restart {service} exited with status {code} "
+                    "(is the fdm-platform sudoers allowlist installed on this server?)"
+                )

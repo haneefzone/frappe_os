@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import require
+from app.audit import Audit
 from app.core.permissions import READ, SERVER_MANAGE
 from app.core.security import SecretsService, generate_ed25519_keypair, get_secrets_service
 from app.core.ssh import ConnectionCheck, SSHService, get_ssh_service
@@ -95,6 +96,7 @@ def create_server(
     body: ServerCreate,
     db: DbSession,
     secrets: Secrets,
+    audit: Audit,
     _: Annotated[object, Depends(require(SERVER_MANAGE))],
 ) -> ServerCreated:
     if db.scalars(select(Server).where(Server.name == body.name)).first():
@@ -116,6 +118,13 @@ def create_server(
     db.commit()
     db.refresh(server)
 
+    audit.record(
+        action="server.register",
+        summary=f"Registered server {server.name} ({server.hostname})",
+        entity_type="server",
+        entity_id=server.id,
+        params={"name": server.name, "hostname": server.hostname, "env_tag": server.env_tag},
+    )
     base = ServerOut.from_model(server)
     return ServerCreated(**base.model_dump(), generated_public_key=generated_public_key)
 
@@ -126,6 +135,7 @@ def update_server(
     body: ServerUpdate,
     db: DbSession,
     secrets: Secrets,
+    audit: Audit,
     _: Annotated[object, Depends(require(SERVER_MANAGE))],
 ) -> ServerCreated:
     server = _get_server(db, server_id)
@@ -167,17 +177,34 @@ def update_server(
 
     db.commit()
     db.refresh(server)
+    audit.record(
+        action="server.update",
+        summary=f"Updated server {server.name}",
+        entity_type="server",
+        entity_id=server.id,
+        params={"credential_rotated": body.credential is not None},
+    )
     base = ServerOut.from_model(server)
     return ServerCreated(**base.model_dump(), generated_public_key=generated_public_key)
 
 
 @router.delete("/{server_id}", status_code=204)
 def delete_server(
-    server_id: int, db: DbSession, _: Annotated[object, Depends(require(SERVER_MANAGE))]
+    server_id: int,
+    db: DbSession,
+    audit: Audit,
+    _: Annotated[object, Depends(require(SERVER_MANAGE))],
 ) -> None:
     server = _get_server(db, server_id)
+    name = server.name
     db.delete(server)
     db.commit()
+    audit.record(
+        action="server.delete",
+        summary=f"Deleted server {name}",
+        entity_type="server",
+        entity_id=server_id,
+    )
 
 
 def _summary(result: ConnectionCheck) -> dict:

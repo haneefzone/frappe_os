@@ -537,6 +537,26 @@ class JobRunner:
             job.rq_job_id = rq_job_id
             db.commit()
             db.refresh(job)
+
+        # Rule 2: every job-backed state change writes exactly one audit row.
+        # This is the single funnel for command mutations, so no action can land
+        # un-audited. params_sanitized already has secrets masked (already_masked).
+        # A lazy import avoids an import-time cycle (audit -> api.deps).
+        from app.audit import record_audit
+
+        target = f" {target_type} {target_id}" if target_id else f" {target_type}"
+        record_audit(
+            db,
+            action=action_name,
+            summary=f"Enqueued {action_name} on{target}",
+            user_id=created_by,
+            entity_type=target_type,
+            entity_id=target_id,
+            params=job.params_sanitized or {},
+            result="enqueued",
+            job_id=job.id,
+            already_masked=True,
+        )
         return job
 
     def _default_enqueue(self, job: CommandJob) -> str:
