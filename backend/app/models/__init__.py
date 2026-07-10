@@ -9,6 +9,7 @@ from app.models.server import Server, SSHCredential
 from app.models.settings import PlatformSettings
 from app.models.site import Site
 from app.models.terminal import TerminalSession
+from app.models.uptime import UptimeSample
 
 __all__ = [
     "ApiToken",
@@ -27,5 +28,6 @@ __all__ = [
     "Server",
     "Site",
     "TerminalSession",
+    "UptimeSample",
     "User",
 ]

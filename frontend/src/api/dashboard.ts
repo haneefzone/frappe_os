@@ -18,6 +18,8 @@ export interface DashboardKpis {
   backups_24h: number
   failed_jobs_24h: number
   backup_compliance_pct: number
+  /** Real 30-day fleet uptime from external HTTP checks (session 2.7). */
+  uptime_30d_pct: number
 }
 
 export interface DashboardServer {

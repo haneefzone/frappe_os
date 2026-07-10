@@ -14,8 +14,8 @@ export const SITE_STATUS_LABEL: Record<SiteStatus, string> = {
 }
 
 /**
- * Health -> StatusDot color. Health is a placeholder until the monitoring
- * session pings sites over HTTP, so `unknown` renders muted.
+ * Health -> StatusDot color. Driven by the external HTTP uptime checker
+ * (session 2.7); `unknown` (no check yet) renders muted.
  */
 export function healthDot(health: SiteHealth): Status {
   switch (health) {

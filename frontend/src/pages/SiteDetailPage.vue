@@ -33,6 +33,84 @@
       </div>
 
       <div v-else-if="site" class="grid max-w-4xl gap-6 lg:grid-cols-2">
+        <!-- Health card (uptime + response time) — session 2.7 -->
+        <section class="rounded-lg border border-line bg-surface lg:col-span-2">
+          <div class="flex items-center justify-between border-b border-line px-4 py-2.5">
+            <h2 class="text-label font-semibold text-ink-1">Health</h2>
+            <div v-if="canOperate" class="flex items-center gap-2">
+              <span class="text-meta text-ink-3">Uptime checks</span>
+              <Button
+                variant="subtle"
+                theme="gray"
+                size="sm"
+                :label="site.uptime_enabled ? 'On' : 'Off'"
+                :loading="uptimeToggling"
+                :disabled="uptimeToggling"
+                @click="toggleUptime"
+              />
+            </div>
+          </div>
+
+          <div v-if="!site.uptime_enabled" class="px-4 py-4">
+            <p class="text-label text-ink-3">
+              Uptime checking is off for this site. Turn it on to record external
+              HTTP checks and response times.
+            </p>
+          </div>
+
+          <div v-else class="grid gap-4 p-4 sm:grid-cols-3">
+            <!-- Current status -->
+            <div class="flex flex-col gap-1">
+              <span class="text-meta uppercase tracking-wide text-ink-3">Status</span>
+              <span class="flex items-center gap-2 text-label text-ink-1">
+                <StatusDot :status="healthDot(site.health)" />
+                {{ currentlyUpLabel }}
+              </span>
+              <span v-if="uptime?.summary.last_status_code != null" class="text-meta text-ink-3">
+                HTTP {{ uptime.summary.last_status_code }}
+              </span>
+            </div>
+
+            <!-- Uptime percentages -->
+            <div class="flex flex-col gap-1">
+              <span class="text-meta uppercase tracking-wide text-ink-3">Uptime</span>
+              <span class="text-label text-ink-1">
+                {{ pctLabel(uptime?.summary.uptime_24h_pct) }}
+                <span class="text-meta text-ink-3">24h</span>
+              </span>
+              <span class="text-label text-ink-1">
+                {{ pctLabel(uptime?.summary.uptime_30d_pct) }}
+                <span class="text-meta text-ink-3">30d</span>
+              </span>
+            </div>
+
+            <!-- Response time + sparkline -->
+            <div class="flex flex-col gap-1">
+              <span class="text-meta uppercase tracking-wide text-ink-3">Response time</span>
+              <span class="font-mono text-label text-ink-1">{{ lastLatencyLabel }}</span>
+              <div class="mt-1 h-8">
+                <Sparkline
+                  v-if="latencySeries.length > 1"
+                  :data="latencySeries"
+                  status="info"
+                  filled
+                  show-last
+                  :width="140"
+                  :height="32"
+                />
+                <span v-else class="text-meta text-ink-3">Collecting samples…</span>
+              </div>
+            </div>
+          </div>
+
+          <p
+            v-if="site.uptime_enabled && site.check_url"
+            class="border-t border-line px-4 py-2 text-meta text-ink-3"
+          >
+            Checking <span class="font-mono text-ink-2">{{ site.check_url }}</span>
+          </p>
+        </section>
+
         <!-- Overview -->
         <section class="rounded-lg border border-line bg-surface">
           <h2 class="border-b border-line px-4 py-2.5 text-label font-semibold text-ink-1">Overview</h2>
@@ -387,14 +465,16 @@ import { appsApi, parseBranchesLine, type AppSource, type InstalledApp } from '.
 import { backupsApi } from '../api/backups'
 import { ApiError } from '../api/client'
 import { jobsApi, streamJobLogs } from '../api/jobs'
-import { sitesApi, type Site } from '../api/sites'
+import { sitesApi, type Site, type UptimeSeries } from '../api/sites'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import EmptyState from '../components/EmptyState.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
+import Sparkline from '../components/Sparkline.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { toast } from '../components/toast'
 import {
+  healthDot,
   HEALTH_LABEL as healthLabel,
   schedulerLabel,
   siteStatusDot as siteDot,
@@ -446,6 +526,57 @@ async function load() {
     loadError.value = error instanceof Error ? error.message : 'Could not load this site.'
   } finally {
     loading.value = false
+  }
+}
+
+// -- Uptime (session 2.7) ----------------------------------------------------
+const uptime = ref<UptimeSeries | null>(null)
+const uptimeToggling = ref(false)
+
+/** Latency series for the response-time sparkline (up samples with a value). */
+const latencySeries = computed(() =>
+  (uptime.value?.samples ?? [])
+    .filter((s) => s.latency_ms != null)
+    .map((s) => s.latency_ms as number),
+)
+
+const currentlyUpLabel = computed(() => {
+  const up = uptime.value?.summary.currently_up
+  if (up == null) return 'No checks yet'
+  return up ? 'Up' : 'Down'
+})
+
+const lastLatencyLabel = computed(() => {
+  const ms = uptime.value?.summary.last_latency_ms
+  return ms != null ? `${Math.round(ms)} ms` : '—'
+})
+
+function pctLabel(pct: number | null | undefined): string {
+  return pct == null ? '—' : `${pct.toFixed(pct >= 99.95 ? 0 : 1)}%`
+}
+
+async function loadUptime() {
+  try {
+    uptime.value = await sitesApi.uptime(siteId, 24)
+  } catch {
+    // Non-fatal: the health card just shows "collecting samples".
+  }
+}
+
+async function toggleUptime() {
+  if (!site.value || uptimeToggling.value) return
+  uptimeToggling.value = true
+  try {
+    const updated = await sitesApi.setUptimeConfig(siteId, {
+      enabled: !site.value.uptime_enabled,
+    })
+    site.value = updated
+    toast.success(`Uptime checks ${updated.uptime_enabled ? 'enabled' : 'disabled'}.`)
+    if (updated.uptime_enabled) await loadUptime()
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not update uptime checks.')
+  } finally {
+    uptimeToggling.value = false
   }
 }
 
@@ -751,5 +882,6 @@ async function confirmMaint() {
 onMounted(() => {
   load()
   loadApps()
+  loadUptime()
 })
 </script>

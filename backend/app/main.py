@@ -57,16 +57,49 @@ def _build_monitoring_poller():
     )
 
 
+def _build_uptime_checker():
+    """Construct the background uptime checker (session 2.7), or None when it is
+    disabled. Like the monitoring poller it uses a Redis lease to run a single
+    checker across API workers, falling back to single-process when Redis is
+    unreachable."""
+    settings = get_settings()
+    if not settings.uptime_enabled:
+        return None
+    from app.core.uptime import UptimeChecker
+    from app.db import SessionLocal
+
+    redis_client = None
+    try:
+        from redis import Redis
+
+        redis_client = Redis.from_url(settings.redis_url)
+    except Exception:  # noqa: BLE001 — no Redis in dev/tests: single-process check.
+        redis_client = None
+
+    return UptimeChecker(
+        SessionLocal,
+        interval_seconds=settings.uptime_interval_seconds,
+        retention_hours=settings.uptime_retention_hours,
+        max_concurrency=settings.uptime_max_concurrency,
+        redis_client=redis_client,
+    )
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     poller = _build_monitoring_poller()
+    checker = _build_uptime_checker()
     if poller is not None:
         poller.start()
+    if checker is not None:
+        checker.start()
     try:
         yield
     finally:
         if poller is not None:
             await poller.stop()
+        if checker is not None:
+            await checker.stop()
 
 
 class SPAStaticFiles(StaticFiles):

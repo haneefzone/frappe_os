@@ -21,6 +21,10 @@ os.environ["DEBUG"] = "true"
 # lifespan and try to reach Redis/SSH; disable it so tests drive the poll
 # functions directly (test_monitoring.py) instead of the background loop.
 os.environ["MONITORING_ENABLED"] = "false"
+# Likewise the session-2.7 uptime checker would start on the lifespan and make
+# real HTTP requests / hit SessionLocal; disable it so tests drive the check
+# functions directly (test_uptime.py).
+os.environ["UPTIME_ENABLED"] = "false"
 # A real Fernet key so SecretsService (server-registry secrets) round-trips in
 # tests instead of failing on the placeholder key.
 os.environ.setdefault("FDM_SECRET_KEY", Fernet.generate_key().decode())

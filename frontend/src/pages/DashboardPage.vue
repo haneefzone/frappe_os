@@ -67,7 +67,7 @@
             label="Sites up"
             :value="`${data.kpis.sites_up}/${data.kpis.sites_total}`"
             :status="data.kpis.sites_up >= data.kpis.sites_total ? 'ok' : data.kpis.sites_up === 0 && data.kpis.sites_total > 0 ? 'err' : 'warn'"
-            sublabel="Across all benches"
+            :sublabel="`${Math.round(data.kpis.uptime_30d_pct)}% uptime (30d)`"
           />
           <KPICard
             label="Backups 24h"

@@ -13,7 +13,9 @@ is read-only (RBAC `read`); the mutations need `site:operate`, declared by the
 templates and enforced here the same way POST /api/jobs is.
 """
 
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -22,12 +24,14 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, require
 from app.api.routes.jobs import get_job_runner
+from app.audit import Audit
 from app.core.commands import RenderError, get_template
 from app.core.jobs import JobRunner, LockConflict
-from app.core.permissions import READ, role_allows
+from app.core.permissions import READ, SITE_OPERATE, role_allows
 from app.core.secrets_resolve import SecretResolutionError
+from app.core.uptime import HOURS_30D, rolling_uptime
 from app.db import get_db
-from app.models import Server
+from app.models import Server, UptimeSample
 from app.models.bench import Bench
 from app.models.site import Site
 from app.schemas.job import JobDetail
@@ -36,6 +40,12 @@ from app.schemas.site import (
     SiteActionRequest,
     SiteOut,
     SiteToggleRequest,
+)
+from app.schemas.uptime import (
+    UptimeConfigRequest,
+    UptimeSampleOut,
+    UptimeSeries,
+    UptimeSummary,
 )
 
 router = APIRouter(prefix="/api", tags=["sites"])
@@ -339,3 +349,86 @@ def clear_site_website_cache(
         action_name=CLEAR_WEBSITE_CACHE_ACTION,
         priority=body.priority,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Uptime (session 2.7): external HTTP checks — series + summary + config
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/sites/{site_id}/uptime", response_model=UptimeSeries)
+def site_uptime(
+    site_id: int,
+    db: DbSession,
+    _: Annotated[object, Depends(require(READ))],
+    hours: int = Query(24, ge=1, le=HOURS_30D),
+) -> UptimeSeries:
+    """Uptime samples for the last `hours` (response-time sparkline) plus the
+    rolling 24h/30d summary the Overview health card renders. Read-only."""
+    site = _get_site_or_404(db, site_id)
+    since = datetime.now(UTC) - timedelta(hours=hours)
+    rows = list(
+        db.scalars(
+            select(UptimeSample)
+            .where(UptimeSample.site_id == site_id, UptimeSample.ts >= since)
+            .order_by(UptimeSample.ts.asc())
+        ).all()
+    )
+    return UptimeSeries(
+        site_id=site_id,
+        enabled=site.uptime_enabled,
+        check_url=site.check_url,
+        summary=UptimeSummary(**rolling_uptime(db, site_id)),
+        samples=[UptimeSampleOut.from_model(r) for r in rows],
+    )
+
+
+def _validate_check_url(url: str) -> str:
+    """A check-URL override must be a plain http(s) URL with a host — no shell,
+    no other schemes. The checker only ever GETs it, but keep the surface tight."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(
+            status_code=422,
+            detail="check_url must be an http(s) URL, e.g. https://erp.example.com/api/method/ping.",
+        )
+    return url
+
+
+@router.post("/sites/{site_id}/uptime-config", response_model=SiteOut)
+def set_uptime_config(
+    site_id: int,
+    body: UptimeConfigRequest,
+    db: DbSession,
+    user: CurrentUser,
+    audit: Audit,
+) -> SiteOut:
+    """Enable/disable uptime checking or set a check-URL override for the site.
+
+    This is platform configuration for a read-only telemetry probe, not a remote
+    command, so it updates the row directly (no job) but still writes an audit row
+    (rule 2). Requires `site:operate`; Read-only can never mutate."""
+    if not role_allows(list(user.role.permissions or []), SITE_OPERATE):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Role {user.role.name!r} lacks the {SITE_OPERATE!r} permission.",
+        )
+    site = _get_site_or_404(db, site_id)
+    changes: dict[str, object] = {}
+    if body.enabled is not None:
+        site.uptime_enabled = body.enabled
+        changes["uptime_enabled"] = body.enabled
+    if body.check_url is not None:
+        url = body.check_url.strip()
+        site.check_url = _validate_check_url(url) if url else None
+        changes["check_url"] = site.check_url
+    db.commit()
+    db.refresh(site)
+    audit.record(
+        action="site.uptime_config",
+        summary=f"Updated uptime config for site {site.name}",
+        entity_type="site",
+        entity_id=site.id,
+        params=changes,
+    )
+    return _site_out(db, site)

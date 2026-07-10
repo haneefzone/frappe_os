@@ -55,8 +55,18 @@ class Site(Base):
     scheduler_enabled: Mapped[bool | None] = mapped_column(Boolean)
     # Maintenance mode, read cheaply from site_config.json by discovery.
     maintenance_mode: Mapped[bool] = mapped_column(Boolean, default=False)
-    # unknown | ok | warn | err — a placeholder dot until HTTP health checks land.
+    # unknown | ok | warn | err — driven by the external HTTP uptime checker
+    # (session 2.7): a passing check sets "ok", a failing one "err".
     health: Mapped[str] = mapped_column(String(20), default="unknown")
+
+    # External HTTP(S) uptime checking (session 2.7). When enabled the checker
+    # probes this site every ~60s and records an UptimeSample. Operators can
+    # switch it off per site (e.g. an internal-only site the platform can't reach).
+    uptime_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Optional full URL the checker hits instead of the derived
+    # http://<server host>:<port>/api/method/ping. Lets an operator point the
+    # check at a real domain / https vhost. NULL = derive the target.
+    check_url: Mapped[str | None] = mapped_column(String(500))
 
     # When this site was last seen by a discovery run (UTC).
     discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

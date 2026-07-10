@@ -30,6 +30,9 @@ class SiteOut(BaseModel):
     webserver_port: int | None
     # Pre-built http URL to reach the site, or None when the port is unknown.
     url: str | None
+    # External HTTP uptime checking (session 2.7).
+    uptime_enabled: bool
+    check_url: str | None
     discovered_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -53,6 +56,8 @@ class SiteOut(BaseModel):
             health=site.health,
             webserver_port=port,
             url=url,
+            uptime_enabled=site.uptime_enabled,
+            check_url=site.check_url,
             discovered_at=site.discovered_at,
             created_at=site.created_at,
             updated_at=site.updated_at,

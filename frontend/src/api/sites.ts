@@ -27,9 +27,45 @@ export interface Site {
   webserver_port: number | null
   /** http://<server host>:<bench web port>, or null when the port is unknown. */
   url: string | null
+  /** External HTTP uptime checking (session 2.7). */
+  uptime_enabled: boolean
+  check_url: string | null
   discovered_at: string | null
   created_at: string
   updated_at: string
+}
+
+/** One external HTTP probe point (for the response-time sparkline). */
+export interface UptimeSample {
+  ts: string
+  up: boolean
+  status_code: number | null
+  latency_ms: number | null
+  error: string | null
+}
+
+export interface UptimeSummary {
+  uptime_24h_pct: number | null
+  uptime_30d_pct: number | null
+  samples_24h: number
+  samples_30d: number
+  currently_up: boolean | null
+  last_status_code: number | null
+  last_latency_ms: number | null
+  last_checked_at: string | null
+}
+
+export interface UptimeSeries {
+  site_id: number
+  enabled: boolean
+  check_url: string | null
+  summary: UptimeSummary
+  samples: UptimeSample[]
+}
+
+export interface UptimeConfigPayload {
+  enabled?: boolean
+  check_url?: string | null
 }
 
 export interface CreateSitePayload {
@@ -53,4 +89,9 @@ export const sitesApi = {
   clearCache: (id: number) => apiClient.post<JobDetail>(`/api/sites/${id}/clear-cache`, {}),
   clearWebsiteCache: (id: number) =>
     apiClient.post<JobDetail>(`/api/sites/${id}/clear-website-cache`, {}),
+  // Uptime (session 2.7): read the series + summary; toggle the checker / set a URL.
+  uptime: (id: number, hours = 24) =>
+    apiClient.get<UptimeSeries>(`/api/sites/${id}/uptime?hours=${hours}`),
+  setUptimeConfig: (id: number, payload: UptimeConfigPayload) =>
+    apiClient.post<Site>(`/api/sites/${id}/uptime-config`, payload),
 }

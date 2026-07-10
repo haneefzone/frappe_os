@@ -8,16 +8,19 @@ Health components the platform cannot measure yet (documented below).
 
 ### Fleet Health formula (documented per the session spec)
 
-    fleet_health = uptime(40) + backup(30 × fraction) + alerts(20) + updates(10)
+    fleet_health = uptime(40 × frac) + backup(30 × frac) + alerts(20) + updates(10)
 
-Only the **backup** component is real today: it is 30 × (fraction of active sites
-with a successful backup in the last 24h; 1.0 when there are no sites — nothing to
-back up is compliant). The other three are **placeholders awarded in full** until
-their engines exist:
-  - uptime (40)  → real 30-day uptime lands in Phase 2 (HTTP checks)
+Two components are **real** today:
+  - uptime (40)  → 40 × (fleet 30-day uptime fraction from external HTTP checks;
+                   1.0 when nothing has been measured yet — a fresh fleet is not
+                   penalised). Became real in session 2.7 (was a placeholder).
+  - backup (30)  → 30 × (fraction of active sites with a successful backup in the
+                   last 24h; 1.0 when there are no sites — nothing to back up is
+                   compliant).
+The other two are **placeholders awarded in full** until their engines exist:
   - alerts (20)  → real "no critical alerts" lands with the AlertRule engine
   - updates (10) → real "everything up to date" lands with the update advisor
-So health ranges 70–100 today and is driven entirely by backup compliance; each
+So health is driven by real uptime + backup compliance today; each remaining
 placeholder becomes a live signal in a later phase without changing this shape.
 """
 
@@ -28,10 +31,11 @@ from datetime import UTC, date, datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.uptime import fleet_uptime_fraction
 from app.models import Backup, CommandJob, MonitoringSample, Server, Site
 
 # Fleet Health component weights (must sum to 100).
-HEALTH_W_UPTIME = 40  # placeholder (Phase 2)
+HEALTH_W_UPTIME = 40  # real (session 2.7 — external HTTP checks)
 HEALTH_W_BACKUP = 30  # real
 HEALTH_W_ALERTS = 20  # placeholder (Phase 2)
 HEALTH_W_UPDATES = 10  # placeholder (Phase 3)
@@ -172,8 +176,9 @@ def build_dashboard(db: Session) -> dict:
     # Fleet Health (see module docstring for the documented formula).
     backed_up, active_sites = _sites_backup_compliance(db, since_24h)
     backup_fraction = 1.0 if active_sites == 0 else backed_up / active_sites
+    uptime_fraction, _ = fleet_uptime_fraction(db)  # real 30-day uptime (2.7)
     fleet_health = round(
-        HEALTH_W_UPTIME
+        HEALTH_W_UPTIME * uptime_fraction
         + HEALTH_W_BACKUP * backup_fraction
         + HEALTH_W_ALERTS
         + HEALTH_W_UPDATES
@@ -214,6 +219,8 @@ def build_dashboard(db: Session) -> dict:
             "backups_24h": int(backups_24h),
             "failed_jobs_24h": int(failed_jobs_24h),
             "backup_compliance_pct": round(backup_fraction * 100),
+            # Real 30-day fleet uptime (session 2.7); pairs with Sites Up (n/n).
+            "uptime_30d_pct": round(uptime_fraction * 100),
         },
         "morning_brief": _morning_brief(
             servers_total=len(servers),
