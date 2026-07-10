@@ -337,3 +337,87 @@ def latest_backup_for_site(db: Session, site_id: int) -> Backup | None:
         .where(Backup.site_id == site_id, Backup.status == "success")
         .order_by(Backup.created_at.desc())
     ).first()
+
+
+# --------------------------------------------------------------------------- #
+# Retention (session 2.1): decide which of a site's backups to prune
+# --------------------------------------------------------------------------- #
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Treat a naive stored timestamp as UTC (SQLite drops tzinfo; Postgres keeps
+    it). Retention compares instants, so everything is normalised to aware UTC."""
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+def plan_retention(
+    backups: list[Backup],
+    *,
+    keep_last: int | None,
+    keep_days: int | None,
+    now: datetime,
+) -> tuple[list[Backup], list[Backup]]:
+    """Split a site's backups into (keep, remove) under a retention policy.
+
+    Only ``status == "success"`` backups are candidates (a pending/failed row has
+    no complete artifact set to prune). Policy, newest-first:
+
+    - ``keep_last`` — keep the N most recent backups;
+    - ``keep_days`` — keep any backup newer than N days;
+    - both set — keep the union (a backup survives if *either* rule keeps it);
+    - neither set — keep everything (a no-op sweep).
+
+    The newest backup is **always** kept regardless of policy, so a site is never
+    left with zero backups (the "never delete the newest/only" safety floor).
+    Returns (keep, remove) each newest-first.
+    """
+    from datetime import timedelta
+
+    successful = sorted(
+        (b for b in backups if b.status == "success"),
+        key=lambda b: (_as_utc(b.created_at), b.id),
+        reverse=True,
+    )
+    if not successful:
+        return [], []
+
+    keep_ids: set[int] = set()
+    if keep_last is not None:
+        for b in successful[: max(keep_last, 0)]:
+            keep_ids.add(b.id)
+    if keep_days is not None:
+        cutoff = now - timedelta(days=keep_days)
+        for b in successful:
+            if _as_utc(b.created_at) >= cutoff:
+                keep_ids.add(b.id)
+    if keep_last is None and keep_days is None:
+        keep_ids = {b.id for b in successful}
+
+    # Safety floor: the newest backup is never pruned (never the only backup).
+    keep_ids.add(successful[0].id)
+
+    keep = [b for b in successful if b.id in keep_ids]
+    remove = [b for b in successful if b.id not in keep_ids]
+    return keep, remove
+
+
+def retention_artifact_paths(backup: Backup) -> list[str]:
+    """Every distinct on-server artifact path a retention delete must remove for
+    one backup: the four convenience columns plus any path in the `artifacts`
+    JSON, deduped and order-preserved."""
+    paths: list[str] = []
+    for col in ("db_path", "public_files_path", "private_files_path", "config_path"):
+        p = getattr(backup, col, None)
+        if p:
+            paths.append(p)
+    for art in backup.artifacts or []:
+        p = art.get("path") if isinstance(art, dict) else None
+        if p:
+            paths.append(p)
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out

@@ -19,6 +19,7 @@ SERVER_MANAGE = "server:manage"  # register servers, SSH credentials
 DANGER = "danger"  # drop site, delete bench, restore-over-existing
 USER_MANAGE = "user:manage"
 SETTINGS_MANAGE = "settings:manage"
+SCHEDULE_MANAGE = "schedule:manage"  # create/edit/enable/disable recurring schedules
 
 # name -> permissions. Admin gets the wildcard; Read-only can never mutate
 # (CLAUDE.md golden rule 7).
@@ -34,6 +35,7 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         BACKUP_RESTORE,
         JOB_MANAGE,
         TERMINAL_ACCESS,
+        SCHEDULE_MANAGE,
     ],
     "Operator": [
         READ,

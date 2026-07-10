@@ -14,6 +14,7 @@ declare module 'vue' {
     AppTopbar: typeof import('./src/components/layout/AppTopbar.vue')['default']
     ConfirmModal: typeof import('./src/components/ConfirmModal.vue')['default']
     CopyField: typeof import('./src/components/CopyField.vue')['default']
+    CreateScheduleSheet: typeof import('./src/components/CreateScheduleSheet.vue')['default']
     DataTable: typeof import('./src/components/DataTable.vue')['default']
     EmptyState: typeof import('./src/components/EmptyState.vue')['default']
     EnvironmentBadge: typeof import('./src/components/EnvironmentBadge.vue')['default']

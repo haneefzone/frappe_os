@@ -11,6 +11,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.6",
     "rq>=2.0",
+    "rq-scheduler>=0.14",
     "redis>=5.2",
     "asyncssh>=2.18",
     "cryptography>=43",

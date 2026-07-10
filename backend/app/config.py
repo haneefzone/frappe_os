@@ -95,6 +95,15 @@ class Settings(BaseSettings):
     uptime_retention_hours: int = 720  # 30 days
     uptime_max_concurrency: int = 10
 
+    # Scheduler (session 2.1): the rq-scheduler-driven process ticks this often,
+    # firing every schedule whose next_run_at has arrived through the JobRunner.
+    # A smaller interval fires closer to the wall-clock minute a cron names, at
+    # the cost of more (cheap) DB sweeps. Set via SCHEDULER_TICK_SECONDS.
+    scheduler_tick_seconds: int = 30
+    # The RQ queue the recurring tick job is enqueued onto (a normal worker runs
+    # it). The CommandJobs each fire then land on the schedule's own priority.
+    scheduler_queue: str = "default"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
