@@ -9,6 +9,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app import __version__
+from app.api.routes.ai_settings import router as ai_settings_router
 from app.api.routes.apps import router as apps_router
 from app.api.routes.audit import router as audit_router
 from app.api.routes.auth import router as auth_router
@@ -154,6 +155,7 @@ def create_app() -> FastAPI:
     app.include_router(schedules_router)
     app.include_router(dashboard_router)
     app.include_router(settings_router)
+    app.include_router(ai_settings_router)
     app.include_router(audit_router)
 
     @app.get("/api/health")

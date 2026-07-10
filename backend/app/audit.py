@@ -51,6 +51,20 @@ def set_request_source_ip(ip: str | None) -> None:
     _source_ip.set(ip)
 
 
+def redact_text(text: str, secrets: tuple[str, ...] | list[str] = ()) -> str:
+    """Replace every known secret plaintext in ``text`` with ``••••``.
+
+    This is the value-based masking the job engine's `LogWriter._redact` uses
+    (rule 6), factored here so any funnel that emits free text — notably the AI
+    layer's `build_prompt_payload` — scrubs the same way before the text can
+    leave the platform. Longest secrets first so an overlapping shorter secret
+    can't unmask part of a longer one.
+    """
+    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+        text = text.replace(secret, _MASK)
+    return text
+
+
 def mask_params(params: dict[str, Any] | None) -> dict[str, Any]:
     """Best-effort mask of anything secret-looking.
 
