@@ -67,7 +67,7 @@
             label="Sites up"
             :value="`${data.kpis.sites_up}/${data.kpis.sites_total}`"
             :status="data.kpis.sites_up >= data.kpis.sites_total ? 'ok' : data.kpis.sites_up === 0 && data.kpis.sites_total > 0 ? 'err' : 'warn'"
-            :sublabel="`${Math.round(data.kpis.uptime_30d_pct)}% uptime (30d)`"
+            :sublabel="`${pctLabel(data.kpis.uptime_30d_pct)} uptime (30d)`"
           />
           <KPICard
             label="Backups 24h"
@@ -191,6 +191,7 @@ import ResourceGauge from '../components/ResourceGauge.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { STATUS_COLOR, type Status } from '../components/types'
 import { absoluteTime, relativeTime, statusDot as serverStatusDot } from '../lib/servers'
+import { pctLabel } from '../lib/sites'
 
 const POLL_MS = 15000
 

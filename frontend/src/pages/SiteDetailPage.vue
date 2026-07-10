@@ -43,7 +43,7 @@
                 variant="subtle"
                 theme="gray"
                 size="sm"
-                :label="site.uptime_enabled ? 'On' : 'Off'"
+                :label="site.uptime_enabled ? 'Disable' : 'Enable'"
                 :loading="uptimeToggling"
                 :disabled="uptimeToggling"
                 @click="toggleUptime"
@@ -476,6 +476,7 @@ import { toast } from '../components/toast'
 import {
   healthDot,
   HEALTH_LABEL as healthLabel,
+  pctLabel,
   schedulerLabel,
   siteStatusDot as siteDot,
 } from '../lib/sites'
@@ -550,10 +551,6 @@ const lastLatencyLabel = computed(() => {
   const ms = uptime.value?.summary.last_latency_ms
   return ms != null ? `${Math.round(ms)} ms` : '—'
 })
-
-function pctLabel(pct: number | null | undefined): string {
-  return pct == null ? '—' : `${pct.toFixed(pct >= 99.95 ? 0 : 1)}%`
-}
 
 async function loadUptime() {
   try {

@@ -43,6 +43,11 @@ export function schedulerLabel(enabled: boolean | null): string {
   return enabled ? 'On' : 'Off'
 }
 
+/** Format an uptime % consistently: integer when ≥99.95, one decimal otherwise. */
+export function pctLabel(pct: number | null | undefined): string {
+  return pct == null ? '—' : `${pct.toFixed(pct >= 99.95 ? 0 : 1)}%`
+}
+
 /** Group a flat site list by bench_id, preserving first-seen order. */
 export function groupByBench(sites: Site[]): Map<number, Site[]> {
   const groups = new Map<number, Site[]>()
