@@ -106,28 +106,28 @@
             <div v-if="canOperate" class="border-t border-line pt-4">
               <p class="text-label font-medium text-ink-1">Maintenance</p>
               <p class="mt-0.5 text-meta text-ink-3">
-                Each runs as a job — you'll land on its live log.
+                Each action runs as a job — you'll land on its live log.
               </p>
               <div class="mt-2 flex flex-wrap gap-2">
                 <Button
                   variant="subtle"
                   theme="gray"
                   label="Migrate"
-                  :disabled="!!busy"
+                  :disabled="!!busy || maintLaunching"
                   @click="askMaint('migrate')"
                 />
                 <Button
                   variant="subtle"
                   theme="gray"
                   label="Clear cache"
-                  :disabled="!!busy"
+                  :disabled="!!busy || maintLaunching"
                   @click="askMaint('clear-cache')"
                 />
                 <Button
                   variant="subtle"
                   theme="gray"
                   label="Clear website cache"
-                  :disabled="!!busy"
+                  :disabled="!!busy || maintLaunching"
                   @click="askMaint('clear-website-cache')"
                 />
               </div>

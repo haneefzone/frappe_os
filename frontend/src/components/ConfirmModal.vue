@@ -60,13 +60,15 @@
 
             <!-- What gets backed up first (spec: automatic pre-action backup) -->
             <div
-              v-if="$slots.backup"
+              v-if="backupNotice || $slots.backup"
               class="flex items-start gap-2.5 rounded-lg border border-line bg-surface px-3 py-2.5"
             >
               <LucideArchive class="mt-0.5 h-4 w-4 shrink-0 text-ink-2" />
               <div class="text-label text-ink-2">
                 <p class="font-medium text-ink-1">Backed up first, automatically</p>
-                <slot name="backup" />
+                <slot name="backup">
+                  <p v-if="backupNotice">{{ backupNotice }}</p>
+                </slot>
               </div>
             </div>
 
@@ -127,6 +129,8 @@ const props = withDefaults(
     targetName?: string
     /** Plain-language consequence lines (or use the #consequences slot). */
     consequences?: string[]
+    /** One-line description of what gets backed up first; renders the archive-icon notice box. */
+    backupNotice?: string
     cancelLabel?: string
     loading?: boolean
   }>(),

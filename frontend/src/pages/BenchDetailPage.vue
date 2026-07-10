@@ -126,6 +126,7 @@
       :message="benchConfig.message"
       :verb="benchConfig.verb"
       :consequences="benchConfig.consequences"
+      :backup-notice="benchConfig.backupNotice"
       :loading="launching"
       @confirm="confirmBench"
     />
@@ -209,13 +210,16 @@ const benchConfig = computed(() => {
       return {
         title: 'Restart bench',
         verb: 'Restart bench',
-        message: 'Restart this bench’s services.',
+        message: isProd
+          ? 'Restart this bench’s supervisor services.'
+          : 'This is a development bench — it has no supervisor services.',
         consequences: isProd
           ? ['Restarts services via supervisorctl — expect brief downtime.']
           : [
-              'This is a development bench — it has no supervisor services to restart.',
-              'The job will report how to start it manually (bench start).',
+              'The job will exit with an informative failure.',
+              'Start the bench manually with bench start.',
             ],
+        backupNotice: undefined as string | undefined,
       }
     case 'migrate-all':
       return {
@@ -226,6 +230,7 @@ const benchConfig = computed(() => {
           'Applies pending database patches to each site.',
           'Best run during a maintenance window on production.',
         ],
+        backupNotice: undefined as string | undefined,
       }
     case 'update':
       return {
@@ -233,10 +238,10 @@ const benchConfig = computed(() => {
         verb: 'Update bench',
         message: 'Update this bench: git pull, dependencies, patches, build, restart.',
         consequences: [
-          'A db-only safety backup of every site runs first.',
           'Expect downtime while the update runs and services restart.',
           'Long-running — you’ll land on the live job log.',
         ],
+        backupNotice: 'A db-only snapshot of every site on this bench.' as string | undefined,
       }
     default:
       return {
@@ -244,6 +249,7 @@ const benchConfig = computed(() => {
         verb: 'Run build',
         message: 'Recompile this bench’s JS/CSS assets (bench build).',
         consequences: ['Rebuilds frontend assets; no downtime.'],
+        backupNotice: undefined as string | undefined,
       }
   }
 })
