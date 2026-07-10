@@ -130,9 +130,12 @@
             </div>
           </div>
 
-          <p v-else-if="siteApps.length === 0" class="px-4 py-6 text-center text-meta text-ink-3">
-            No apps installed on this site yet.
-          </p>
+          <EmptyState
+            v-else-if="siteApps.length === 0"
+            :icon="LucidePackage"
+            title="No apps installed"
+            message="Use the Install app button above to add a Frappe app to this site."
+          />
 
           <table v-else class="w-full text-left">
             <thead>
@@ -205,11 +208,13 @@
 
             <div class="max-h-[60vh] space-y-4 overflow-y-auto px-5 py-4">
               <!-- Mode toggle -->
-              <div class="grid grid-cols-2 gap-2">
+              <div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Install method">
                 <button
                   v-for="opt in installModes"
                   :key="opt.value"
                   type="button"
+                  role="radio"
+                  :aria-checked="installMode === opt.value"
                   class="fdm-focus rounded-lg border px-3 py-2 text-left text-label transition"
                   :class="installMode === opt.value
                     ? 'border-line-strong bg-surface text-ink-1'
@@ -325,12 +330,14 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import LucideArrowLeft from '~icons/lucide/arrow-left'
 import LucideExternalLink from '~icons/lucide/external-link'
+import LucidePackage from '~icons/lucide/package'
 import LucidePackagePlus from '~icons/lucide/package-plus'
 import { appsApi, parseBranchesLine, type AppSource, type InstalledApp } from '../api/apps'
 import { ApiError } from '../api/client'
 import { jobsApi, streamJobLogs } from '../api/jobs'
 import { sitesApi, type Site } from '../api/sites'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import EmptyState from '../components/EmptyState.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import StatusDot from '../components/StatusDot.vue'

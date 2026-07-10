@@ -129,7 +129,6 @@
         />
 
         <div v-else>
-          <p class="mb-3 text-meta text-ink-3">App × site — version chips.</p>
           <div class="overflow-x-auto rounded-lg border border-line bg-surface">
             <table class="min-w-full border-collapse text-left">
               <thead>
@@ -224,7 +223,6 @@ function kindLabel(kind: AppSourceKind): string {
 }
 function kindDot(kind: AppSourceKind): Status {
   if (kind === 'marketplace') return 'ok'
-  if (kind === 'github' || kind === 'gitlab') return 'running'
   return 'muted'
 }
 
