@@ -136,7 +136,7 @@
                   <span class="text-meta text-ink-3">{{ dayLabel(day.date) }}</span>
                 </div>
               </div>
-              <div class="mt-3 flex items-center gap-4 text-meta text-ink-3">
+              <div class="mt-3 flex items-center gap-4 text-meta text-ink-2">
                 <span class="flex items-center gap-1.5"><StatusDot status="ok" size="sm" /> Success</span>
                 <span class="flex items-center gap-1.5"><StatusDot status="err" size="sm" /> Failure</span>
                 <span class="flex items-center gap-1.5"><StatusDot status="muted" size="sm" /> None</span>
@@ -153,7 +153,7 @@
               title="Nothing running"
               message="Enqueued and in-flight jobs will appear here."
             />
-            <ul v-else class="divide-y divide-line">
+            <ul v-else class="divide-y divide-line" aria-live="polite" aria-label="Running jobs">
               <li v-for="job in data.running_jobs" :key="job.id">
                 <RouterLink
                   :to="`/jobs/${job.id}`"

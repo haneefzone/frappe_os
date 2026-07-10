@@ -156,11 +156,11 @@
             </div>
 
             <!-- Services grid -->
-            <div class="space-y-2">
+            <div class="space-y-2" aria-live="polite" aria-label="Service status">
               <div v-for="svc in SERVICES" :key="svc.key" class="flex items-center gap-3">
                 <StatusDot :status="serviceDot(serviceState(svc.key))" />
                 <span class="font-mono text-label text-ink-1">{{ svc.label }}</span>
-                <span class="text-meta text-ink-3">{{ serviceState(svc.key) }}</span>
+                <span class="text-meta text-ink-2">{{ serviceState(svc.key) }}</span>
                 <Button
                   v-if="canManage"
                   class="ml-auto"

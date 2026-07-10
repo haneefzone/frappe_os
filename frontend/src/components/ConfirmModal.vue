@@ -19,6 +19,7 @@
           :aria-label="title"
           tabindex="-1"
           class="fdm-focus w-full max-w-md rounded-lg border border-line bg-raised outline-none"
+          @keydown.tab="trapFocus"
         >
           <!-- Header -->
           <div class="flex items-start gap-3 border-b border-line px-5 py-4">
@@ -164,6 +165,23 @@ watch(
     }
   },
 )
+
+function trapFocus(event: KeyboardEvent) {
+  if (!panel.value) return
+  const focusable = Array.from(
+    panel.value.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  )
+  if (focusable.length === 0) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey) {
+    if (document.activeElement === first) { event.preventDefault(); last.focus() }
+  } else {
+    if (document.activeElement === last) { event.preventDefault(); first.focus() }
+  }
+}
 
 function onOverlayClick() {
   // Destroy-class modals must be dismissed deliberately, not by a stray click.
