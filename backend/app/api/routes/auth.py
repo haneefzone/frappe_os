@@ -17,6 +17,7 @@ from app.audit import record_audit
 from app.config import Settings, get_settings
 from app.core.ratelimit import LoginThrottle, get_login_throttle
 from app.core.security import (
+    bump_token_version,
     create_session_token,
     decode_session_token,
     new_csrf_token,
@@ -36,24 +37,27 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _set_session_cookies(response: Response, user_id: int, settings: Settings) -> None:
+def _set_session_cookies(response: Response, user: User, settings: Settings) -> None:
     """Issues access + refresh JWTs (httpOnly) and the CSRF cookie (JS-readable,
-    for the double-submit header). All rotate together."""
+    for the double-submit header). All rotate together. Both JWTs carry the
+    user's current token_version (SEC-M2) so a later bump revokes them."""
     csrf = new_csrf_token()
     common = {"secure": settings.cookie_secure, "samesite": "lax", "path": "/"}
     access = create_session_token(
-        user_id=user_id,
+        user_id=user.id,
         token_type="access",
         csrf=csrf,
         ttl_seconds=settings.access_token_ttl_seconds,
         secret=settings.jwt_secret,
+        token_version=user.token_version,
     )
     refresh = create_session_token(
-        user_id=user_id,
+        user_id=user.id,
         token_type="refresh",
         csrf=csrf,
         ttl_seconds=settings.refresh_token_ttl_seconds,
         secret=settings.jwt_secret,
+        token_version=user.token_version,
     )
     response.set_cookie(
         ACCESS_COOKIE, access, max_age=settings.access_token_ttl_seconds, httponly=True, **common
@@ -125,7 +129,7 @@ def login(
         source_ip=ip,
     )
     settings = get_settings()
-    _set_session_cookies(response, user.id, settings)
+    _set_session_cookies(response, user, settings)
     return UserOut.from_user(user)
 
 
@@ -152,8 +156,12 @@ def refresh(request: Request, response: Response, db: DbSession) -> UserOut:
     user = db.get(User, int(claims["sub"]))
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="Account is disabled.")
+    # SEC-M2: a refresh token issued before the session was revoked is dead —
+    # this stops an exfiltrated refresh cookie from surviving logout-everywhere.
+    if claims.get("tv") != user.token_version:
+        raise HTTPException(status_code=401, detail="Session expired or invalid.")
 
-    _set_session_cookies(response, user.id, settings)
+    _set_session_cookies(response, user, settings)
     return UserOut.from_user(user)
 
 
@@ -166,4 +174,30 @@ def me(user: CurrentUser) -> UserOut:
 def logout(response: Response) -> None:
     """Clears the session cookies. Deliberately unauthenticated so a client
     with an expired/broken session can always reach a clean state."""
+    _clear_session_cookies(response)
+
+
+@router.post("/logout-all", status_code=204)
+def logout_all(
+    request: Request,
+    response: Response,
+    db: DbSession,
+    user: CurrentUser,
+) -> None:
+    """Log out everywhere (SEC-M2): bumps the user's token_version so every
+    outstanding access/refresh token for this account — on any device, plus any
+    exfiltrated refresh cookie — is rejected on its next use. Authenticated and
+    CSRF-protected (CurrentUser enforces the double-submit on POST)."""
+    bump_token_version(user)
+    db.commit()
+    record_audit(
+        db,
+        action="auth.logout_all",
+        summary=f"Revoked all sessions for {user.email}",
+        user_id=user.id,
+        entity_type="session",
+        entity_id=user.email,
+        result="ok",
+        source_ip=_client_ip(request),
+    )
     _clear_session_cookies(response)

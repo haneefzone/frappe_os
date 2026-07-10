@@ -15,7 +15,7 @@ from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session
 
 from app.core.permissions import DEFAULT_ROLES
-from app.core.security import hash_password
+from app.core.security import bump_token_version, hash_password
 from app.models import Role, User
 
 
@@ -55,6 +55,8 @@ def seed_admin(db: Session, email: str, password: str, full_name: str) -> User:
         user.password_hash = hash_password(password)
         user.role_id = admin_role.id
         user.is_active = True
+        # Password/role change → revoke any sessions minted before this reset (SEC-M2).
+        bump_token_version(user)
         print(f"User {email} already exists — password reset, Admin role and active flag applied")
     db.flush()
     return user

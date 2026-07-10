@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -32,6 +32,14 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     full_name: Mapped[str] = mapped_column(String(120))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Session-revocation counter (SEC-M2). Embedded as the `tv` claim in every
+    # access/refresh JWT at issue time; get_current_user and /refresh reject any
+    # token whose claim != this value. Bump it (bump_token_version) on password
+    # change, role change, deactivation, or an explicit "log out everywhere" to
+    # invalidate every outstanding token for this user immediately.
+    token_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     role_id: Mapped[int] = mapped_column(ForeignKey("roles.id"))
     last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(

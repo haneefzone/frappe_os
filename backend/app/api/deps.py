@@ -49,6 +49,11 @@ def get_current_user(request: Request, db: Annotated[Session, Depends(get_db)]) 
     user = db.get(User, int(claims["sub"]))
     if user is None or not user.is_active:
         raise _unauthorized("Account is disabled.")
+    # SEC-M2: reject tokens issued before the user's session was revoked
+    # (password/role change, deactivate, "log out everywhere"). Same per-request
+    # DB read that already re-checks is_active — no extra query.
+    if claims.get("tv") != user.token_version:
+        raise _unauthorized("Session expired or invalid.")
     return user
 
 

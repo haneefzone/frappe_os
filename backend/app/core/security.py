@@ -41,18 +41,33 @@ def create_session_token(
     csrf: str,
     ttl_seconds: int,
     secret: str,
+    token_version: int,
 ) -> str:
     """JWT bound to a CSRF value (double-submit: cookie is httpOnly, the CSRF
-    value travels back in a header and must match this claim)."""
+    value travels back in a header and must match this claim).
+
+    `token_version` is baked in as the `tv` claim (SEC-M2, ISO 27001 A.5.17):
+    get_current_user and /refresh reject any token whose `tv` no longer matches
+    the user's current DB value, so bumping it server-side revokes every
+    outstanding token for that user."""
     now = datetime.now(UTC)
     payload = {
         "sub": str(user_id),
         "type": token_type,
         "csrf": csrf,
+        "tv": token_version,
         "iat": now,
         "exp": now + timedelta(seconds=ttl_seconds),
     }
     return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def bump_token_version(user) -> None:
+    """Advance a user's token_version to invalidate all of their outstanding
+    JWTs (SEC-M2). Call inside the same DB transaction as the triggering change
+    — password change, role change, deactivation, or an explicit "log out
+    everywhere" — then commit. Duck-typed to avoid a models import cycle."""
+    user.token_version = (user.token_version or 0) + 1
 
 
 def decode_session_token(token: str, *, expected_type: TokenType, secret: str) -> dict | None:
