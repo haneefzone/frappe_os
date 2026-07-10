@@ -742,9 +742,10 @@ class UninstallAppAction(Action):
     uninstall-app APP --yes`, wrapped in the dev-bench Redis dance, then drop the
     matrix row. The type-the-app-name confirm is enforced in the UI + API.
 
-    NOTE: CLAUDE.md rule 5 wants an automatic pre-action backup before a
-    destructive op; the backup engine lands in session 1.11 (Backup & restore),
-    so this is wired to take one then. Non-idempotent: never auto-retried."""
+    Per CLAUDE.md rule 5, an AUTOMATIC pre-op backup (with files) runs first,
+    recorded as its own Backup row and visible in the timeline; a failed pre-op
+    backup aborts the uninstall (same posture as `RestoreAction`'s pre-restore
+    backup). Non-idempotent: never auto-retried."""
 
     async def run(self, ctx: JobContext) -> None:
         params = ctx.rendered.params_sanitized
@@ -761,6 +762,26 @@ class UninstallAppAction(Action):
             if is_dev:
                 await _start_dev_redis(ctx, bench_path)
                 started_redis = True
+
+            # Rule 5: automatic pre-op backup FIRST (with files), inside the dev
+            # Redis dance (redis is already up). Uninstalling an app is destructive
+            # (drops the app's DocTypes/data) — a failed backup aborts the uninstall.
+            await ctx.emit(
+                "Taking an automatic pre-uninstall backup before removing the app."
+            )
+            try:
+                await _run_backup(
+                    ctx,
+                    site=site,
+                    bench_path=bench_path,
+                    bench=bench,
+                    with_files=True,
+                    step_label="Pre-uninstall backup (with files)",
+                )
+            except Exception as exc:  # noqa: BLE001 — no uninstall without a safety net
+                raise RuntimeError(
+                    f"pre-uninstall backup failed ({exc}); not uninstalling {app}"
+                ) from exc
 
             with ctx.step(f"Uninstall {app} from {site}"):
                 await ctx.emit(f"$ {ctx.rendered.display}")

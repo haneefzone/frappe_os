@@ -14,6 +14,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.routes.jobs import get_job_runner
 from app.core import appsources
+from app.core import backups as bk
 from app.core.appsources import RepoSourceError, validate_repo_source
 from app.core.commands import MASK, get_template, render
 from app.core.commands.actions import _MODE_PROBE, _WRITE_KEY_SCRIPT
@@ -23,11 +24,21 @@ from app.core.security import get_secrets_service
 from app.db import Base
 from app.models import CommandJob, LogEntry, Server
 from app.models.app import AppSource, InstalledApp
+from app.models.backup import Backup
 from app.models.bench import Bench
 from app.models.site import Site
 from tests.conftest import csrf_headers, login
 
 BENCH_PATH = "/home/frappe/frappe-bench"
+# A realistic ARTIFACT_INSPECT_SCRIPT output for the uninstall pre-op backup.
+_BK = f"{BENCH_PATH}/sites/test1.localhost/private/backups"
+_PFX = "20260710_000000"
+INSPECT_WITH_FILES = (
+    f"ART\tdatabase.sql.gz\t{_BK}/{_PFX}-database.sql.gz\t1048576\t{'a' * 64}\n"
+    f"ART\tfiles.tar\t{_BK}/{_PFX}-files.tar\t2048\t{'b' * 64}\n"
+    f"ART\tprivate-files.tar\t{_BK}/{_PFX}-private-files.tar\t512\t{'c' * 64}\n"
+    f"ART\tsite_config_backup.json\t{_BK}/{_PFX}-site_config_backup.json\t256\t{'d' * 64}\n"
+)
 FAKE_KEY = (
     "-----BEGIN OPENSSH PRIVATE KEY-----\n"
     "abcDEF123/+==\nline2\n-----END OPENSSH PRIVATE KEY-----\n"
@@ -211,9 +222,12 @@ class AppExecutor:
     """Fake remote executor for the app actions. Records captured + streamed
     argvs; answers the mode probe, `bench version`, key staging and ls-remote."""
 
-    def __init__(self, *, prod=False, install_exit=0, branches=("main", "version-16")):
+    def __init__(
+        self, *, prod=False, install_exit=0, backup_exit=0, branches=("main", "version-16")
+    ):
         self._prod = prod
         self._install_exit = install_exit
+        self._backup_exit = backup_exit
         self._branches = branches
         self.captured: list[list[str]] = []
         self.streamed: list[list[str]] = []
@@ -224,6 +238,8 @@ class AppExecutor:
             return CaptureResult(0, "PROD" if self._prod else "DEV", "")
         if argv[:2] == ["bash", "-c"] and argv[2] == _WRITE_KEY_SCRIPT:
             return CaptureResult(0, "", "")
+        if argv[:2] == ["bash", "-c"] and argv[2] == bk.ARTIFACT_INSPECT_SCRIPT:
+            return CaptureResult(0, INSPECT_WITH_FILES, "")
         if argv[:2] == ["bench", "version"]:
             return CaptureResult(0, BENCH_VERSION_OUT, "")
         if argv[:1] == ["rm"]:
@@ -238,6 +254,9 @@ class AppExecutor:
         if argv[:2] == ["bench", "get-app"] or (argv[0] == "env" and "get-app" in argv):
             on_line("stdout", "cloning app repo")
             return 0
+        if "backup" in argv:
+            on_line("stdout", "backing up site")
+            return self._backup_exit
         if "install-app" in argv:
             on_line("stdout", "installing app on site")
             return self._install_exit
@@ -408,7 +427,46 @@ def test_uninstall_removes_matrix_row(sf):
     with sf() as db:
         assert db.get(CommandJob, job_id).status == "success"
         assert db.scalars(select(InstalledApp)).all() == []
-    # uninstall wrapped in the Redis dance.
+    # Rule 5: an automatic pre-op backup (with files) runs BEFORE the uninstall,
+    # both wrapped in the dev Redis dance. The backup command is the first bench
+    # invocation and the uninstall the second.
+    assert [a[0] for a in ex.streamed] == [
+        "redis-server", "redis-server", "bench", "bench", "redis-cli", "redis-cli"
+    ], ex.streamed
+    bench_cmds = [a for a in ex.streamed if a[0] == "bench"]
+    assert "backup" in bench_cmds[0] and "--with-files" in bench_cmds[0]
+    assert "uninstall-app" in bench_cmds[1]
+    # The backup was recorded as a visible Backup row taken by this job.
+    with sf() as db:
+        b = db.scalars(select(Backup)).one()
+        assert b.taken_by_job_id == job_id and b.status == "success"
+        assert b.type == "with-files"
+
+
+def test_uninstall_aborts_when_preop_backup_fails(sf):
+    """Rule 5: a failed pre-op backup aborts the uninstall — the app stays
+    installed and `uninstall-app` never runs (same posture as pre-restore)."""
+    with sf() as db:
+        server_id, bench_id = _bench(db, prod=False)
+        site_id = db.scalars(select(Site.id)).first()
+        appsources.upsert_installed_app(
+            db, site_id=site_id, bench_id=bench_id, app_name="erpnext", version="16.20.1"
+        )
+    ex = AppExecutor(prod=False, backup_exit=1)
+    runner, job_id = _run(
+        sf, action="app.uninstall", server_id=server_id,
+        target_id=f"{BENCH_PATH}::test1.localhost",
+        params={"site": "test1.localhost", "app": "erpnext", "bench_path": BENCH_PATH},
+    )
+    runner.run_job(job_id, executor_factory=fake_factory(ex))
+    with sf() as db:
+        assert db.get(CommandJob, job_id).status == "failure"
+        # The app is still installed — the uninstall was aborted.
+        assert len(db.scalars(select(InstalledApp)).all()) == 1
+        # The pre-op backup left a visible failed record, not a vanished row.
+        assert db.scalars(select(Backup)).one().status == "failed"
+    # backup command ran and failed; uninstall-app NEVER ran; Redis still shut down.
+    assert not any("uninstall-app" in a for a in ex.streamed), ex.streamed
     assert [a[0] for a in ex.streamed] == [
         "redis-server", "redis-server", "bench", "redis-cli", "redis-cli"
     ], ex.streamed
