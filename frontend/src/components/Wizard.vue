@@ -58,7 +58,7 @@
         </span>
         <Button
           variant="solid"
-          theme="gray"
+          :theme="isLast && submitTheme ? submitTheme : 'gray'"
           :label="isLast ? submitLabel : 'Continue'"
           :disabled="!canContinue"
           :loading="submitting"
@@ -85,6 +85,8 @@ const props = withDefaults(
     /** Gate for the Continue/submit button; parent validates the current step. */
     canContinue?: boolean
     submitting?: boolean
+    /** Override the final step's button theme; use 'red' for destructive submits. */
+    submitTheme?: 'gray' | 'red'
   }>(),
   { canContinue: true, submitting: false },
 )

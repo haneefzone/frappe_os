@@ -16,6 +16,7 @@
           v-model="active"
           :steps="steps"
           submit-label="Restore now"
+          submit-theme="red"
           :can-continue="canContinue"
           :submitting="submitting"
           @submit="submit"
@@ -85,10 +86,17 @@
                 </button>
               </div>
 
-              <!-- same_site: destructive banner -->
-              <p v-if="form.mode === 'same_site'" class="rounded-lg border border-err/40 bg-err/10 px-4 py-3 text-label text-err" role="alert">
-                This overwrites <strong>{{ selectedBackup?.site_name }}</strong> in place. Its current
-                data is replaced by the backup. An automatic pre-restore backup is taken first.
+              <!-- same_site / different_bench: destructive banner -->
+              <p v-if="destructive" class="rounded-lg border border-err/40 bg-err/10 px-4 py-3 text-label text-err" role="alert">
+                <template v-if="form.mode === 'same_site'">
+                  This overwrites <strong>{{ selectedBackup?.site_name }}</strong> in place — its
+                  current data is replaced by the backup.
+                </template>
+                <template v-else>
+                  This overwrites an existing site on the target bench — its current data is replaced
+                  by the backup.
+                </template>
+                An automatic pre-restore backup is taken first.
               </p>
 
               <!-- new_site / different_bench: bench + site name -->
@@ -111,10 +119,11 @@
                 <!-- new_site admin password -->
                 <div v-if="form.mode === 'new_site'">
                   <div class="mb-1 flex items-center justify-between">
-                    <label class="block text-meta font-medium uppercase tracking-wide text-ink-2" for="admin-pw">Administrator password</label>
-                    <Button variant="subtle" theme="gray" size="sm" label="Generate" @click="generatePassword" />
+                    <span class="text-meta font-medium uppercase tracking-wide text-ink-2">Administrator password</span>
+                    <Button variant="subtle" theme="gray" size="sm" label="Regenerate" @click="generatePassword" />
                   </div>
-                  <input id="admin-pw" v-model="form.adminPassword" type="text" v-bind="modalInput" class="fdm-focus w-full rounded-lg border border-line bg-base px-2.5 py-1.5 font-mono text-label text-ink-1" />
+                  <CopyField :value="form.adminPassword" mono />
+                  <p class="mt-1 text-meta text-ink-3">Save this before confirming — it won't be shown again.</p>
                 </div>
                 <!-- compatibility -->
                 <p
@@ -185,6 +194,7 @@ import {
 import { benchesApi, type Bench } from '../api/benches'
 import { ApiError } from '../api/client'
 import { streamJobLogs } from '../api/jobs'
+import CopyField from '../components/CopyField.vue'
 import EmptyState from '../components/EmptyState.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import StatusDot from '../components/StatusDot.vue'
@@ -259,9 +269,8 @@ const consequences = computed(() => {
     out.push(`Restore the database${b?.type === 'with-files' ? ' and files' : ''} from the backup into it.`)
   } else {
     out.push(`Overwrite ALL current data in ${site} with the backup.`)
-    out.push('Take an automatic pre-restore backup first (recoverable).')
   }
-  out.push('Copy the source encryption_key so encrypted fields decrypt (gotcha #7).')
+  out.push('Copy the source encryption_key so encrypted fields decrypt correctly.')
   out.push('Run bench migrate on the restored site.')
   return out
 })
@@ -326,6 +335,7 @@ function setMode(mode: RestoreMode) {
   form.mode = mode
   form.confirmName = ''
   compat.value = null
+  if (mode === 'new_site' && !form.adminPassword) generatePassword()
   if (mode !== 'same_site' && form.targetBenchId) checkCompat()
 }
 
