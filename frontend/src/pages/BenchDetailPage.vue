@@ -113,8 +113,8 @@
             />
             <Button
               v-if="canOperate && !bench.is_production"
-              variant="subtle"
-              theme="gray"
+              variant="solid"
+              theme="red"
               label="Set up production"
               :disabled="launching"
               @click="askBench('setup-production')"
@@ -272,7 +272,7 @@ const benchConfig = computed<BenchActionConfig>(() => {
         consequences: [
           'Rewrites this server’s nginx and supervisor configuration.',
           'Sites will be served by nginx/supervisor instead of bench start.',
-          'Runs under a temporary elevation that is removed when the job finishes.',
+          'Runs with temporary elevated privileges, removed automatically when the job finishes.',
           'Long-running — you’ll land on the live job log.',
         ],
         backupNotice:
