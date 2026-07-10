@@ -6,17 +6,18 @@
   >
     <div class="flex items-center gap-2 px-4 py-4" :class="collapsed && 'justify-center px-0'">
       <div
-        class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border text-xs font-bold"
+        class="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-md border text-xs font-bold"
         :style="{ borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }"
       >
-        F
+        <img v-if="logoUrl" :src="logoUrl" :alt="productName" class="h-full w-full object-contain" />
+        <template v-else>{{ productName.charAt(0).toUpperCase() }}</template>
       </div>
       <span
         v-if="!collapsed"
         class="truncate text-sm font-semibold"
         :style="{ color: 'var(--text-primary)' }"
       >
-        FDM Platform
+        {{ productName }}
       </span>
     </div>
 
@@ -53,10 +54,16 @@
 </template>
 
 <script setup lang="ts">
+import { storeToRefs } from 'pinia'
 import { navGroups, settingsItem } from '../../navigation'
+import { useSettingsStore } from '../../stores/settings'
 import SidebarLink from './SidebarLink.vue'
 
 defineProps<{ collapsed: boolean }>()
+
+// White-label branding: product name + logo from the settings store, with
+// sensible fallbacks (first letter in the bordered box when no logo is set).
+const { productName, logoUrl } = storeToRefs(useSettingsStore())
 
 const version = __APP_VERSION__
 </script>

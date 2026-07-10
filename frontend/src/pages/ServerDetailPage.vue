@@ -127,6 +127,57 @@
           </div>
         </section>
 
+        <!-- Live monitoring: resource gauges + service health -->
+        <section class="rounded-lg border border-line bg-surface lg:col-span-2">
+          <div class="flex items-center justify-between border-b border-line px-4 py-2.5">
+            <h2 class="text-label font-semibold text-ink-1">Live monitoring</h2>
+            <span v-if="latest" class="text-meta text-ink-3" :title="absoluteTime(latest.ts)">
+              {{ latest.ok ? relativeTime(latest.ts) : 'Last collection failed' }}
+            </span>
+          </div>
+
+          <div class="grid gap-6 p-4 lg:grid-cols-2">
+            <!-- Resource gauges -->
+            <div class="space-y-3">
+              <div v-if="monLoading && !latest" class="space-y-3">
+                <div v-for="i in 3" :key="i" class="h-6 animate-pulse rounded bg-raised" />
+              </div>
+              <template v-else-if="latest">
+                <ResourceGauge label="CPU" :pct="latest.cpu_pct" />
+                <ResourceGauge label="RAM" :pct="latest.mem_pct" />
+                <ResourceGauge label="Disk" :pct="latest.disk_pct" />
+                <div class="flex items-center justify-between pt-1 text-label">
+                  <span class="text-meta uppercase tracking-wide text-ink-3">Load (1m)</span>
+                  <span class="tabular-nums text-ink-1">{{ latest.load1 != null ? latest.load1.toFixed(2) : '—' }}</span>
+                </div>
+                <p v-if="latest.error" class="text-meta text-err">{{ latest.error }}</p>
+              </template>
+              <p v-else class="text-label text-ink-3">No samples collected yet.</p>
+            </div>
+
+            <!-- Services grid -->
+            <div class="space-y-2">
+              <div v-for="svc in SERVICES" :key="svc.key" class="flex items-center gap-3">
+                <StatusDot :status="serviceDot(serviceState(svc.key))" />
+                <span class="font-mono text-label text-ink-1">{{ svc.label }}</span>
+                <span class="text-meta text-ink-3">{{ serviceState(svc.key) }}</span>
+                <Button
+                  v-if="canManage"
+                  class="ml-auto"
+                  variant="subtle"
+                  theme="gray"
+                  size="sm"
+                  :label="`Restart ${svc.label}`"
+                  :disabled="restarting !== null"
+                  :loading="restarting === svc.key"
+                  @click="askRestart(svc.key)"
+                />
+              </div>
+              <p v-if="monError" class="text-meta text-err" role="alert">{{ monError }}</p>
+            </div>
+          </div>
+        </section>
+
         <!-- Connection checks (appear while/after testing) -->
         <section v-if="hasRun" class="rounded-lg border border-line bg-surface lg:col-span-2">
           <h2 class="border-b border-line px-4 py-2.5 text-label font-semibold text-ink-1">Connection checks</h2>
@@ -142,6 +193,22 @@
         </section>
       </div>
     </div>
+
+    <!-- Restart confirmation: a service restart is disruptive (spec B5). -->
+    <ConfirmModal
+      v-model="restartModalOpen"
+      variant="destructive"
+      :title="pendingService ? `Restart ${pendingService}` : 'Restart service'"
+      :message="pendingService ? `This restarts ${pendingService} on ${server?.name ?? 'this server'}.` : ''"
+      :verb="pendingService ? `Restart ${pendingService}` : 'Restart'"
+      :consequences="pendingService ? [
+        `${pendingService} will briefly stop and start again.`,
+        'In-flight requests to this service may be dropped.',
+      ] : []"
+      :loading="restarting !== null"
+      @confirm="confirmRestart"
+      @cancel="pendingService = null"
+    />
   </div>
 </template>
 
@@ -154,8 +221,17 @@ import LucideLoader2 from '~icons/lucide/loader-2'
 import LucidePlay from '~icons/lucide/play'
 import LucideRefreshCw from '~icons/lucide/refresh-cw'
 import { jobsApi } from '../api/jobs'
+import {
+  SERVICES,
+  monitoringApi,
+  type MonitoringSample,
+  type ServiceName,
+  type ServiceState,
+} from '../api/monitoring'
 import { serversApi, streamServerTest, type CheckEvent, type Server } from '../api/servers'
+import ConfirmModal from '../components/ConfirmModal.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
+import ResourceGauge from '../components/ResourceGauge.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { toast } from '../components/toast'
 import type { Status } from '../components/types'
@@ -163,6 +239,7 @@ import { STATUS_LABEL, absoluteTime, relativeTime, statusDot } from '../lib/serv
 import { ApiError } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import { useJobsStore } from '../stores/jobs'
+import { onUnmounted } from 'vue'
 
 type RowStatus = 'pending' | 'running' | 'ok' | 'fail' | 'skipped'
 
@@ -187,6 +264,68 @@ const toolRows = reactive<{ key: string; label: string; status: RowStatus; value
 const testing = ref(false)
 const hasRun = ref(false)
 const testError = ref('')
+
+// -- Live monitoring ---------------------------------------------------------
+const MON_POLL_MS = 15000
+const latest = ref<MonitoringSample | null>(null)
+const monLoading = ref(true)
+const monError = ref('')
+const restarting = ref<ServiceName | null>(null)
+const restartModalOpen = ref(false)
+const pendingService = ref<ServiceName | null>(null)
+let monTimer: ReturnType<typeof setInterval> | null = null
+
+function serviceState(key: ServiceName): ServiceState {
+  return (latest.value?.services?.[key] as ServiceState) ?? 'unknown'
+}
+
+function serviceDot(state: ServiceState): Status {
+  if (state === 'active') return 'ok'
+  if (state === 'failed') return 'err'
+  if (state === 'inactive') return 'warn'
+  return 'muted'
+}
+
+async function loadMonitoring(initial = false) {
+  if (initial) monLoading.value = true
+  try {
+    const res = await monitoringApi.get(serverId)
+    latest.value = res.latest
+    monError.value = ''
+  } catch (error) {
+    monError.value = error instanceof Error ? error.message : 'Could not load monitoring.'
+  } finally {
+    monLoading.value = false
+  }
+}
+
+function askRestart(service: ServiceName) {
+  pendingService.value = service
+  restartModalOpen.value = true
+}
+
+async function confirmRestart() {
+  const service = pendingService.value
+  if (!service || restarting.value) return
+  restarting.value = service
+  try {
+    const job = await monitoringApi.restartService(serverId, service)
+    jobsStore.merge(job)
+    restartModalOpen.value = false
+    pendingService.value = null
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'A job is already running on this server.'
+        : error instanceof Error
+          ? error.message
+          : `Could not restart ${service}.`
+    toast.error(message)
+  } finally {
+    restarting.value = null
+  }
+}
 
 const specs = computed(() => {
   const s = server.value
@@ -314,5 +453,13 @@ async function load() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  void loadMonitoring(true)
+  monTimer = setInterval(() => void loadMonitoring(), MON_POLL_MS)
+})
+
+onUnmounted(() => {
+  if (monTimer !== null) clearInterval(monTimer)
+})
 </script>

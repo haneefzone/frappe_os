@@ -2,17 +2,21 @@ import type { Component } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import { allNavItems } from '../navigation'
 import AppsPage from '../pages/AppsPage.vue'
+import AuditPage from '../pages/AuditPage.vue'
 import BackupsPage from '../pages/BackupsPage.vue'
 import BenchesPage from '../pages/BenchesPage.vue'
+import DashboardPage from '../pages/DashboardPage.vue'
 import JobsPage from '../pages/JobsPage.vue'
 import PlaceholderPage from '../pages/PlaceholderPage.vue'
 import RestorePage from '../pages/RestorePage.vue'
 import ServersPage from '../pages/ServersPage.vue'
+import SettingsPage from '../pages/SettingsPage.vue'
 import SitesPage from '../pages/SitesPage.vue'
 import TerminalPage from '../pages/TerminalPage.vue'
 
 // Real screens replace the placeholder as each session lands one.
 const pageOverrides: Record<string, Component> = {
+  dashboard: DashboardPage,
   servers: ServersPage,
   benches: BenchesPage,
   sites: SitesPage,
@@ -21,6 +25,8 @@ const pageOverrides: Record<string, Component> = {
   restore: RestorePage,
   jobs: JobsPage,
   terminal: TerminalPage,
+  'audit-log': AuditPage,
+  settings: SettingsPage,
 }
 
 // One route per sidebar item; unbuilt ones render the placeholder.
