@@ -38,7 +38,17 @@ frappe ALL=(root) NOPASSWD: /usr/sbin/nginx -t
 
 # bench setup production needs broader rights ONCE — run it with a temporary elevation, not a
 # permanent allowlist entry (Phase 2.5 decision point).
+#
+# RESOLVED in Session 2.5: the only standing grant is the fixed helper below; it installs a
+# time-boxed, single-command drop-in for `bench setup production <user>` and revokes it after
+# the run, so no permanent setup-production grant exists (drift-baseline-clean, Phase 6.7).
+frappe ALL=(root) NOPASSWD: /usr/local/sbin/fdm-elevate
 ```
+
+The Session 2.5 elevation mechanism and rollback are documented in
+`docs/production-setup.md`. The `fdm-elevate` helper ships in `deploy/fdm-elevate`; drift
+detection (6.7) hashes both `/etc/sudoers.d/fdm-platform` and asserts no
+`/etc/sudoers.d/fdm-prod-elevation` drop-in remains at rest.
 
 Rules: no wildcard binaries, no shell built-ins, absolute paths only, one drop-in file owned by the
 platform so drift detection (Phase 6.7) can hash it. Every sudo-using command template in

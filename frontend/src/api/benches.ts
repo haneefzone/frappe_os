@@ -116,4 +116,13 @@ export const benchesApi = {
   restart: (id: number) => apiClient.post<JobDetail>(`/api/benches/${id}/restart`, {}),
   migrateAll: (id: number) => apiClient.post<JobDetail>(`/api/benches/${id}/migrate-all`, {}),
   update: (id: number) => apiClient.post<JobDetail>(`/api/benches/${id}/update`, {}),
+  // Production setup (session 2.5) — convert a dev bench to production.
+  setupProduction: (id: number, payload: SetupProductionPayload = {}) =>
+    apiClient.post<JobDetail>(`/api/benches/${id}/setup-production`, payload),
+}
+
+/** Body for the dev→prod conversion; the user defaults server-side to `frappe`. */
+export interface SetupProductionPayload {
+  production_user?: string
+  priority?: 'high' | 'default' | 'low'
 }

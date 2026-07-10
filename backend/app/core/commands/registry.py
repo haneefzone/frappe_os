@@ -27,6 +27,7 @@ from app.core.commands.actions import (
     RestoreAction,
     SetMaintenanceAction,
     SetSchedulerAction,
+    SetupProductionAction,
     SiteBackupAction,
     SiteMaintenanceAction,
     UninstallAppAction,
@@ -850,6 +851,118 @@ register(
         # Per (server, service) lock: never restart the same service twice at once.
         requires_lock=True,
         required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
+
+# --- Production setup (session 2.5) ------------------------------------- #
+
+# A Linux username for `bench setup production <user>` (the bench-owner the
+# generated supervisor/nginx config runs as). POSIX-portable shape; passed as its
+# own argv element (execve, no shell) and re-validated by the fdm-elevate helper.
+LINUX_USER = r"[a-z_][a-z0-9_-]{0,31}"
+
+# The real conversion command, run under the TEMPORARY single-command sudoers
+# drop-in installed by `fdm-elevate grant`. `{bench_bin}` is the absolute bench
+# path the helper reported (server-sourced, ABS_PATH-validated — never user
+# input); `sudo -n` fails loudly if the drop-in isn't installed. Rendered as a
+# sub-step by SetupProductionAction; never launched on its own path.
+register(
+    CommandTemplate(
+        action_name="bench.setup_production_run",
+        argv=("sudo", "-n", "{bench_bin}", "setup", "production", "{production_user}"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("bench_bin", regex=ABS_PATH, is_path=True),
+            ParamSpec("production_user", regex=LINUX_USER),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=SetupProductionAction,  # unused directly; see note above.
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BENCH_OPERATE,
+        run_as=None,
+    )
+)
+
+# `sudo -n nginx -t` — the post-generation nginx config gate. Absolute path
+# matches the ratified sudoers allowlist line (`/usr/sbin/nginx -t`); `sudo -n`
+# fails loudly if that line isn't installed. No params. Rendered by
+# SetupProductionAction; also reusable by the 2.4 SSL vhost work.
+register(
+    CommandTemplate(
+        action_name="bench.nginx_test",
+        argv=("sudo", "-n", "/usr/sbin/nginx", "-t"),
+        cwd=None,
+        params=(),
+        action_class=SetupProductionAction,  # unused directly; see note above.
+        idempotent=True,  # read-only config test, safely repeatable.
+        requires_lock=False,
+        required_permission=BENCH_OPERATE,
+        run_as=None,
+    )
+)
+
+# The orchestrator POST /api/benches/{id}/setup-production launches (high queue,
+# long-running): detect dev/prod (refuse if already prod), pre-backup + hash the
+# nginx/supervisor config, install a time-boxed single-command sudoers drop-in,
+# run `bench setup production <user>`, toggle is_production, diff the config
+# before/after, `nginx -t`, and ALWAYS revoke the drop-in. Locked per bench.
+# Non-idempotent — a determinate failure is never auto-retried on a half-convert.
+register(
+    CommandTemplate(
+        action_name="bench.setup_production",
+        argv=("true",),  # nominal; SetupProductionAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("production_user", regex=LINUX_USER),
+        ),
+        action_class=SetupProductionAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BENCH_OPERATE,
+        run_as=None,
+    )
+)
+
+
+# --- Scheduled maintenance (session 2.1) -------------------------------- #
+
+# `backup.retention_sweep` — prune a site's backups down to its retention policy.
+# Nominal argv ("true"); RetentionSweepAction reads the site's Backup rows, logs a
+# dry-run kept/removed summary, then `rm -f`s the excess artifacts (each an
+# absolute argv element under private/backups/) and deletes their rows. It NEVER
+# removes the newest/only backup. Destructive (deletes) so non-idempotent (never
+# auto-retried) and locked per site so a sweep and a backup can't race. Gated on
+# BACKUP_CREATE: only Operator+ (who may create backups) can run one, and the
+# retention policy itself is only editable by schedule managers (Admin/Developer).
+# Imported locally (not via the shared import block) to keep concurrent-session
+# edits to this file collision-free.
+from app.core.commands.actions import (  # noqa: E402
+    RetentionSweepAction as _RetentionSweepAction,
+)
+
+# A small positive integer for retention counts/windows (1..99999). Its own argv
+# element; never reaches a shell.
+_POSITIVE_INT = r"[1-9][0-9]{0,4}"
+
+register(
+    CommandTemplate(
+        action_name="backup.retention_sweep",
+        argv=("true",),
+        cwd=None,
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("keep_last", regex=_POSITIVE_INT, required=False),
+            ParamSpec("keep_days", regex=_POSITIVE_INT, required=False),
+        ),
+        action_class=_RetentionSweepAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BACKUP_CREATE,
         run_as=None,
     )
 )

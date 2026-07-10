@@ -111,6 +111,14 @@
               :disabled="launching"
               @click="askBench('update')"
             />
+            <Button
+              v-if="canOperate && !bench.is_production"
+              variant="subtle"
+              theme="gray"
+              label="Set up production"
+              :disabled="launching"
+              @click="askBench('setup-production')"
+            />
           </div>
           <p class="px-4 pb-3 text-meta text-ink-3">
             Each action runs as a job — you'll land on its live log.
@@ -119,12 +127,14 @@
       </div>
     </div>
 
-    <!-- Maintenance confirm (build / restart / migrate-all / update) -->
+    <!-- Maintenance confirm (build / restart / migrate-all / update / set up production) -->
     <ConfirmModal
       v-model="benchOpen"
       :title="benchConfig.title"
       :message="benchConfig.message"
       :verb="benchConfig.verb"
+      :variant="benchConfig.variant"
+      :target-name="benchConfig.targetName"
       :consequences="benchConfig.consequences"
       :backup-notice="benchConfig.backupNotice"
       :loading="launching"
@@ -196,14 +206,24 @@ async function load() {
   }
 }
 
-// -- Maintenance actions (session 1.10) --------------------------------------
-type BenchAction = 'build' | 'restart' | 'migrate-all' | 'update'
+// -- Maintenance actions (session 1.10) + production setup (session 2.5) ------
+type BenchAction = 'build' | 'restart' | 'migrate-all' | 'update' | 'setup-production'
+
+interface BenchActionConfig {
+  title: string
+  verb: string
+  message: string
+  consequences: string[]
+  backupNotice?: string
+  variant?: 'standard' | 'destructive'
+  targetName?: string
+}
 
 const benchOpen = ref(false)
 const launching = ref(false)
 const benchAction = ref<BenchAction>('build')
 
-const benchConfig = computed(() => {
+const benchConfig = computed<BenchActionConfig>(() => {
   const isProd = bench.value?.is_production ?? false
   switch (benchAction.value) {
     case 'restart':
@@ -219,7 +239,6 @@ const benchConfig = computed(() => {
               'The job will exit with an informative failure.',
               'Start the bench manually with bench start.',
             ],
-        backupNotice: undefined as string | undefined,
       }
     case 'migrate-all':
       return {
@@ -230,7 +249,6 @@ const benchConfig = computed(() => {
           'Applies pending database patches to each site.',
           'Best run during a maintenance window on production.',
         ],
-        backupNotice: undefined as string | undefined,
       }
     case 'update':
       return {
@@ -241,7 +259,24 @@ const benchConfig = computed(() => {
           'Expect downtime while the update runs and services restart.',
           'Long-running — you’ll land on the live job log.',
         ],
-        backupNotice: 'A db-only snapshot of every site on this bench.' as string | undefined,
+        backupNotice: 'A db-only snapshot of every site on this bench.',
+      }
+    case 'setup-production':
+      return {
+        title: 'Set up production',
+        verb: 'Set up production',
+        variant: 'destructive',
+        targetName: bench.value?.name,
+        message:
+          'Convert this dev bench to production: generate nginx + supervisor config and serve its sites under them.',
+        consequences: [
+          'Rewrites this server’s nginx and supervisor configuration.',
+          'Sites will be served by nginx/supervisor instead of bench start.',
+          'Runs under a temporary elevation that is removed when the job finishes.',
+          'Long-running — you’ll land on the live job log.',
+        ],
+        backupNotice:
+          'A full pre-backup of /etc/nginx and /etc/supervisor (for rollback) is taken first.',
       }
     default:
       return {
@@ -249,7 +284,6 @@ const benchConfig = computed(() => {
         verb: 'Run build',
         message: 'Recompile this bench’s JS/CSS assets (bench build).',
         consequences: ['Rebuilds frontend assets; no downtime.'],
-        backupNotice: undefined as string | undefined,
       }
   }
 })
@@ -270,7 +304,9 @@ async function confirmBench() {
           ? benchesApi.restart
           : benchAction.value === 'migrate-all'
             ? benchesApi.migrateAll
-            : benchesApi.update
+            : benchAction.value === 'setup-production'
+              ? benchesApi.setupProduction
+              : benchesApi.update
     const job = await launch(benchId)
     benchOpen.value = false
     router.push(`/jobs/${job.id}`)

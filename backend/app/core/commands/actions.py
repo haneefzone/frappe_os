@@ -1499,3 +1499,331 @@ class RestartServiceAction(Action):
                     f"systemctl restart {service} exited with status {code} "
                     "(is the fdm-platform sudoers allowlist installed on this server?)"
                 )
+
+
+# --------------------------------------------------------------------------- #
+# Production setup (session 2.5)
+# --------------------------------------------------------------------------- #
+
+# The one-shot pre-backup tar path. Under the fixed prefix the fdm-elevate helper
+# confines to (never /etc or /root); the job id keeps concurrent-server runs
+# distinct. Rollback = extract this tar back over /etc and restart services.
+_PREBACKUP_PREFIX = "/var/backups/fdm"
+
+# How many changed/added/removed config paths to spell out in the timeline before
+# collapsing to a count (the full lists are in the POSTCONFIG_RESULT json line).
+_DIFF_PREVIEW = 40
+
+
+def _set_bench_production(ctx: JobContext, bench_path: str) -> None:
+    """Flip the discovered Bench row to production so the UI reflects the new
+    mode immediately (without waiting for the next discovery)."""
+    bench = _load_bench(ctx, bench_path)
+    if bench is not None and not bench.is_production:
+        bench.is_production = True
+        ctx.session.commit()
+
+
+class SetupProductionAction(Action):
+    """`bench.setup_production` — convert a DEV bench to production (session 2.5).
+
+    Runs `bench setup production <user>`, which rewrites the server's nginx +
+    supervisor config to serve the bench's sites under supervisor/nginx instead
+    of the dev `bench start`. Highest-sensitivity Phase 2 item: it needs root.
+
+    Sudo decision point (implementation-plan.md 2.5): the platform does NOT hold
+    a permanent `bench setup production` sudo grant. The only standing grant is
+    the fixed `fdm-elevate` helper, which (1) captures + tars the nginx/supervisor
+    config for a pre-backup and (2) installs a TIME-BOXED, single-command sudoers
+    drop-in permitting exactly one `bench setup production <user>` run — then this
+    action removes it again in a `finally`, so at rest no sudo path to setup
+    production exists (drift-baseline-clean, Phase 6.7).
+
+    Ordered steps:
+      1. detect mode — refuse if the bench is already production;
+      2. pre-op config capture: tar /etc/nginx + /etc/supervisor (rollback) and
+         record the before-state manifest (sha256 per file);
+      3. grant temporary elevation (install the drop-in), capturing the exact
+         bench binary the drop-in allows;
+      4. run `sudo -n <bench> setup production <user>`;
+      5. toggle Bench.is_production = True;
+      6. post-op config capture + before→after diff (emitted + POSTCONFIG_RESULT);
+      7. `sudo -n nginx -t` gate;
+      finally: revoke the temporary elevation (always).
+
+    Non-idempotent: a determinate failure is never auto-retried on top of a
+    half-converted bench.
+    """
+
+    async def run(self, ctx: JobContext) -> None:
+        import json
+
+        from app.core import production as prod
+        from app.core.commands import get_template, render
+
+        params = ctx.rendered.params_sanitized
+        bench_path = params["bench_path"]
+        user = params["production_user"]
+
+        # 1) Refuse to "convert" a bench that is already production.
+        is_dev = await _detect_bench_mode(ctx, bench_path)
+        if not is_dev:
+            with ctx.step("Production setup gate"):
+                await ctx.emit(
+                    "This bench already has supervisor/systemd config — it is "
+                    "already set up for production. Nothing to convert."
+                )
+                raise RuntimeError("bench is already in production mode")
+
+        # 2) Pre-op config capture: tar the config for rollback + before-manifest.
+        prebackup_tar = f"{_PREBACKUP_PREFIX}/pre-production-job{ctx.job_id}.tar.gz"
+        before: dict[str, str] = {}
+        with ctx.step("Capture nginx/supervisor config (pre-backup)"):
+            await ctx.emit(
+                f"Backing up {', '.join(prod.CAPTURED_CONFIG_ROOTS)} to {prebackup_tar} "
+                "before conversion (rollback: extract this tar back over /etc and "
+                "restart nginx + supervisor)."
+            )
+            res = await ctx.capture(
+                ["sudo", "-n", "/usr/local/sbin/fdm-elevate", "backup", prebackup_tar]
+            )
+            if res.exit_code != 0:
+                raise RuntimeError(
+                    "config pre-backup failed "
+                    f"(status {res.exit_code}); is the fdm-elevate helper + its "
+                    "sudoers line installed on this server? Not converting."
+                )
+            before = prod.parse_manifest(res.stdout)
+            await ctx.emit(
+                f"Pre-backup complete: {len(before)} config file(s) hashed "
+                f"under {', '.join(prod.CAPTURED_CONFIG_ROOTS)}."
+            )
+
+        # 3) Grant the time-boxed elevation and learn the exact bench binary.
+        with ctx.step("Grant temporary elevation (single-command sudoers drop-in)"):
+            res = await ctx.capture(
+                ["sudo", "-n", "/usr/local/sbin/fdm-elevate", "grant", user]
+            )
+            if res.exit_code != 0:
+                raise RuntimeError(
+                    f"could not install the temporary elevation (status {res.exit_code}); "
+                    "not running setup production"
+                )
+            bench_bin = _parse_bench_bin(res.stdout)
+            if bench_bin is None:
+                # Best-effort revoke before bailing — never leave a dangling grant.
+                await ctx.capture(
+                    ["sudo", "-n", "/usr/local/sbin/fdm-elevate", "revoke"]
+                )
+                raise RuntimeError(
+                    "elevation helper did not report the bench binary path; aborted"
+                )
+            await ctx.emit(
+                "Temporary elevation installed: a single-command drop-in permitting "
+                f"only `{bench_bin} setup production {user}`. It is removed again "
+                "when this job finishes."
+            )
+
+        try:
+            # 4) The actual conversion, permitted only by the temporary drop-in.
+            run = render(
+                get_template("bench.setup_production_run"),
+                {"bench_bin": bench_bin, "production_user": user, "bench_path": bench_path},
+            )
+            with ctx.step("Set up production (bench setup production)"):
+                await ctx.emit(f"$ {run.display}")
+                code = await ctx.stream(run.argv, cwd=run.cwd)
+                if code != 0:
+                    raise RuntimeError(
+                        f"bench setup production exited with status {code}"
+                    )
+
+            # 5) Toggle the bench to production so the UI reflects the new mode.
+            with ctx.step("Mark bench as production"):
+                _set_bench_production(ctx, bench_path)
+                await ctx.emit(f"{bench_path} is now a production bench.")
+
+            # 6) Post-op capture + before→after diff of the config trees.
+            with ctx.step("Diff nginx/supervisor config (before vs after)"):
+                res = await ctx.capture(
+                    ["sudo", "-n", "/usr/local/sbin/fdm-elevate", "manifest"]
+                )
+                after = prod.parse_manifest(res.stdout) if res.exit_code == 0 else {}
+                diff = prod.diff_manifests(before, after)
+                await ctx.emit(
+                    f"Config changes: {len(diff.added)} added, "
+                    f"{len(diff.changed)} changed, {len(diff.removed)} removed "
+                    f"({diff.unchanged} unchanged)."
+                )
+                for label, paths in (
+                    ("+", diff.added),
+                    ("~", diff.changed),
+                    ("-", diff.removed),
+                ):
+                    for path in paths[:_DIFF_PREVIEW]:
+                        await ctx.emit(f"  [{label}] {path}")
+                    if len(paths) > _DIFF_PREVIEW:
+                        await ctx.emit(f"  … and {len(paths) - _DIFF_PREVIEW} more")
+                await ctx.emit(
+                    "POSTCONFIG_RESULT " + json.dumps(diff.as_dict()), stream="result"
+                )
+
+            # 7) nginx -t gate — the generated vhosts must parse.
+            nginx = render(get_template("bench.nginx_test"), {})
+            with ctx.step("Validate nginx config (nginx -t)"):
+                await ctx.emit(f"$ {nginx.display}")
+                code = await ctx.stream(nginx.argv, cwd=nginx.cwd)
+                if code != 0:
+                    raise RuntimeError(
+                        f"nginx -t failed (status {code}) after setup production — the "
+                        "generated config did not validate; investigate or roll back "
+                        f"from {prebackup_tar}"
+                    )
+                await ctx.emit("nginx config valid — sites are served by nginx/supervisor.")
+        finally:
+            # Always revoke the temporary elevation, success or failure — no
+            # standing sudo path to setup production is left behind.
+            with ctx.step("Revoke temporary elevation"):
+                res = await ctx.capture(
+                    ["sudo", "-n", "/usr/local/sbin/fdm-elevate", "revoke"]
+                )
+                if res.exit_code == 0:
+                    await ctx.emit(
+                        "Temporary elevation revoked — the single-command drop-in is "
+                        "removed; no standing grant for setup production remains "
+                        "(drift baseline clean)."
+                    )
+                else:
+                    await ctx.emit(
+                        "WARNING: could not confirm removal of the temporary elevation "
+                        f"drop-in (status {res.exit_code}) — remove "
+                        "/etc/sudoers.d/fdm-prod-elevation manually and verify."
+                    )
+
+
+def _parse_bench_bin(stdout: str) -> str | None:
+    """Read the `BENCH_BIN=<abs path>` line the elevate helper prints on grant,
+    so the run step invokes the exact binary the drop-in permits. Returns None if
+    absent or not an absolute path."""
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("BENCH_BIN="):
+            path = line[len("BENCH_BIN=") :].strip()
+            if path.startswith("/"):
+                return path
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Scheduled maintenance (session 2.1)
+# --------------------------------------------------------------------------- #
+
+
+def _safe_backup_path(path: str) -> bool:
+    """A path is safe to `rm` only if it is absolute, has no `..` segment, and
+    lives under a site's `private/backups/` directory. The paths come from our
+    own inspect script (server-controlled, already absolute), so this is
+    defence-in-depth: a retention sweep can only ever delete backup artifacts,
+    never live data — even if a Backup row were somehow tampered."""
+    from app.core.commands.templates import has_dotdot_segment
+
+    return (
+        path.startswith("/")
+        and not has_dotdot_segment(path)
+        and "/private/backups/" in path
+    )
+
+
+class RetentionSweepAction(Action):
+    """`backup.retention_sweep` — prune a site's backups down to its policy
+    (session 2.1). Reuses the 1.11 backup inventory: it reads the site's `Backup`
+    rows, decides which fall outside the retention window (`keep_last` /
+    `keep_days`), and removes the excess — files on the server AND their rows.
+
+    Destructive-class, so it is guarded, not blind:
+      1. it NEVER deletes the newest/only backup (safety floor in `plan_retention`);
+      2. it logs a dry-run summary (kept vs to-remove, each listed) BEFORE any
+         delete, so the timeline records exactly what was pruned and why;
+      3. every artifact path is re-validated to live under `private/backups/`
+         with no `..` before `rm` (so a sweep can only touch backup files).
+
+    Non-idempotent (deletes), so it is never auto-retried. The paths are absolute
+    argv elements to `rm -f` (execve, no shell) — nothing is interpolated."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from datetime import UTC, datetime
+
+        from sqlalchemy import select
+
+        from app.core import backups as bk
+        from app.models.backup import Backup
+
+        params = ctx.rendered.params_sanitized
+        site_name = params["site"]
+        bench_path = params["bench_path"]
+        keep_last = int(params["keep_last"]) if params.get("keep_last") else None
+        keep_days = int(params["keep_days"]) if params.get("keep_days") else None
+        now = datetime.now(UTC)
+
+        bench = _load_bench(ctx, bench_path)
+        site = _load_site(ctx, bench, site_name)
+
+        with ctx.step("Evaluate retention policy"):
+            if site is None:
+                await ctx.emit(
+                    f"Site {site_name!r} is not in inventory; nothing to sweep."
+                )
+                return
+            rows = list(
+                ctx.session.scalars(select(Backup).where(Backup.site_id == site.id)).all()
+            )
+            keep, remove = bk.plan_retention(
+                rows, keep_last=keep_last, keep_days=keep_days, now=now
+            )
+            policy = (
+                ", ".join(
+                    p
+                    for p in (
+                        f"keep last {keep_last}" if keep_last is not None else None,
+                        f"keep {keep_days} day(s)" if keep_days is not None else None,
+                    )
+                    if p
+                )
+                or "keep all"
+            )
+            await ctx.emit(
+                f"Retention policy [{policy}] for {site_name}: "
+                f"{len(keep) + len(remove)} successful backup(s), "
+                f"{len(keep)} to keep, {len(remove)} to remove (dry-run)."
+            )
+            for b in remove:
+                created = b.created_at.isoformat() if b.created_at else "?"
+                mb = (b.size_bytes or 0) / (1024 * 1024)
+                await ctx.emit(
+                    f"  will remove backup #{b.id} ({b.type}, {created}, {mb:.1f} MB)"
+                )
+
+        if not remove:
+            with ctx.step("No backups beyond retention"):
+                await ctx.emit("Nothing to prune; the newest backup is always kept.")
+            return
+
+        removed_ids: list[int] = []
+        with ctx.step(f"Remove {len(remove)} expired backup(s)"):
+            for b in remove:
+                all_paths = bk.retention_artifact_paths(b)
+                paths = [p for p in all_paths if _safe_backup_path(p)]
+                for p in (p for p in all_paths if not _safe_backup_path(p)):
+                    await ctx.emit(f"  SKIP unsafe path (not under private/backups): {p}")
+                if paths:
+                    await ctx.emit(f"$ rm -f {' '.join(paths)}")
+                    code = await ctx.stream(["rm", "-f", *paths], cwd=bench_path)
+                    if code != 0:
+                        raise RuntimeError(f"rm of backup #{b.id} artifacts exited {code}")
+                ctx.session.delete(b)
+                removed_ids.append(b.id)
+            ctx.session.commit()
+            kept_ids = ", ".join(str(k.id) for k in keep) or "none"
+            await ctx.emit(
+                f"Pruned {len(removed_ids)} backup(s); {len(keep)} kept (ids {kept_ids})."
+            )

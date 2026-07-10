@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+#
+# fdm-elevate — the FDM Platform's single-purpose privileged helper for the
+# dev→production conversion (session 2.5, "Phase 2.5 sudo decision point").
+#
+# THE DECISION (documented for the ISO review):
+#   `bench setup production` genuinely needs root — it rewrites /etc/nginx and
+#   /etc/supervisor and enables services. The implementation plan's sudoers
+#   allowlist deliberately does NOT grant `bench setup production` a permanent
+#   NOPASSWD line ("run it with a temporary elevation, not a permanent allowlist
+#   entry"). This helper is how we honour that:
+#
+#     * The ONLY standing sudo grant is for THIS fixed, absolute, argument-
+#       validated script (mirrors the ratified `supervisorctl restart *` style —
+#       fixed binary, self-validating args, no interactive shell).
+#     * That standing grant lets the platform (a) read/hash and tar the config
+#       for a pre-backup, and (b) install and immediately REVOKE a *time-boxed,
+#       single-command* sudoers drop-in that permits exactly one invocation of
+#       `bench setup production <user>` and nothing else.
+#     * At rest there is NO sudo path to `bench setup production`: the drop-in is
+#       created just before the run and removed in the job's `finally`, so the
+#       drift baseline (Phase 6.7) can assert `/etc/sudoers.d/fdm-prod-elevation`
+#       does not exist. The elevation is temporary and revocable by construction.
+#
+# Install once per managed server (see docs/production-setup.md):
+#   sudo install -m 0755 -o root -g root deploy/fdm-elevate /usr/local/sbin/fdm-elevate
+#   # add to /etc/sudoers.d/fdm-platform (validated with visudo -cf):
+#   #   frappe ALL=(root) NOPASSWD: /usr/local/sbin/fdm-elevate
+#
+# Subcommands (each argument-validated; anything else exits non-zero):
+#   manifest            print "<sha256>  <path>" for every file under the config
+#                       roots (read-only) — used for the before/after diff.
+#   backup <TARPATH>    tar the config roots to TARPATH (0600) AND print the
+#                       manifest — the one-shot pre-backup for rollback.
+#   grant <USER>        install the time-boxed single-command drop-in and print
+#                       "BENCH_BIN=<abs path to bench>" so the caller runs the
+#                       exact binary the drop-in allows.
+#   revoke              remove the time-boxed drop-in (idempotent).
+#
+set -euo pipefail
+
+CONFIG_ROOTS=(/etc/nginx /etc/supervisor)
+DROPIN=/etc/sudoers.d/fdm-prod-elevation
+# TARPATH must live under this fixed prefix — no caller-chosen /etc or /root.
+BACKUP_PREFIX=/var/backups/fdm
+
+die() { echo "fdm-elevate: $*" >&2; exit 1; }
+
+# A Linux username: POSIX-portable shape. No shell metacharacters can pass.
+valid_user() { [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; }
+
+emit_manifest() {
+  # One "<sha256>  <path>" line per readable file under the config roots.
+  # -print0/xargs -0 keeps spaces in paths intact; unreadable files are skipped
+  # (a permission error on one file must not abort the whole capture).
+  local root
+  for root in "${CONFIG_ROOTS[@]}"; do
+    [[ -d "$root" ]] || continue
+    find "$root" -type f -print0 2>/dev/null \
+      | xargs -0 -r sha256sum 2>/dev/null || true
+  done
+}
+
+cmd_manifest() {
+  emit_manifest
+}
+
+cmd_backup() {
+  local tarpath="${1:-}"
+  [[ -n "$tarpath" ]] || die "backup needs a destination tar path"
+  # Confine the destination: must be an absolute path under the fixed prefix and
+  # must not climb out with '..'.
+  case "$tarpath" in
+    "$BACKUP_PREFIX"/*) : ;;
+    *) die "backup path must be under $BACKUP_PREFIX" ;;
+  esac
+  [[ "$tarpath" != *".."* ]] || die "backup path must not contain '..'"
+  install -d -m 0700 -o root -g root "$(dirname "$tarpath")"
+  local roots=()
+  local root
+  for root in "${CONFIG_ROOTS[@]}"; do
+    [[ -e "$root" ]] && roots+=("$root")
+  done
+  [[ ${#roots[@]} -gt 0 ]] || die "no config roots present to back up"
+  tar -czf "$tarpath" "${roots[@]}"
+  chmod 0600 "$tarpath"
+  # Print the manifest so one call is both the pre-backup and the before-state.
+  emit_manifest
+}
+
+cmd_grant() {
+  local user="${1:-}"
+  valid_user "$user" || die "invalid user"
+  local bench_bin
+  bench_bin="$(command -v bench || true)"
+  [[ -n "$bench_bin" && "$bench_bin" = /* ]] || die "could not resolve an absolute bench path"
+  # A single-command, non-wildcard drop-in: exactly this bench binary running
+  # `setup production <user>` and nothing else. 0440, validated before it counts.
+  umask 077
+  printf 'frappe ALL=(root) NOPASSWD: %s setup production %s\n' "$bench_bin" "$user" > "$DROPIN"
+  chmod 0440 "$DROPIN"
+  chown root:root "$DROPIN"
+  if ! visudo -cf "$DROPIN" >/dev/null 2>&1; then
+    rm -f "$DROPIN"
+    die "generated drop-in failed visudo validation; removed it"
+  fi
+  echo "BENCH_BIN=$bench_bin"
+}
+
+cmd_revoke() {
+  # Idempotent: removing an already-absent drop-in is success.
+  rm -f "$DROPIN"
+}
+
+main() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    manifest) cmd_manifest ;;
+    backup)   cmd_backup "$@" ;;
+    grant)    cmd_grant "$@" ;;
+    revoke)   cmd_revoke ;;
+    *) die "unknown subcommand: ${sub:-<none>}" ;;
+  esac
+}
+
+main "$@"

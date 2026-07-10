@@ -117,3 +117,19 @@ class BenchActionRequest(BaseModel):
     own default queue (update is long-running -> high)."""
 
     priority: str | None = None
+
+
+# --- Production setup (session 2.5) -------------------------------------- #
+
+# The conventional bench-owner the generated supervisor/nginx config runs as.
+DEFAULT_PRODUCTION_USER = "frappe"
+
+
+class SetupProductionRequest(BaseModel):
+    """Convert a dev bench to production (`bench setup production <user>`). The
+    bench comes from the path parameter; the body carries the OS user the
+    production config runs as (default the bench owner) and an optional queue
+    override (defaults high — the conversion is long-running)."""
+
+    production_user: str = DEFAULT_PRODUCTION_USER
+    priority: str | None = None

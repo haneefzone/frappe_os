@@ -34,6 +34,7 @@ from app.schemas.bench import (
     CreateBenchRequest,
     DiscoverRequest,
     PreflightRequest,
+    SetupProductionRequest,
     VersionMatrixEntryOut,
     VersionMatrixOut,
 )
@@ -51,6 +52,7 @@ BUILD_ACTION = "bench.build"
 RESTART_ACTION = "bench.restart"
 MIGRATE_ALL_ACTION = "bench.migrate_all"
 UPDATE_ACTION = "bench.update"
+SETUP_PRODUCTION_ACTION = "bench.setup_production"
 
 
 def _require_action_permission(user, action_name: str) -> None:
@@ -364,6 +366,47 @@ def migrate_all_sites(
         action_name=MIGRATE_ALL_ACTION,
         priority=body.priority or "default",
     )
+
+
+@router.post(
+    "/benches/{bench_id}/setup-production", status_code=201, response_model=JobDetail
+)
+def setup_production(
+    bench_id: int,
+    body: SetupProductionRequest,
+    db: DbSession,
+    runner: Runner,
+    user: CurrentUser,
+):
+    """Convert a dev bench to production (session 2.5, high queue, long-running).
+
+    Captures the nginx/supervisor config before conversion, runs `bench setup
+    production <user>` under a time-boxed elevation that is revoked when the job
+    finishes, toggles the bench to production and diffs the config. The frontend
+    navigates to the returned job's live log."""
+    bench = _get_bench_or_404(db, bench_id)
+    _require_action_permission(user, SETUP_PRODUCTION_ACTION)
+    try:
+        job = runner.create(
+            db,
+            action_name=SETUP_PRODUCTION_ACTION,
+            server_id=bench.server_id,
+            target_type="bench",
+            target_id=bench.path,
+            params={
+                "bench_path": bench.path,
+                "production_user": body.production_user,
+            },
+            priority=body.priority or "high",
+            created_by=user.id,
+        )
+    except RenderError as exc:
+        # Rejects a bad username / path at the boundary — nothing runs remotely.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LockConflict as exc:
+        return _conflict(exc, f"A job is already running on bench {bench.path!r}.")
+    db.refresh(job)
+    return JobDetail.from_model(job)
 
 
 @router.post("/benches/{bench_id}/update", status_code=201, response_model=JobDetail)
