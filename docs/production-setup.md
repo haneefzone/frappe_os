@@ -54,7 +54,15 @@ binary" posture as the ratified `supervisorctl restart *` line). That helper can
 - `grant <user>` — install `/etc/sudoers.d/fdm-prod-elevation` containing a
   **single, non-wildcard** line permitting exactly
   `<bench> setup production <user>` and nothing else (0440, validated with
-  `visudo -cf`), and print `BENCH_BIN=<abs path>`;
+  `visudo -cf`), and print `BENCH_BIN=<abs path>`. **`<bench>` is resolved
+  hardened (DOO-163):** never from the caller's `$PATH` (the bench user invokes
+  the helper over SSH and controls their environment) — it comes from a
+  root-owned pin file (`/etc/fdm-platform/bench-bin`) if present, else a lookup
+  on a fixed `SECURE_PATH`, then `readlink -f` canonicalisation. `grant` then
+  **refuses** unless the resolved binary *and every ancestor directory* are
+  owned by root and not group/other-writable. A NOPASSWD grant on a binary a
+  non-root user can overwrite is root-equivalent for that user, so the helper
+  fails closed rather than installing an unsafe drop-in;
 - `revoke` — remove that drop-in (idempotent).
 
 So the elevation to run `bench setup production` is **temporary by
@@ -85,6 +93,39 @@ sudo chmod 0440 /etc/sudoers.d/fdm-platform
 
 `nginx -t` uses the already-ratified `/usr/sbin/nginx -t` allowlist line — no
 extra grant.
+
+### bench must resolve to a root-owned binary (DOO-163)
+
+`grant` refuses if the resolved bench binary (or any directory on its path) is
+writable by a non-root user — otherwise the single-command drop-in would be a
+privilege-escalation vector. A stock Frappe host installs `bench` under the bench
+user's home (e.g. `/home/frappe/.local/bin/bench`), which **fails this check**.
+On such a host, install bench into a **root-owned** location so the path named in
+the drop-in cannot be rewritten by the bench user, **once per server, as root**:
+
+```bash
+# Install bench to a root-owned bin on the fixed SECURE_PATH (auto-discovered),
+# owned by root and not writable by the bench user:
+sudo install -m 0755 -o root -g root "$(command -v bench)" /usr/local/bin/bench
+
+# …or pin an already-root-owned absolute bench path explicitly:
+sudo install -d -m 0755 -o root -g root /etc/fdm-platform
+echo /usr/local/bin/bench | sudo tee /etc/fdm-platform/bench-bin
+sudo chown root:root /etc/fdm-platform/bench-bin
+sudo chmod 0644 /etc/fdm-platform/bench-bin
+```
+
+> **Scope of this check (and its inherent limit).** The hardening removes the
+> *avoidable* risk: the sudoers line can no longer name a caller-chosen or
+> bench-user-writable path, and a symlink can't redirect it after validation. It
+> does **not** turn `bench setup production` into a fully sandboxed operation —
+> bench is the bench user's own Python, so running it as root inherently executes
+> that user's code with root rights. That residual is inherent to
+> `bench setup production` and was the accepted Phase 2.5 tradeoff; keep it
+> bounded the way DOO-131 does — the grant is single-command and revoked in the
+> job's `finally`, never standing. Do **not** paper over the check with a
+> root-owned wrapper that `exec`s a bench-user-writable target: that satisfies
+> the path check while leaving the substituted-code hole wide open.
 
 ## Rollback
 

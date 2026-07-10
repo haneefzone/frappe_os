@@ -37,12 +37,37 @@
 #                       exact binary the drop-in allows.
 #   revoke              remove the time-boxed drop-in (idempotent).
 #
+# HARDENED bench resolution (DOO-163):
+#   The drop-in grants `frappe` NOPASSWD-root to run exactly `<BENCH_BIN> setup
+#   production <user>`. Two properties must hold or that grant is a privilege-
+#   escalation hole, so `grant` refuses unless both are satisfied:
+#     1. DETERMINISTIC — the bench path is NOT taken from the caller's $PATH
+#        (frappe invokes us over SSH and controls their environment). It is
+#        resolved from a root-owned pin file if present, else from a fixed
+#        SECURE_PATH, then canonicalised with `readlink -f` so a symlink swap
+#        can't redirect the grant after the checks.
+#     2. NON-WRITABLE — the resolved binary AND every ancestor directory up to /
+#        must be owned by root and not group/other-writable. If any component is
+#        writable by a non-root user, that user could replace the binary (or a
+#        directory on its path) and turn the single-command drop-in into an
+#        unconstrained root shell. We fail closed with an actionable message
+#        instead of installing an unsafe grant (install a root-owned bench at
+#        /usr/local/bin/bench or point the pin at one — see docs/production-setup.md).
+#
 set -euo pipefail
 
 CONFIG_ROOTS=(/etc/nginx /etc/supervisor)
 DROPIN=/etc/sudoers.d/fdm-prod-elevation
 # TARPATH must live under this fixed prefix — no caller-chosen /etc or /root.
 BACKUP_PREFIX=/var/backups/fdm
+# Fixed lookup PATH for resolving bench — deliberately does NOT inherit the
+# caller's $PATH, so the granted binary can't be chosen by the invoking user's
+# environment. Only root-writable, standard system locations.
+SECURE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Optional operator pin: a root-owned file whose first line is the absolute path
+# to bench. Honoured only when itself root-owned + not group/other-writable, so
+# the grantee cannot rewrite it to choose the granted binary.
+BENCH_BIN_PIN=/etc/fdm-platform/bench-bin
 
 die() { echo "fdm-elevate: $*" >&2; exit 1; }
 
@@ -88,12 +113,57 @@ cmd_backup() {
   emit_manifest
 }
 
+# Resolve the bench binary deterministically (property 1 above). Never consults
+# the caller's $PATH. Prints the canonical absolute path on stdout.
+resolve_bench_bin() {
+  local candidate=""
+  if [[ -e "$BENCH_BIN_PIN" ]]; then
+    # Only trust the pin if the grantee can't rewrite it.
+    assert_secure_path "$BENCH_BIN_PIN"
+    candidate="$(sed -n '1p' -- "$BENCH_BIN_PIN" | tr -d '[:space:]')"
+    [[ -n "$candidate" ]] || die "pin file $BENCH_BIN_PIN is empty"
+    [[ "$candidate" = /* ]] || die "pin file $BENCH_BIN_PIN must contain an absolute path"
+  else
+    candidate="$(PATH="$SECURE_PATH" command -v bench || true)"
+    [[ -n "$candidate" ]] || \
+      die "could not resolve bench on the fixed SECURE_PATH; install a root-owned bench at /usr/local/bin/bench or set the pin $BENCH_BIN_PIN"
+  fi
+  # Canonicalise so the permission checks and the sudoers entry refer to the
+  # real target, not a swappable symlink.
+  local real
+  real="$(readlink -f -- "$candidate" 2>/dev/null || true)"
+  [[ -n "$real" && "$real" = /* ]] || die "could not canonicalise bench path: $candidate"
+  [[ -f "$real" && -x "$real" ]] || die "resolved bench is not an executable file: $real"
+  printf '%s' "$real"
+}
+
+# Refuse if PATH itself or any ancestor directory is writable by anyone but root
+# (property 2 above). This is the classic "sudo-safe binary" rule: a NOPASSWD
+# grant on a path any non-root user can modify is root-equivalent for that user.
+assert_secure_path() {
+  local p="$1" owner_uid mode g o
+  while :; do
+    owner_uid="$(stat -c '%u' -- "$p" 2>/dev/null)" || die "cannot stat $p"
+    mode="$(stat -c '%a' -- "$p" 2>/dev/null)" || die "cannot stat $p"
+    [[ "$owner_uid" == "0" ]] || \
+      die "refusing to grant: $p is owned by uid $owner_uid, not root — a non-root owner could modify it, making the NOPASSWD grant root-equivalent"
+    # mode is octal (e.g. 755 or 2755); inspect the group + other write bits.
+    g="${mode: -2:1}"; o="${mode: -1:1}"
+    (( (g & 2) == 0 )) || die "refusing to grant: $p is group-writable ($mode)"
+    (( (o & 2) == 0 )) || die "refusing to grant: $p is world-writable ($mode)"
+    [[ "$p" == "/" ]] && break
+    p="$(dirname -- "$p")"
+  done
+}
+
 cmd_grant() {
   local user="${1:-}"
   valid_user "$user" || die "invalid user"
   local bench_bin
-  bench_bin="$(command -v bench || true)"
-  [[ -n "$bench_bin" && "$bench_bin" = /* ]] || die "could not resolve an absolute bench path"
+  bench_bin="$(resolve_bench_bin)"
+  # Property 2: the binary and its whole path must be root-owned + unwritable by
+  # non-root, or the single-command drop-in would be an escalation vector.
+  assert_secure_path "$bench_bin"
   # A single-command, non-wildcard drop-in: exactly this bench binary running
   # `setup production <user>` and nothing else. 0440, validated before it counts.
   umask 077
@@ -124,4 +194,8 @@ main() {
   esac
 }
 
-main "$@"
+# Only run when executed directly, so the resolution/permission helpers can be
+# sourced and unit-tested without invoking a subcommand.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
