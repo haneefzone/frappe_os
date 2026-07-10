@@ -15,7 +15,7 @@
           appear
         >
           <aside
-            class="flex h-full w-full max-w-[520px] flex-col border-l border-line bg-base shadow-xl"
+            class="flex h-full w-full max-w-[520px] flex-col border-l border-line bg-base"
             role="dialog"
             aria-modal="true"
             aria-label="New schedule"
