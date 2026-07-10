@@ -404,7 +404,7 @@ register(
 
 # `bench --site X uninstall-app APP --yes` — DESTRUCTIVE (danger). Wrapped in the
 # Redis dance; type-the-app-name confirm enforced in the UI + API. Auto pre-op
-# backup (rule 5) wired when the backup engine lands (session 1.10).
+# backup (rule 5) wired when the backup engine lands (session 1.11).
 register(
     CommandTemplate(
         action_name="app.uninstall",

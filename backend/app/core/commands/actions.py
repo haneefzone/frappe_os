@@ -727,8 +727,8 @@ class UninstallAppAction(Action):
     matrix row. The type-the-app-name confirm is enforced in the UI + API.
 
     NOTE: CLAUDE.md rule 5 wants an automatic pre-action backup before a
-    destructive op; the backup engine lands in session 1.10, so this is wired to
-    take one then. Non-idempotent: never auto-retried."""
+    destructive op; the backup engine lands in session 1.11 (Backup & restore),
+    so this is wired to take one then. Non-idempotent: never auto-retried."""
 
     async def run(self, ctx: JobContext) -> None:
         params = ctx.rendered.params_sanitized
