@@ -187,6 +187,54 @@ def test_poll_and_store_failure_marks_offline(sf):
 
 
 # --------------------------------------------------------------------------- #
+# Leader-lease election (a leader must keep polling every tick)
+# --------------------------------------------------------------------------- #
+
+
+class FakeRedis:
+    """Minimal Redis supporting the poller's get/set(nx,ex) — no TTL expiry."""
+
+    def __init__(self):
+        self.store: dict[str, str] = {}
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def set(self, key, value, nx=False, ex=None):
+        if nx and key in self.store:
+            return None
+        self.store[key] = value
+        return True
+
+
+def test_leader_keeps_polling_every_tick_and_blocks_others(sf):
+    from app.core.monitoring import MonitoringPoller
+
+    redis = FakeRedis()
+    leader = MonitoringPoller(
+        FakeSSH(), sf, interval_seconds=60, retention_hours=1, redis_client=redis
+    )
+    other = MonitoringPoller(
+        FakeSSH(), sf, interval_seconds=60, retention_hours=1, redis_client=redis
+    )
+    # The leader takes the lease and — crucially — keeps it on the next tick
+    # (the old nx-only check returned False here, skipping every other poll).
+    assert leader._is_leader() is True
+    assert leader._is_leader() is True
+    # A second instance is blocked while the leader holds a live lease.
+    assert other._is_leader() is False
+
+
+def test_no_redis_means_single_process_polls(sf):
+    from app.core.monitoring import MonitoringPoller
+
+    poller = MonitoringPoller(
+        FakeSSH(), sf, interval_seconds=60, retention_hours=1, redis_client=None
+    )
+    assert poller._is_leader() is True
+
+
+# --------------------------------------------------------------------------- #
 # API surface
 # --------------------------------------------------------------------------- #
 

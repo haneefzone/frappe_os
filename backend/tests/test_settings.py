@@ -88,6 +88,9 @@ def test_logo_upload_and_fetch(client, tmp_path, monkeypatch):
         got = client.get("/api/settings/logo")
         assert got.status_code == 200
         assert got.content == PNG_1X1
+        # Served locked down so an uploaded SVG can't execute script (TA follow-up).
+        assert "default-src 'none'" in got.headers.get("content-security-policy", "")
+        assert got.headers.get("x-content-type-options") == "nosniff"
     finally:
         get_settings.cache_clear()
 

@@ -171,7 +171,16 @@ def get_logo(db: DbSession, _: Annotated[object, Depends(require(READ))]) -> Fil
     path = _stored_logo(row)
     if path is None:
         raise HTTPException(status_code=404, detail="No logo configured.")
-    return FileResponse(path)
+    # An uploaded SVG can carry inline script. Only an Admin can upload one, but
+    # serve every logo locked down so opening the URL directly can't execute it:
+    # a restrictive CSP + nosniff neutralises script/embed even for image/svg+xml.
+    return FileResponse(
+        path,
+        headers={
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/environment", response_model=EnvironmentInfo)

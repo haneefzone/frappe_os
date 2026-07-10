@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -52,6 +53,9 @@ MONITOR_ARGV = ["bash", "-lc", MONITOR_SNIPPET]
 
 # Probe must return fast; a hung server should fail the poll, not stall the loop.
 POLL_TIMEOUT_SECONDS = 20.0
+
+# Redis key for the single-poller lease (leader election across API workers).
+_LEADER_KEY = "fdm:monitoring:leader"
 
 
 @dataclass
@@ -250,6 +254,9 @@ class MonitoringPoller:
         self._interval = max(15, interval_seconds)
         self._retention = retention_hours
         self._redis = redis_client
+        # A token unique to this poller instance so a leader recognises its own
+        # lease and renews it (a bare "1" couldn't tell self from another holder).
+        self._token = f"{os.getpid()}:{id(self)}"
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
@@ -257,12 +264,21 @@ class MonitoringPoller:
         if self._redis is None:
             return True
         try:
-            # Renew our own lease or take a free one; another live leader blocks us.
-            return bool(
-                self._redis.set(
-                    "fdm:monitoring:leader", "1", nx=True, ex=self._interval * 2
-                )
-            )
+            ttl = self._interval * 2
+            holder = self._redis.get(_LEADER_KEY)
+            if holder is None:
+                # Lease is free — take it.
+                return bool(self._redis.set(_LEADER_KEY, self._token, nx=True, ex=ttl))
+            if isinstance(holder, bytes):
+                holder = holder.decode()
+            if holder == self._token:
+                # We already lead: RENEW the lease and keep polling every tick.
+                # (The previous nx-only check failed on our own live key, so the
+                # leader skipped every other tick — halving the real cadence.)
+                self._redis.set(_LEADER_KEY, self._token, ex=ttl)
+                return True
+            # Another live leader holds the lease.
+            return False
         except Exception:  # noqa: BLE001 — Redis blip: fall back to polling.
             return True
 
