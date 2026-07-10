@@ -1605,9 +1605,15 @@ class SetupProductionAction(Action):
                 ["sudo", "-n", "/usr/local/sbin/fdm-elevate", "grant", user]
             )
             if res.exit_code != 0:
+                # The hardened helper `die`s with actionable guidance on stderr
+                # (e.g. "install a root-owned bench at … or set the pin …").
+                # Surface that tail so the timeline shows *why* it refused and how
+                # to fix it, not just the bare status code.
+                hint = _elevate_stderr_tail(res.stderr)
+                detail = f": {hint}" if hint else ""
                 raise RuntimeError(
-                    f"could not install the temporary elevation (status {res.exit_code}); "
-                    "not running setup production"
+                    f"could not install the temporary elevation (status "
+                    f"{res.exit_code}){detail}; not running setup production"
                 )
             bench_bin = _parse_bench_bin(res.stdout)
             if bench_bin is None:
@@ -1699,6 +1705,21 @@ class SetupProductionAction(Action):
                         f"drop-in (status {res.exit_code}) — remove "
                         "/etc/sudoers.d/fdm-prod-elevation manually and verify."
                     )
+
+
+def _elevate_stderr_tail(stderr: str, *, max_len: int = 400) -> str:
+    """Trim the fdm-elevate helper's refusal guidance for embedding in an error
+    message / job-timeline line. Keeps the last few non-blank lines (that is where
+    the helper's `die` prints the actionable fix), collapsed onto one line and
+    capped so a runaway stderr can't bloat the RuntimeError. Returns "" when there
+    is nothing useful to show."""
+    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    tail = " ".join(lines[-4:])
+    if len(tail) > max_len:
+        tail = "…" + tail[-(max_len - 1) :]
+    return tail
 
 
 def _parse_bench_bin(stdout: str) -> str | None:

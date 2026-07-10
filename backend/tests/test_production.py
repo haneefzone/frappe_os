@@ -143,11 +143,31 @@ class ProdExecutor:
     test can assert the grant→run→revoke ordering and that revoke always runs.
     """
 
-    def __init__(self, *, prod=False, fail_on=None, fail_code=1, grant_fails=False):
+    # A realistic fdm-elevate refusal: the hardened helper `die`s with an
+    # actionable fix on stderr (DOO-163/DOO-174), which _setup_production must
+    # surface rather than swallow behind a bare status code (DOO-176).
+    GRANT_REFUSAL = (
+        "fdm-elevate: refusing to grant — bench at /home/frappe/frappe-bench "
+        "is not root-owned. install a root-owned bench at /usr/local/bin/bench "
+        "or set the FDM_BENCH_BIN pin to a root-owned path."
+    )
+
+    def __init__(
+        self,
+        *,
+        prod=False,
+        fail_on=None,
+        fail_code=1,
+        grant_fails=False,
+        grant_stderr=None,
+    ):
         self._prod = prod
         self._fail_on = fail_on
         self._fail_code = fail_code
         self._grant_fails = grant_fails
+        self._grant_stderr = (
+            self.GRANT_REFUSAL if grant_stderr is None else grant_stderr
+        )
         self.streamed: list[list[str]] = []
         self.captured: list[list[str]] = []
         # before-manifest returned by `backup`, after-manifest returned by `manifest`.
@@ -171,7 +191,7 @@ class ProdExecutor:
                 return CaptureResult(0, self.before, "")
             if sub == "grant":
                 if self._grant_fails:
-                    return CaptureResult(1, "", "denied")
+                    return CaptureResult(1, "", self._grant_stderr)
                 return CaptureResult(0, f"BENCH_BIN={BENCH_BIN}\n", "")
             if sub == "manifest":
                 return CaptureResult(0, self.after, "")
@@ -405,6 +425,31 @@ def test_setup_production_grant_failure_aborts_before_run(sf):
     assert not any(a[2:4] == [BENCH_BIN, "setup"] for a in ex.streamed)
     # Pre-backup happened before the failed grant.
     assert ex.elevate_subs()[0] == "backup"
+    # DOO-176: the helper's actionable refusal guidance (on stderr) is surfaced
+    # in the failed grant step's error, not just a bare status code.
+    with sf() as db:
+        grant_step = db.scalars(
+            select(CommandStep)
+            .where(CommandStep.job_id == job_id)
+            .where(CommandStep.name.like("Grant temporary elevation%"))
+        ).one()
+    assert grant_step.error_traceback is not None
+    assert "not root-owned" in grant_step.error_traceback
+    assert "set the FDM_BENCH_BIN pin" in grant_step.error_traceback
+
+
+def test_elevate_stderr_tail_trims_and_collapses():
+    from app.core.commands.actions import _elevate_stderr_tail
+
+    # Blank lines dropped, last lines kept, collapsed to a single line.
+    assert _elevate_stderr_tail("") == ""
+    assert _elevate_stderr_tail("   \n  \n") == ""
+    tail = _elevate_stderr_tail("noise\n\nbench not root-owned\nset the pin\n")
+    assert tail == "noise bench not root-owned set the pin"
+    # Runaway stderr is capped (with an ellipsis marker), keeping the tail.
+    capped = _elevate_stderr_tail("x" * 50 + "\nFIX ME NOW", max_len=12)
+    assert len(capped) == 12
+    assert capped.startswith("…") and capped.endswith("FIX ME NOW")
 
 
 # --------------------------------------------------------------------------- #
