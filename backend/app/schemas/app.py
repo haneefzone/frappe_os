@@ -1,0 +1,132 @@
+"""Request/response models for the apps API (session 1.9).
+
+The deploy key is WRITE-ONLY: it is accepted on create/update and stored Fernet-
+encrypted, but never returned — responses expose only `has_deploy_key`
+(CLAUDE.md rule 6, same pattern as the server's MariaDB root password).
+"""
+
+from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+from app.models.app import AppSource, InstalledApp
+
+
+class AppSourceOut(BaseModel):
+    """One app source (repo or marketplace name). Deploy key never returned."""
+
+    id: int
+    name: str
+    repo_url: str
+    kind: str
+    default_branch: str | None
+    is_private: bool
+    has_deploy_key: bool
+    notes: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_model(cls, s: AppSource) -> "AppSourceOut":
+        return cls(
+            id=s.id,
+            name=s.name,
+            repo_url=s.repo_url,
+            kind=s.kind,
+            default_branch=s.default_branch,
+            is_private=s.is_private,
+            has_deploy_key=bool(s.deploy_key_enc),
+            notes=s.notes,
+            created_at=s.created_at,
+            updated_at=s.updated_at,
+        )
+
+
+class CreateAppSourceRequest(BaseModel):
+    """Register a source. `repo_url` is a marketplace name or an allowlisted repo
+    URL (validated server-side). A private source should carry an SSH deploy
+    key (git@host:… URL) so the fetch can authenticate."""
+
+    name: str = Field(min_length=1, max_length=120)
+    repo_url: str = Field(min_length=1, max_length=300)
+    default_branch: str | None = Field(default=None, max_length=100)
+    is_private: bool = False
+    # PEM private key; write-only, stored encrypted.
+    deploy_key: str | None = Field(default=None, max_length=10000)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class UpdateAppSourceRequest(BaseModel):
+    """Patch a source. Any omitted field is left unchanged; `deploy_key=""`
+    clears the stored key, a non-empty value replaces it."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    repo_url: str | None = Field(default=None, min_length=1, max_length=300)
+    default_branch: str | None = Field(default=None, max_length=100)
+    is_private: bool | None = None
+    deploy_key: str | None = Field(default=None, max_length=10000)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class InstallAppRequest(BaseModel):
+    """Install an app on a site. Either give `app_source_id` (a saved source —
+    its repo_url + branch + deploy key are used) OR a raw `source` + `branch`
+    for an ad-hoc public repo, OR neither for an already-fetched marketplace app.
+    `app` is the module name to install (defaults to the source name)."""
+
+    app: str | None = Field(default=None, max_length=120)
+    app_source_id: int | None = None
+    source: str | None = Field(default=None, max_length=300)
+    branch: str | None = Field(default=None, max_length=100)
+    priority: str = "high"
+
+
+class UninstallAppRequest(BaseModel):
+    """Uninstall an app from a site. `confirm_name` must equal the app name
+    (type-the-target-name-to-confirm, CLAUDE.md rule 5)."""
+
+    confirm_name: str = Field(min_length=1, max_length=120)
+    priority: str = "high"
+
+
+class ListBranchesRequest(BaseModel):
+    """Fetch remote branches for the picker. Runs `git ls-remote` on `server_id`
+    against `repo_url` (or a saved `app_source_id`, whose deploy key is used)."""
+
+    server_id: int
+    repo_url: str | None = Field(default=None, max_length=300)
+    app_source_id: int | None = None
+
+
+class InstalledAppOut(BaseModel):
+    """One app×site matrix cell."""
+
+    id: int
+    site_id: int
+    site_name: str
+    bench_id: int
+    bench_name: str
+    server_id: int
+    app_source_id: int | None
+    app_name: str
+    branch: str | None
+    version: str | None
+    installed_at: datetime | None
+
+    @classmethod
+    def from_model(
+        cls, ia: InstalledApp, *, site_name: str, bench_name: str, server_id: int
+    ) -> "InstalledAppOut":
+        return cls(
+            id=ia.id,
+            site_id=ia.site_id,
+            site_name=site_name,
+            bench_id=ia.bench_id,
+            bench_name=bench_name,
+            server_id=server_id,
+            app_source_id=ia.app_source_id,
+            app_name=ia.app_name,
+            branch=ia.branch,
+            version=ia.version,
+            installed_at=ia.installed_at,
+        )

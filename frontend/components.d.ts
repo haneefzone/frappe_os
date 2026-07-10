@@ -9,6 +9,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AddServerSheet: typeof import('./src/components/AddServerSheet.vue')['default']
+    AddSourceSheet: typeof import('./src/components/AddSourceSheet.vue')['default']
     AppSidebar: typeof import('./src/components/layout/AppSidebar.vue')['default']
     AppTopbar: typeof import('./src/components/layout/AppTopbar.vue')['default']
     ConfirmModal: typeof import('./src/components/ConfirmModal.vue')['default']

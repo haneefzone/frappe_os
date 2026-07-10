@@ -92,7 +92,9 @@ export const apiClient = {
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
   patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body),
-  delete: <T>(path: string) => request<T>('DELETE', path),
+  // A body is optional but supported — a destructive DELETE carries the
+  // type-the-target-name confirmation (CLAUDE.md rule 5).
+  delete: <T>(path: string, body?: unknown) => request<T>('DELETE', path, body),
 }
 
 export const authApi = {

@@ -36,7 +36,7 @@ Reference: `CLAUDE.md` (rules), `docs/implementation-plan.md` (architecture), `d
   *Accept:* create a fresh v16 bench on the VM end-to-end from the UI with live logs; pre-flight blocks when uv is missing.
 - [x] **1.8 Site list & create.** Site model; create wizard (bench → validated name → generated admin password → review → job) using gotcha #4 flags; handles dev-bench Redis gotcha #3 (start 11000/13000, stop after); site list with health dot + scheduler state; site detail Overview with quick actions (open ↗, maintenance toggle, scheduler toggle).
   *Accept:* create `test1.localhost` on the v16 bench from UI; site loads in browser; no interactive prompt ever hangs the job.
-- [ ] **1.9 App install (ERPNext / GitHub).** AppSource + InstalledApp models; add-source flow (URL → branch fetch → compatibility warning); `bench get-app --branch` + `install-app` jobs; private repo deploy-key support; installed-apps table on site detail.
+- [x] **1.9 App install (ERPNext / GitHub).** AppSource + InstalledApp models; add-source flow (URL → branch fetch → compatibility warning); `bench get-app --branch` + `install-app` jobs; private repo deploy-key support; installed-apps table on site detail.
   *Accept:* install ERPNext on the test site from UI; install one custom GitHub app by URL+branch.
 - [ ] **1.10 Maintenance actions.** Migrate / clear-cache / clear-website-cache / build / restart as jobs from bench + site detail, each behind ConfirmModal; bulk "migrate all sites on bench".
   *Accept:* each action produces a job with correct logs and audit rows.

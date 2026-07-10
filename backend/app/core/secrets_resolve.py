@@ -91,14 +91,24 @@ def resolve_secrets(
     sources = getattr(template, "secret_sources", None) or {}
     if not sources:
         return {}
+    optional = {
+        spec.name for spec in template.params if spec.secret and not spec.required
+    }
     job_bundle: dict[str, str] | None = None
     resolved: dict[str, str] = {}
     for name in template.secret_params:
         source = sources.get(name)
         if source is None:
             continue
-        if source == "job" and job_bundle is None:
-            job_bundle = decrypt_job_secrets(secrets, secrets_enc)
+        if source == "job":
+            if job_bundle is None:
+                job_bundle = decrypt_job_secrets(secrets, secrets_enc)
+            # An OPTIONAL job secret that the operator didn't supply (e.g. no
+            # deploy key for a public repo) is simply left unresolved — the
+            # action treats its absence as "not applicable". A REQUIRED one still
+            # fails loud in `_resolve_one`.
+            if name not in job_bundle and name in optional:
+                continue
         resolved[name] = _resolve_one(
             name,
             source,

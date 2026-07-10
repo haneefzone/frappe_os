@@ -1,6 +1,7 @@
 import type { Component } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import { allNavItems } from '../navigation'
+import AppsPage from '../pages/AppsPage.vue'
 import BenchesPage from '../pages/BenchesPage.vue'
 import JobsPage from '../pages/JobsPage.vue'
 import PlaceholderPage from '../pages/PlaceholderPage.vue'
@@ -13,6 +14,7 @@ const pageOverrides: Record<string, Component> = {
   servers: ServersPage,
   benches: BenchesPage,
   sites: SitesPage,
+  apps: AppsPage,
   jobs: JobsPage,
   terminal: TerminalPage,
 }

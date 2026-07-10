@@ -60,6 +60,11 @@ class Settings(BaseSettings):
 
     default_tz: str = "Asia/Dubai"
 
+    # Comma-separated allowlist of git hosts a repo App Source may point at
+    # (CLAUDE.md golden rule 1: repo URLs validated against a host allowlist).
+    # Marketplace bare names bypass this. Set via REPO_HOST_ALLOWLIST.
+    repo_host_allowlist: str = "github.com,gitlab.com"
+
     # Terminal idle timeout: WS closes if no input within this window. Warning
     # message is injected 60s before. Set via TERMINAL_IDLE_TIMEOUT_SECONDS.
     terminal_idle_timeout_seconds: int = 15 * 60
@@ -77,6 +82,10 @@ class Settings(BaseSettings):
     @property
     def trusted_proxy_ip_list(self) -> list[str]:
         return [host.strip() for host in self.trusted_proxy_ips.split(",") if host.strip()]
+
+    @property
+    def repo_host_allowlist_set(self) -> set[str]:
+        return {h.strip().lower() for h in self.repo_host_allowlist.split(",") if h.strip()}
 
     @model_validator(mode="after")
     def _require_real_secrets_outside_debug(self) -> "Settings":

@@ -15,15 +15,25 @@ from app.core.commands.actions import (
     DetectToolsAction,
     DiscoverBenchesAction,
     EchoDemoAction,
+    GetAppAction,
+    InstallAppOnSiteAction,
+    ListBranchesAction,
     SetMaintenanceAction,
     SetSchedulerAction,
+    UninstallAppAction,
 )
 from app.core.commands.templates import (
     CommandTemplate,
     ParamSpec,
     UnknownAction,
 )
-from app.core.permissions import BENCH_OPERATE, SERVER_MANAGE, SITE_OPERATE
+from app.core.permissions import (
+    APP_MANAGE,
+    BENCH_OPERATE,
+    DANGER,
+    SERVER_MANAGE,
+    SITE_OPERATE,
+)
 from app.core.version_matrix import SUPPORTED_BRANCHES, SUPPORTED_MAJORS
 
 # Whitelist for free-text demo input: word chars plus a few safe punctuation
@@ -58,6 +68,30 @@ SECRET_TEXT = r"[ -~]{1,128}"
 # bench command, validated as enums so nothing else can reach the CLI.
 SCHEDULER_STATES = ("enable", "disable")
 MAINTENANCE_STATES = ("on", "off")
+
+# A Frappe app / module name = the install-app/uninstall-app argument and a bare
+# marketplace get-app name. Lowercase alnum + underscore only.
+APP_NAME = r"[a-z0-9_]{1,60}"
+
+# A `bench get-app` source: a bare marketplace name OR an https/ssh repo URL.
+# This is a *character* whitelist only — no shell metacharacters (space ; ` $ (
+# ) & | < > \ or quotes) can pass. The HOST allowlist (github.com/gitlab.com,
+# configurable) is enforced structurally in app.core.appsources.validate_repo_source
+# before a source is ever stored or a job launched. Defence in depth.
+APP_SOURCE = r"[A-Za-z0-9._:/@-]{1,200}"
+
+# A git branch/ref name for --branch and the picker. No shell metacharacters.
+BRANCH_NAME = r"[A-Za-z0-9._/-]{1,100}"
+
+# A git remote URL for `git ls-remote` (never a bare name — the picker only
+# lists branches for a repo). Same shell-safe whitelist as APP_SOURCE.
+REPO_URL = r"[A-Za-z0-9._:/@-]{1,200}"
+
+# A staged deploy key (PEM). Never placed into a shell command (written to a
+# 0600 temp file via base64 through `capture`), so this is only a sanity bound:
+# printable ASCII + whitespace (PEM is multiline). Carried on the job as one
+# Fernet token and redacted from every log line.
+DEPLOY_KEY = r"[\s!-~]{1,10000}"
 
 
 _TEMPLATES: dict[str, CommandTemplate] = {}
@@ -291,5 +325,121 @@ register(
         requires_lock=False,
         required_permission=SERVER_MANAGE,
         run_as=None,
+    )
+)
+
+
+# --- App sources & install (session 1.9) -------------------------------- #
+
+# `bench get-app --branch {branch} {source}` — fetch an app onto a bench. The
+# source is a marketplace name or an allowlisted repo URL (host checked in
+# app.core.appsources before launch). Rendered as a sub-step by the orchestrator;
+# runnable standalone (public sources only — the private deploy-key dance lives
+# on the orchestrator + list-branches templates).
+register(
+    CommandTemplate(
+        action_name="app.get",
+        argv=("bench", "get-app", "--branch", "{branch}", "{source}"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("branch", regex=BRANCH_NAME),
+            ParamSpec("source", regex=APP_SOURCE),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=GetAppAction,
+        idempotent=False,  # re-fetching over an existing app dir isn't safe.
+        requires_lock=True,
+        required_permission=APP_MANAGE,
+        run_as=None,
+    )
+)
+
+# The real `bench --site X install-app APP`. Rendered as a sub-step by the
+# orchestrator (which wraps it in the dev-bench Redis dance); never launched on
+# its own path — see InstallAppOnSiteAction.
+register(
+    CommandTemplate(
+        action_name="app.install",
+        argv=("bench", "--site", "{site}", "install-app", "{app}"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("app", regex=APP_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=InstallAppOnSiteAction,  # unused directly; see note above.
+        idempotent=False,
+        requires_lock=True,
+        required_permission=APP_MANAGE,
+        run_as=None,
+    )
+)
+
+# The orchestrator POST /api/sites/{id}/apps launches: get-app (if a source is
+# given, with the deploy-key dance for private repos) -> install-app (Redis
+# dance) -> register the matrix row, all in ONE job locked on the site. The
+# deploy key is carried encrypted on the job and resolved at render time.
+register(
+    CommandTemplate(
+        action_name="site.install_app",
+        argv=("true",),  # nominal; InstallAppOnSiteAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("app", regex=APP_NAME),
+            ParamSpec("source", regex=APP_SOURCE, required=False),
+            ParamSpec("branch", regex=BRANCH_NAME, required=False),
+            ParamSpec("source_name", regex=APP_NAME, required=False),
+            ParamSpec("deploy_key", regex=DEPLOY_KEY, secret=True, required=False),
+        ),
+        action_class=InstallAppOnSiteAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=APP_MANAGE,
+        run_as=None,
+        secret_sources={"deploy_key": "job"},
+    )
+)
+
+# `bench --site X uninstall-app APP --yes` — DESTRUCTIVE (danger). Wrapped in the
+# Redis dance; type-the-app-name confirm enforced in the UI + API. Auto pre-op
+# backup (rule 5) wired when the backup engine lands (session 1.10).
+register(
+    CommandTemplate(
+        action_name="app.uninstall",
+        argv=("bench", "--site", "{site}", "uninstall-app", "{app}", "--yes"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("app", regex=APP_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=UninstallAppAction,
+        idempotent=False,  # destructive: never auto-retried.
+        requires_lock=True,
+        required_permission=DANGER,
+        run_as=None,
+    )
+)
+
+# `git ls-remote --heads {url}` for the branch picker. Read-only; emits a
+# BRANCHES_RESULT json line the wizard tails. Private sources pass a deploy key
+# (carried encrypted on the job) for the same GIT_SSH_COMMAND dance.
+register(
+    CommandTemplate(
+        action_name="app.list_branches",
+        argv=("git", "ls-remote", "--heads", "{url}"),
+        cwd=None,
+        params=(
+            ParamSpec("url", regex=REPO_URL),
+            ParamSpec("deploy_key", regex=DEPLOY_KEY, secret=True, required=False),
+        ),
+        action_class=ListBranchesAction,
+        idempotent=True,  # read-only, safely retried.
+        requires_lock=False,
+        required_permission=APP_MANAGE,
+        run_as=None,
+        secret_sources={"deploy_key": "job"},
     )
 )
