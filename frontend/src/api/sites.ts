@@ -48,4 +48,9 @@ export const sitesApi = {
     apiClient.post<JobDetail>(`/api/sites/${id}/scheduler`, { enabled }),
   setMaintenance: (id: number, enabled: boolean) =>
     apiClient.post<JobDetail>(`/api/sites/${id}/maintenance`, { enabled }),
+  // Maintenance actions (session 1.10) — each launches a job the caller opens.
+  migrate: (id: number) => apiClient.post<JobDetail>(`/api/sites/${id}/migrate`, {}),
+  clearCache: (id: number) => apiClient.post<JobDetail>(`/api/sites/${id}/clear-cache`, {}),
+  clearWebsiteCache: (id: number) =>
+    apiClient.post<JobDetail>(`/api/sites/${id}/clear-website-cache`, {}),
 }

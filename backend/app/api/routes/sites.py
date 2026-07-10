@@ -31,7 +31,12 @@ from app.models import Server
 from app.models.bench import Bench
 from app.models.site import Site
 from app.schemas.job import JobDetail
-from app.schemas.site import CreateSiteRequest, SiteOut, SiteToggleRequest
+from app.schemas.site import (
+    CreateSiteRequest,
+    SiteActionRequest,
+    SiteOut,
+    SiteToggleRequest,
+)
 
 router = APIRouter(prefix="/api", tags=["sites"])
 
@@ -41,6 +46,9 @@ Runner = Annotated[JobRunner, Depends(get_job_runner)]
 CREATE_ACTION = "site.create"
 SCHEDULER_ACTION = "site.set_scheduler"
 MAINTENANCE_ACTION = "site.set_maintenance"
+MIGRATE_ACTION = "site.migrate"
+CLEAR_CACHE_ACTION = "site.clear_cache"
+CLEAR_WEBSITE_CACHE_ACTION = "site.clear_website_cache"
 
 
 def _require_action_permission(user, action_name: str) -> None:
@@ -230,4 +238,104 @@ def set_maintenance(
         site=site,
         action_name=MAINTENANCE_ACTION,
         state="on" if body.enabled else "off",
+    )
+
+
+def _launch_site_maintenance(
+    db: Session,
+    runner: JobRunner,
+    user,
+    *,
+    site: Site,
+    action_name: str,
+    priority: str,
+):
+    """Shared launcher for the single-command site maintenance ops (migrate /
+    clear-cache / clear-website-cache): resolve the site's bench, enqueue the job
+    locked on the site, return the job. Each op runs `bench --site X <verb>`
+    wrapped in the dev-bench Redis dance by SiteMaintenanceAction."""
+    bench = db.get(Bench, site.bench_id)
+    if bench is None:  # pragma: no cover - FK-guaranteed
+        raise HTTPException(status_code=404, detail="Site's bench is missing.")
+    _require_action_permission(user, action_name)
+    try:
+        job = runner.create(
+            db,
+            action_name=action_name,
+            server_id=bench.server_id,
+            target_type="site",
+            target_id=f"{bench.path}::{site.name}",
+            params={"site": site.name, "bench_path": bench.path},
+            priority=priority,
+            created_by=user.id,
+        )
+    except RenderError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LockConflict as exc:
+        return _conflict(exc, f"A job is already running on site {site.name!r}.")
+    db.refresh(job)
+    return JobDetail.from_model(job)
+
+
+def _get_site_or_404(db: Session, site_id: int) -> Site:
+    site = db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="Site not found.")
+    return site
+
+
+@router.post("/sites/{site_id}/migrate", status_code=201, response_model=JobDetail)
+def migrate_site(
+    site_id: int,
+    body: SiteActionRequest,
+    db: DbSession,
+    runner: Runner,
+    user: CurrentUser,
+):
+    """Run `bench --site X migrate` on the site (pending schema patches)."""
+    site = _get_site_or_404(db, site_id)
+    return _launch_site_maintenance(
+        db, runner, user, site=site, action_name=MIGRATE_ACTION, priority=body.priority
+    )
+
+
+@router.post("/sites/{site_id}/clear-cache", status_code=201, response_model=JobDetail)
+def clear_site_cache(
+    site_id: int,
+    body: SiteActionRequest,
+    db: DbSession,
+    runner: Runner,
+    user: CurrentUser,
+):
+    """Run `bench --site X clear-cache` on the site."""
+    site = _get_site_or_404(db, site_id)
+    return _launch_site_maintenance(
+        db,
+        runner,
+        user,
+        site=site,
+        action_name=CLEAR_CACHE_ACTION,
+        priority=body.priority,
+    )
+
+
+@router.post(
+    "/sites/{site_id}/clear-website-cache", status_code=201, response_model=JobDetail
+)
+def clear_site_website_cache(
+    site_id: int,
+    body: SiteActionRequest,
+    db: DbSession,
+    runner: Runner,
+    user: CurrentUser,
+):
+    """Run `bench --site X clear-website-cache` on the site."""
+    site = _get_site_or_404(db, site_id)
+    return _launch_site_maintenance(
+        db,
+        runner,
+        user,
+        site=site,
+        action_name=CLEAR_WEBSITE_CACHE_ACTION,
+        priority=body.priority,
     )

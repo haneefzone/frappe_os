@@ -71,24 +71,88 @@
           </dl>
           <p class="px-4 py-2 text-meta text-ink-3">Parsed from sites/common_site_config.json.</p>
         </section>
+
+        <!-- Actions (session 1.10) — each launches a job you land on -->
+        <section
+          v-if="bench.status === 'active' && (canOperate || canMigrate)"
+          class="rounded-lg border border-line bg-surface lg:col-span-2"
+        >
+          <h2 class="border-b border-line px-4 py-2.5 text-label font-semibold text-ink-1">Actions</h2>
+          <div class="flex flex-wrap items-center gap-2 p-4">
+            <Button
+              v-if="canOperate"
+              variant="subtle"
+              theme="gray"
+              label="Build assets"
+              :disabled="launching"
+              @click="askBench('build')"
+            />
+            <Button
+              v-if="canOperate"
+              variant="subtle"
+              theme="gray"
+              label="Restart"
+              :disabled="launching"
+              @click="askBench('restart')"
+            />
+            <Button
+              v-if="canMigrate"
+              variant="subtle"
+              theme="gray"
+              label="Migrate all sites"
+              :disabled="launching"
+              @click="askBench('migrate-all')"
+            />
+            <Button
+              v-if="canOperate"
+              variant="solid"
+              theme="gray"
+              label="Update bench"
+              :disabled="launching"
+              @click="askBench('update')"
+            />
+          </div>
+          <p class="px-4 pb-3 text-meta text-ink-3">
+            Each action runs as a job — you'll land on its live log.
+          </p>
+        </section>
       </div>
     </div>
+
+    <!-- Maintenance confirm (build / restart / migrate-all / update) -->
+    <ConfirmModal
+      v-model="benchOpen"
+      :title="benchConfig.title"
+      :message="benchConfig.message"
+      :verb="benchConfig.verb"
+      :consequences="benchConfig.consequences"
+      :loading="launching"
+      @confirm="confirmBench"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
+import { Button } from 'frappe-ui'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import LucideArrowLeft from '~icons/lucide/arrow-left'
 import { benchesApi, type Bench } from '../api/benches'
+import { ApiError } from '../api/client'
+import ConfirmModal from '../components/ConfirmModal.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import StatusDot from '../components/StatusDot.vue'
+import { toast } from '../components/toast'
 import { benchStatusDot as benchDot, portRows, versionChip } from '../lib/benches'
 import { absoluteTime, relativeTime } from '../lib/servers'
+import { useAuthStore } from '../stores/auth'
 
 const route = useRoute()
 const router = useRouter()
 const benchId = Number(route.params.id)
+const auth = useAuthStore()
+const canOperate = auth.hasPermission('bench:operate')
+const canMigrate = auth.hasPermission('site:operate')
 
 const bench = ref<Bench | null>(null)
 const loading = ref(true)
@@ -128,6 +192,92 @@ async function load() {
     loadError.value = error instanceof Error ? error.message : 'Could not load this bench.'
   } finally {
     loading.value = false
+  }
+}
+
+// -- Maintenance actions (session 1.10) --------------------------------------
+type BenchAction = 'build' | 'restart' | 'migrate-all' | 'update'
+
+const benchOpen = ref(false)
+const launching = ref(false)
+const benchAction = ref<BenchAction>('build')
+
+const benchConfig = computed(() => {
+  const isProd = bench.value?.is_production ?? false
+  switch (benchAction.value) {
+    case 'restart':
+      return {
+        title: 'Restart bench',
+        verb: 'Restart bench',
+        message: 'Restart this bench’s services.',
+        consequences: isProd
+          ? ['Restarts services via supervisorctl — expect brief downtime.']
+          : [
+              'This is a development bench — it has no supervisor services to restart.',
+              'The job will report how to start it manually (bench start).',
+            ],
+      }
+    case 'migrate-all':
+      return {
+        title: 'Migrate all sites',
+        verb: 'Migrate all sites',
+        message: 'Run bench migrate on every site on this bench, one at a time.',
+        consequences: [
+          'Applies pending database patches to each site.',
+          'Best run during a maintenance window on production.',
+        ],
+      }
+    case 'update':
+      return {
+        title: 'Update bench',
+        verb: 'Update bench',
+        message: 'Update this bench: git pull, dependencies, patches, build, restart.',
+        consequences: [
+          'A db-only safety backup of every site runs first.',
+          'Expect downtime while the update runs and services restart.',
+          'Long-running — you’ll land on the live job log.',
+        ],
+      }
+    default:
+      return {
+        title: 'Build assets',
+        verb: 'Run build',
+        message: 'Recompile this bench’s JS/CSS assets (bench build).',
+        consequences: ['Rebuilds frontend assets; no downtime.'],
+      }
+  }
+})
+
+function askBench(action: BenchAction) {
+  benchAction.value = action
+  benchOpen.value = true
+}
+
+async function confirmBench() {
+  if (launching.value) return
+  launching.value = true
+  try {
+    const launch =
+      benchAction.value === 'build'
+        ? benchesApi.build
+        : benchAction.value === 'restart'
+          ? benchesApi.restart
+          : benchAction.value === 'migrate-all'
+            ? benchesApi.migrateAll
+            : benchesApi.update
+    const job = await launch(benchId)
+    benchOpen.value = false
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'A job is already running on this bench.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not start the action.'
+    toast.error(message)
+  } finally {
+    launching.value = false
   }
 }
 

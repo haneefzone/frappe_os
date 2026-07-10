@@ -108,3 +108,12 @@ class CreateBenchRequest(BaseModel):
     path: str = DEFAULT_BENCH_PARENT
     # bench init is long-running; default it to the high queue (spec 1.7).
     priority: str = "high"
+
+
+class BenchActionRequest(BaseModel):
+    """Launch a parameter-free bench maintenance action (build / restart /
+    migrate-all / update). The body only carries an optional queue override; the
+    bench comes from the path parameter (session 1.10). Each endpoint sets its
+    own default queue (update is long-running -> high)."""
+
+    priority: str | None = None

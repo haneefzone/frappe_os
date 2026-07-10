@@ -29,6 +29,7 @@ from app.db import get_db
 from app.models import Server
 from app.models.bench import Bench
 from app.schemas.bench import (
+    BenchActionRequest,
     BenchOut,
     CreateBenchRequest,
     DiscoverRequest,
@@ -46,6 +47,10 @@ Runner = Annotated[JobRunner, Depends(get_job_runner)]
 DISCOVER_ACTION = "bench.discover"
 PREFLIGHT_ACTION = "bench.preflight"
 CREATE_ACTION = "bench.create"
+BUILD_ACTION = "bench.build"
+RESTART_ACTION = "bench.restart"
+MIGRATE_ALL_ACTION = "bench.migrate_all"
+UPDATE_ACTION = "bench.update"
 
 
 def _require_action_permission(user, action_name: str) -> None:
@@ -253,3 +258,130 @@ def create_bench(
 
     db.refresh(job)
     return JobDetail.from_model(job)
+
+
+# --- Maintenance actions (session 1.10) --------------------------------- #
+
+
+def _launch_bench_action(
+    db: Session,
+    runner: JobRunner,
+    user,
+    *,
+    bench: Bench,
+    action_name: str,
+    priority: str,
+):
+    """Shared launcher for the parameter-free bench maintenance ops (build /
+    restart / migrate-all / update): enqueue the orchestrator job locked on the
+    bench path and return it."""
+    _require_action_permission(user, action_name)
+    try:
+        job = runner.create(
+            db,
+            action_name=action_name,
+            server_id=bench.server_id,
+            target_type="bench",
+            target_id=bench.path,
+            params={"bench_path": bench.path},
+            priority=priority,
+            created_by=user.id,
+        )
+    except RenderError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LockConflict as exc:
+        return _conflict(exc, f"A job is already running on bench {bench.path!r}.")
+    db.refresh(job)
+    return JobDetail.from_model(job)
+
+
+def _get_bench_or_404(db: Session, bench_id: int) -> Bench:
+    bench = db.get(Bench, bench_id)
+    if bench is None:
+        raise HTTPException(status_code=404, detail="Bench not found.")
+    return bench
+
+
+@router.post("/benches/{bench_id}/build", status_code=201, response_model=JobDetail)
+def build_bench(
+    bench_id: int,
+    body: BenchActionRequest,
+    db: DbSession,
+    runner: Runner,
+    user: CurrentUser,
+):
+    """Run `bench build` to (re)compile the bench's assets."""
+    bench = _get_bench_or_404(db, bench_id)
+    return _launch_bench_action(
+        db,
+        runner,
+        user,
+        bench=bench,
+        action_name=BUILD_ACTION,
+        priority=body.priority or "default",
+    )
+
+
+@router.post("/benches/{bench_id}/restart", status_code=201, response_model=JobDetail)
+def restart_bench(
+    bench_id: int,
+    body: BenchActionRequest,
+    db: DbSession,
+    runner: Runner,
+    user: CurrentUser,
+):
+    """Restart the bench's services. Production benches restart via
+    `sudo supervisorctl restart`; dev benches fail with an informative message
+    (they run via a manual `bench start`)."""
+    bench = _get_bench_or_404(db, bench_id)
+    return _launch_bench_action(
+        db,
+        runner,
+        user,
+        bench=bench,
+        action_name=RESTART_ACTION,
+        priority=body.priority or "high",
+    )
+
+
+@router.post(
+    "/benches/{bench_id}/migrate-all", status_code=201, response_model=JobDetail
+)
+def migrate_all_sites(
+    bench_id: int,
+    body: BenchActionRequest,
+    db: DbSession,
+    runner: Runner,
+    user: CurrentUser,
+):
+    """Migrate every known active site on the bench, each as its own step."""
+    bench = _get_bench_or_404(db, bench_id)
+    return _launch_bench_action(
+        db,
+        runner,
+        user,
+        bench=bench,
+        action_name=MIGRATE_ALL_ACTION,
+        priority=body.priority or "default",
+    )
+
+
+@router.post("/benches/{bench_id}/update", status_code=201, response_model=JobDetail)
+def update_bench(
+    bench_id: int,
+    body: BenchActionRequest,
+    db: DbSession,
+    runner: Runner,
+    user: CurrentUser,
+):
+    """Update the whole bench (long-running, high queue). An automatic db-only
+    safety backup of every site runs first."""
+    bench = _get_bench_or_404(db, bench_id)
+    return _launch_bench_action(
+        db,
+        runner,
+        user,
+        bench=bench,
+        action_name=UPDATE_ACTION,
+        priority=body.priority or "high",
+    )

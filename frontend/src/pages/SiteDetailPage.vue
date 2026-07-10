@@ -101,6 +101,37 @@
                 @click="toggleMaintenance"
               />
             </div>
+
+            <!-- Maintenance actions (session 1.10) — each launches a job -->
+            <div v-if="canOperate" class="border-t border-line pt-4">
+              <p class="text-label font-medium text-ink-1">Maintenance</p>
+              <p class="mt-0.5 text-meta text-ink-3">
+                Each runs as a job — you'll land on its live log.
+              </p>
+              <div class="mt-2 flex flex-wrap gap-2">
+                <Button
+                  variant="subtle"
+                  theme="gray"
+                  label="Migrate"
+                  :disabled="!!busy"
+                  @click="askMaint('migrate')"
+                />
+                <Button
+                  variant="subtle"
+                  theme="gray"
+                  label="Clear cache"
+                  :disabled="!!busy"
+                  @click="askMaint('clear-cache')"
+                />
+                <Button
+                  variant="subtle"
+                  theme="gray"
+                  label="Clear website cache"
+                  :disabled="!!busy"
+                  @click="askMaint('clear-website-cache')"
+                />
+              </div>
+            </div>
           </div>
         </section>
 
@@ -320,6 +351,17 @@
         'App data and tables are removed from the site.',
       ]"
       @confirm="confirmUninstall"
+    />
+
+    <!-- Maintenance confirm (migrate / clear-cache / clear-website-cache) -->
+    <ConfirmModal
+      v-model="maintOpen"
+      :title="maintConfig.title"
+      :message="maintConfig.message"
+      :verb="maintConfig.verb"
+      :consequences="maintConfig.consequences"
+      :loading="maintLaunching"
+      @confirm="confirmMaint"
     />
   </div>
 </template>
@@ -607,6 +649,72 @@ function toggleMaintenance() {
   if (!site.value) return
   const enable = !site.value.maintenance_mode
   runToggle('maintenance', () => sitesApi.setMaintenance(siteId, enable))
+}
+
+// -- Maintenance actions (session 1.10) --------------------------------------
+type MaintKind = 'migrate' | 'clear-cache' | 'clear-website-cache'
+
+const MAINT_META: Record<
+  MaintKind,
+  { title: string; verb: string; message: string; consequences: string[] }
+> = {
+  migrate: {
+    title: 'Migrate site',
+    verb: 'Run migrate',
+    message: 'Run pending schema migrations (bench migrate) on this site.',
+    consequences: [
+      'Applies pending database patches — this can take a while.',
+      'Best run during a maintenance window on production.',
+    ],
+  },
+  'clear-cache': {
+    title: 'Clear cache',
+    verb: 'Clear cache',
+    message: 'Flush this site’s Redis and in-process caches (bench clear-cache).',
+    consequences: ['Clears cached metadata; the next requests rebuild it.'],
+  },
+  'clear-website-cache': {
+    title: 'Clear website cache',
+    verb: 'Clear website cache',
+    message: 'Flush this site’s website/page cache (bench clear-website-cache).',
+    consequences: ['Clears rendered web pages; they re-render on the next visit.'],
+  },
+}
+
+const maintOpen = ref(false)
+const maintLaunching = ref(false)
+const maintKind = ref<MaintKind>('migrate')
+const maintConfig = computed(() => MAINT_META[maintKind.value])
+
+function askMaint(kind: MaintKind) {
+  maintKind.value = kind
+  maintOpen.value = true
+}
+
+async function confirmMaint() {
+  if (maintLaunching.value) return
+  maintLaunching.value = true
+  try {
+    const launch =
+      maintKind.value === 'migrate'
+        ? sitesApi.migrate
+        : maintKind.value === 'clear-cache'
+          ? sitesApi.clearCache
+          : sitesApi.clearWebsiteCache
+    const job = await launch(siteId)
+    maintOpen.value = false
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'A job is already running on this site.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not start the action.'
+    toast.error(message)
+  } finally {
+    maintLaunching.value = false
+  }
 }
 
 onMounted(() => {

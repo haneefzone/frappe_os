@@ -818,3 +818,263 @@ class ListBranchesAction(Action):
                     await ctx.capture(["rm", "-f", key_path])
 
         await ctx.emit("BRANCHES_RESULT " + json.dumps(sorted(branches)), stream="result")
+
+
+# --------------------------------------------------------------------------- #
+# Maintenance actions (session 1.10)
+# --------------------------------------------------------------------------- #
+
+
+def _active_sites(ctx: JobContext, bench):
+    """The bench's active (non-missing) sites from the platform inventory, for
+    the bulk migrate / update safety-backup fan-outs."""
+    from sqlalchemy import select
+
+    from app.models.site import Site
+
+    return list(
+        ctx.session.scalars(
+            select(Site)
+            .where(Site.bench_id == bench.id, Site.status == "active")
+            .order_by(Site.name)
+        ).all()
+    )
+
+
+class SiteMaintenanceAction(Action):
+    """Shared orchestrator for the single-command site maintenance ops
+    (`site.migrate`, `site.clear_cache`, `site.clear_website_cache`).
+
+    Each template renders its own fixed `bench --site X <verb>` argv; this action
+    detects dev vs production and, on a DEV bench, runs the bench-owned Redis
+    dance (gotcha #3) around the command — `migrate` and `clear-cache` touch the
+    bench's redis, which isn't up when `bench start` isn't running. The Redis is
+    shut back down in a `finally` even if the command failed, so a later `bench
+    start` can bind its ports."""
+
+    async def run(self, ctx: JobContext) -> None:
+        params = ctx.rendered.params_sanitized
+        site = params["site"]
+        bench_path = params["bench_path"]
+        # argv is ("bench", "--site", "{site}", "<verb>"); the verb is the label.
+        verb = ctx.rendered.argv[3] if len(ctx.rendered.argv) > 3 else "run"
+
+        bench = _load_bench(ctx, bench_path)
+        queue_port, cache_port = _redis_ports(bench)
+        is_dev = await _detect_bench_mode(ctx, bench_path)
+
+        started_redis = False
+        try:
+            if is_dev:
+                await _start_dev_redis(ctx, bench_path)
+                started_redis = True
+
+            with ctx.step(f"bench {verb} ({site})"):
+                await ctx.emit(f"$ {ctx.rendered.display}")
+                code = await ctx.stream(ctx.rendered.argv, cwd=ctx.rendered.cwd)
+                if code != 0:
+                    raise RuntimeError(f"bench {verb} exited with status {code}")
+        finally:
+            if started_redis:
+                await _stop_dev_redis(ctx, queue_port, cache_port)
+
+
+class SiteBackupAction(Action):
+    """`site.backup` — `bench --site X backup` (db-only, lightweight). Registered
+    so the update orchestrator renders the safety backup through the safe
+    registry. The full backup engine (artifact parsing, Backup rows, checksums)
+    lands in session 1.11; here it only runs the command as a safety pre-step."""
+
+    async def run(self, ctx: JobContext) -> None:
+        site = ctx.rendered.params_sanitized["site"]
+        with ctx.step(f"Backup {site} (db-only)"):
+            await ctx.emit(f"$ {ctx.rendered.display}")
+            code = await ctx.stream(ctx.rendered.argv, cwd=ctx.rendered.cwd)
+            if code != 0:
+                raise RuntimeError(f"bench backup exited with status {code}")
+
+
+class BenchBuildAction(Action):
+    """`bench.build` — (re)compile the bench's JS/CSS assets. One step, no site,
+    no redis; safely repeatable (idempotent)."""
+
+    async def run(self, ctx: JobContext) -> None:
+        with ctx.step("Build assets (bench build)"):
+            await ctx.emit(f"$ {ctx.rendered.display}")
+            code = await ctx.stream(ctx.rendered.argv, cwd=ctx.rendered.cwd)
+            if code != 0:
+                raise RuntimeError(f"bench build exited with status {code}")
+
+
+class BenchRestartAction(Action):
+    """`bench.restart` — restart the bench's services, mode-aware (session 1.10).
+
+    Detects dev vs production from supervisor/systemd presence. On a PRODUCTION
+    bench it runs `sudo -n supervisorctl restart <bench-basename>:*` (rendered
+    through the `bench.supervisor_restart` template; `sudo -n` fails loudly if the
+    ratified sudoers allowlist isn't installed). On a DEV bench there is nothing
+    to restart under supervisor — dev benches run via a manual `bench start` — so
+    it fails with an informative message rather than pretending to succeed."""
+
+    async def run(self, ctx: JobContext) -> None:
+        import posixpath
+
+        from app.core.commands import RenderError, get_template, render
+
+        bench_path = ctx.rendered.params_sanitized["bench_path"]
+        is_dev = await _detect_bench_mode(ctx, bench_path)
+
+        if is_dev:
+            with ctx.step("Restart bench"):
+                await ctx.emit(
+                    "This is a development bench (no supervisor/systemd config). "
+                    "Dev benches are not managed by supervisor — they run in the "
+                    "foreground via `bench start`, which the platform cannot "
+                    "restart for you. Open a terminal to the server and run "
+                    f"`bench start` in {bench_path} (or stop and re-run it)."
+                )
+                raise RuntimeError(
+                    "development bench restart is manual (bench start)"
+                )
+
+        group = f"{posixpath.basename(bench_path.rstrip('/'))}:*"
+        try:
+            restart = render(get_template("bench.supervisor_restart"), {"group": group})
+        except RenderError as exc:
+            with ctx.step("Restart bench (supervisorctl)"):
+                await ctx.emit(
+                    f"Could not build a supervisor group target from {bench_path!r}: "
+                    f"{exc}. Restart the bench's services manually."
+                )
+                raise RuntimeError("could not derive supervisor group target") from exc
+
+        with ctx.step("Restart bench (supervisorctl)"):
+            await ctx.emit(f"$ {restart.display}")
+            code = await ctx.stream(restart.argv, cwd=restart.cwd)
+            if code != 0:
+                raise RuntimeError(
+                    f"supervisorctl restart exited with status {code} "
+                    "(is the fdm-platform sudoers allowlist installed?)"
+                )
+
+
+class MigrateAllSitesAction(Action):
+    """`bench.migrate_all` — migrate every known active site on the bench, each as
+    its own ordered step in ONE job (session 1.10).
+
+    Loads the bench's active sites from the platform inventory, then runs `bench
+    --site X migrate` for each — wrapped once in the dev-bench Redis dance so the
+    per-site migrations don't each start/stop redis. A per-site failure is
+    recorded and the run continues to the next site; the job fails at the end if
+    any site failed, so a partial run is never reported as a clean success."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core.commands import get_template, render
+
+        bench_path = ctx.rendered.params_sanitized["bench_path"]
+        bench = _load_bench(ctx, bench_path)
+        if bench is None:
+            with ctx.step("Load sites"):
+                await ctx.emit(
+                    "Bench not in inventory — run a discovery so the platform "
+                    "knows which sites live on it."
+                )
+                raise RuntimeError("bench not found in inventory")
+
+        sites = _active_sites(ctx, bench)
+        with ctx.step("Plan migration"):
+            names = ", ".join(s.name for s in sites) or "(none)"
+            await ctx.emit(f"Migrating {len(sites)} active site(s) on {bench_path}: {names}")
+        if not sites:
+            return
+
+        queue_port, cache_port = _redis_ports(bench)
+        is_dev = await _detect_bench_mode(ctx, bench_path)
+
+        started_redis = False
+        failures: list[str] = []
+        try:
+            if is_dev:
+                await _start_dev_redis(ctx, bench_path)
+                started_redis = True
+
+            for site in sites:
+                mig = render(
+                    get_template("site.migrate"),
+                    {"site": site.name, "bench_path": bench_path},
+                )
+                try:
+                    with ctx.step(f"Migrate {site.name}"):
+                        await ctx.emit(f"$ {mig.display}")
+                        code = await ctx.stream(mig.argv, cwd=mig.cwd)
+                        if code != 0:
+                            raise RuntimeError(
+                                f"bench migrate exited with status {code}"
+                            )
+                except Exception as exc:  # noqa: BLE001 — one bad site must not sink the batch
+                    failures.append(site.name)
+                    await ctx.emit(f"Migration failed for {site.name}: {exc}")
+        finally:
+            if started_redis:
+                await _stop_dev_redis(ctx, queue_port, cache_port)
+
+        if failures:
+            raise RuntimeError(f"migration failed for: {', '.join(failures)}")
+
+
+class BenchUpdateAction(Action):
+    """`bench.update` — update the whole bench (git pull + deps + patches + build
+    + restart), preceded by an automatic lightweight safety backup (session 1.10).
+
+    Runs (1) a db-only `bench --site X backup` for every known active site as the
+    FIRST step — a safety net before a potentially breaking update — then (2) the
+    long-running `bench update`. Both are wrapped once in the dev-bench Redis
+    dance (update runs migrate/build which touch redis). Non-idempotent: a
+    determinate update failure is never auto-retried on top of a half-update."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core.commands import get_template, render
+
+        bench_path = ctx.rendered.params_sanitized["bench_path"]
+        bench = _load_bench(ctx, bench_path)
+        sites = _active_sites(ctx, bench) if bench is not None else []
+        queue_port, cache_port = _redis_ports(bench)
+        is_dev = await _detect_bench_mode(ctx, bench_path)
+
+        started_redis = False
+        try:
+            if is_dev:
+                await _start_dev_redis(ctx, bench_path)
+                started_redis = True
+
+            # 1) Safety backup FIRST (acceptance: the backup step is visible
+            #    before the update runs). db-only, best-effort per site but a
+            #    failed backup aborts the update — we don't update without one.
+            with ctx.step("Safety backup (db-only, all sites)"):
+                if not sites:
+                    await ctx.emit(
+                        "No known sites on this bench to back up — run a discovery "
+                        "to inventory them. Proceeding with the update."
+                    )
+                for site in sites:
+                    bkp = render(
+                        get_template("site.backup"),
+                        {"site": site.name, "bench_path": bench_path},
+                    )
+                    await ctx.emit(f"$ {bkp.display}")
+                    code = await ctx.stream(bkp.argv, cwd=bkp.cwd)
+                    if code != 0:
+                        raise RuntimeError(
+                            f"safety backup failed for {site.name} (status {code}); "
+                            "not running the update"
+                        )
+
+            # 2) The long-running update itself.
+            with ctx.step("Update bench (bench update)"):
+                await ctx.emit(f"$ {ctx.rendered.display}")
+                code = await ctx.stream(ctx.rendered.argv, cwd=ctx.rendered.cwd)
+                if code != 0:
+                    raise RuntimeError(f"bench update exited with status {code}")
+        finally:
+            if started_redis:
+                await _stop_dev_redis(ctx, queue_port, cache_port)

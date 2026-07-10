@@ -111,4 +111,9 @@ export const benchesApi = {
   preflight: (payload: PreflightPayload) =>
     apiClient.post<JobDetail>('/api/benches/preflight', payload),
   create: (payload: CreateBenchPayload) => apiClient.post<JobDetail>('/api/benches', payload),
+  // Maintenance actions (session 1.10) — each launches a job the caller opens.
+  build: (id: number) => apiClient.post<JobDetail>(`/api/benches/${id}/build`, {}),
+  restart: (id: number) => apiClient.post<JobDetail>(`/api/benches/${id}/restart`, {}),
+  migrateAll: (id: number) => apiClient.post<JobDetail>(`/api/benches/${id}/migrate-all`, {}),
+  update: (id: number) => apiClient.post<JobDetail>(`/api/benches/${id}/update`, {}),
 }

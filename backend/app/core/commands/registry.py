@@ -9,7 +9,10 @@ Starter templates (session 1.3):
 from __future__ import annotations
 
 from app.core.commands.actions import (
+    BenchBuildAction,
     BenchPreflightAction,
+    BenchRestartAction,
+    BenchUpdateAction,
     CreateBenchAction,
     CreateSiteAction,
     DetectToolsAction,
@@ -18,8 +21,11 @@ from app.core.commands.actions import (
     GetAppAction,
     InstallAppOnSiteAction,
     ListBranchesAction,
+    MigrateAllSitesAction,
     SetMaintenanceAction,
     SetSchedulerAction,
+    SiteBackupAction,
+    SiteMaintenanceAction,
     UninstallAppAction,
 )
 from app.core.commands.templates import (
@@ -29,6 +35,7 @@ from app.core.commands.templates import (
 )
 from app.core.permissions import (
     APP_MANAGE,
+    BACKUP_CREATE,
     BENCH_OPERATE,
     DANGER,
     SERVER_MANAGE,
@@ -86,6 +93,15 @@ BRANCH_NAME = r"[A-Za-z0-9._/-]{1,100}"
 # A git remote URL for `git ls-remote` (never a bare name — the picker only
 # lists branches for a repo). Same shell-safe whitelist as APP_SOURCE.
 REPO_URL = r"[A-Za-z0-9._:/@-]{1,200}"
+
+# A supervisor group target for `sudo supervisorctl restart <group>` on a
+# production bench (session 1.10). The orchestrator builds it as
+# `<bench-basename>:*` (restart every program in the bench's supervisor group),
+# so the only shapes allowed are a bench-name-like token followed by the fixed
+# `:*` wildcard — no spaces, no shell metacharacters. It is passed as its own
+# argv element to `sudo -n` (execve, no shell), and matches the ratified sudoers
+# allowlist line `supervisorctl restart *`.
+SUPERVISOR_GROUP = r"[a-z0-9][a-z0-9._-]{0,80}:\*"
 
 # A staged deploy key (PEM). Never placed into a shell command (written to a
 # 0600 temp file via base64 through `capture`), so this is only a sanity bound:
@@ -441,5 +457,183 @@ register(
         required_permission=APP_MANAGE,
         run_as=None,
         secret_sources={"deploy_key": "job"},
+    )
+)
+
+
+# --- Maintenance actions (session 1.10) --------------------------------- #
+
+# Site-level maintenance ops. Each is a single fixed `bench --site X <verb>`
+# wrapped by SiteMaintenanceAction in the dev-bench Redis dance (gotcha #3):
+# `migrate` clears caches / enqueues jobs and `clear-cache` flushes redis, so on
+# a dev bench (where `bench start` isn't running) the bench-owned Redis must be
+# up or they fail `Error 111`. Locked per site so two maintenance ops on the
+# same site can't race; SITE_OPERATE so Operators can run them.
+
+# `bench --site X migrate` — run pending schema patches. Long-running and not
+# auto-retried (a determinate patch failure must not silently re-run).
+register(
+    CommandTemplate(
+        action_name="site.migrate",
+        argv=("bench", "--site", "{site}", "migrate"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=SiteMaintenanceAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SITE_OPERATE,
+        run_as=None,
+    )
+)
+
+# `bench --site X clear-cache` — flush the site's redis + in-process caches.
+# Safely repeatable, so idempotent (a transient blip auto-retries).
+register(
+    CommandTemplate(
+        action_name="site.clear_cache",
+        argv=("bench", "--site", "{site}", "clear-cache"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=SiteMaintenanceAction,
+        idempotent=True,
+        requires_lock=True,
+        required_permission=SITE_OPERATE,
+        run_as=None,
+    )
+)
+
+# `bench --site X clear-website-cache` — flush only the website/page cache.
+register(
+    CommandTemplate(
+        action_name="site.clear_website_cache",
+        argv=("bench", "--site", "{site}", "clear-website-cache"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=SiteMaintenanceAction,
+        idempotent=True,
+        requires_lock=True,
+        required_permission=SITE_OPERATE,
+        run_as=None,
+    )
+)
+
+# `bench --site X backup` — a lightweight db-only safety backup (no --with-files).
+# Registered so the bench.update orchestrator renders its safety pre-step through
+# the safe registry. The full backup engine (artifact parsing, Backup rows,
+# checksums) lands in session 1.11 — this template only runs the command as a
+# safety net; it is not launched on its own path this session.
+register(
+    CommandTemplate(
+        action_name="site.backup",
+        argv=("bench", "--site", "{site}", "backup"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=SiteBackupAction,
+        idempotent=True,  # a db dump is safely repeatable.
+        requires_lock=True,
+        required_permission=BACKUP_CREATE,
+        run_as=None,
+    )
+)
+
+# `bench build` — (re)compile the bench's JS/CSS assets. No site, no redis;
+# safely repeatable. Locked per bench.
+register(
+    CommandTemplate(
+        action_name="bench.build",
+        argv=("bench", "build"),
+        cwd="{bench_path}",
+        params=(ParamSpec("bench_path", regex=ABS_PATH, is_path=True),),
+        action_class=BenchBuildAction,
+        idempotent=True,
+        requires_lock=True,
+        required_permission=BENCH_OPERATE,
+        run_as=None,
+    )
+)
+
+# `sudo -n supervisorctl restart <group>` — the real restart command for a
+# PRODUCTION bench. Rendered as a sub-step by BenchRestartAction (which builds
+# `<bench-basename>:*` and detects dev/prod first); never launched on its own
+# path. `sudo -n` fails loudly (no password prompt) if the ratified sudoers
+# allowlist line isn't installed on the server.
+register(
+    CommandTemplate(
+        action_name="bench.supervisor_restart",
+        argv=("sudo", "-n", "supervisorctl", "restart", "{group}"),
+        cwd=None,
+        params=(ParamSpec("group", regex=SUPERVISOR_GROUP),),
+        action_class=BenchRestartAction,  # unused directly; see note above.
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BENCH_OPERATE,
+        run_as=None,
+    )
+)
+
+# The orchestrator POST /api/benches/{id}/restart launches: detect dev vs
+# production; on production run `sudo supervisorctl restart <group>:*`; on a dev
+# bench fail with an informative message (dev benches are started manually with
+# `bench start`). Non-idempotent so the dev informative-failure isn't retried.
+register(
+    CommandTemplate(
+        action_name="bench.restart",
+        argv=("true",),  # nominal; BenchRestartAction drives the real steps.
+        cwd=None,
+        params=(ParamSpec("bench_path", regex=ABS_PATH, is_path=True),),
+        action_class=BenchRestartAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BENCH_OPERATE,
+        run_as=None,
+    )
+)
+
+# The orchestrator POST /api/benches/{id}/migrate-all launches: iterate the
+# bench's known active sites and run `bench --site X migrate` for each as its own
+# ordered step, wrapped once in the dev-bench Redis dance. A per-site failure is
+# recorded and the run continues; the job fails at the end if any site failed.
+# SITE_OPERATE (same underlying op as a single site migrate).
+register(
+    CommandTemplate(
+        action_name="bench.migrate_all",
+        argv=("true",),  # nominal; MigrateAllSitesAction drives the real steps.
+        cwd=None,
+        params=(ParamSpec("bench_path", regex=ABS_PATH, is_path=True),),
+        action_class=MigrateAllSitesAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SITE_OPERATE,
+        run_as=None,
+    )
+)
+
+# The orchestrator POST /api/benches/{id}/update launches (high queue,
+# long-running): a lightweight db-only safety backup of every site FIRST, then
+# `bench update`. Wrapped once in the dev-bench Redis dance. Non-idempotent — a
+# determinate update failure is never auto-retried on top of a half-update.
+register(
+    CommandTemplate(
+        action_name="bench.update",
+        argv=("bench", "update"),
+        cwd="{bench_path}",
+        params=(ParamSpec("bench_path", regex=ABS_PATH, is_path=True),),
+        action_class=BenchUpdateAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BENCH_OPERATE,
+        run_as=None,
     )
 )

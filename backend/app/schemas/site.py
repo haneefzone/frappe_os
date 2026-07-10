@@ -77,3 +77,11 @@ class SiteToggleRequest(BaseModel):
 
     enabled: bool
     priority: str = "high"
+
+
+class SiteActionRequest(BaseModel):
+    """Launch a parameter-free site maintenance action (migrate / clear-cache /
+    clear-website-cache). The body only carries an optional queue override; the
+    site + bench come from the path parameter (session 1.10)."""
+
+    priority: str = "default"
