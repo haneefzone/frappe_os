@@ -1,6 +1,7 @@
 import type { Component } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import { allNavItems } from '../navigation'
+import AiAgentsPage from '../pages/AiAgentsPage.vue'
 import AppsPage from '../pages/AppsPage.vue'
 import AuditPage from '../pages/AuditPage.vue'
 import BackupsPage from '../pages/BackupsPage.vue'
@@ -25,6 +26,7 @@ const pageOverrides: Record<string, Component> = {
   backups: BackupsPage,
   restore: RestorePage,
   schedules: SchedulesPage,
+  'ai-agents': AiAgentsPage,
   jobs: JobsPage,
   terminal: TerminalPage,
   'audit-log': AuditPage,

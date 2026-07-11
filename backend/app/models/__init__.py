@@ -1,3 +1,8 @@
+from app.models.ai_agent import (
+    AIAgentAllowedServer,
+    AIAgentConfig,
+    AIAgentSession,
+)
 from app.models.ai_settings import AISettings
 from app.models.app import AppSource, InstalledApp
 from app.models.audit import AuditLog
@@ -16,6 +21,9 @@ from app.models.terminal import TerminalSession
 from app.models.uptime import UptimeSample
 
 __all__ = [
+    "AIAgentAllowedServer",
+    "AIAgentConfig",
+    "AIAgentSession",
     "AISettings",
     "ApiToken",
     "AppSource",

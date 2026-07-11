@@ -1097,3 +1097,146 @@ register(
         run_as=None,
     )
 )
+
+
+# --- AI Agents module (session 5.1) ------------------------------------- #
+#
+# Jailed git snapshot/diff/apply/rollback for a scoped AI session. Every command
+# is a fixed argv with cwd = the validated working dir (ABS_PATH + `..`-rejected),
+# so nothing user-supplied reaches a shell (golden rule 1). The orchestrators
+# (`ai.pre_change_snapshot`, `ai.capture_diff`, `ai.apply`, `ai.rollback`) are the
+# only actions the API launches; the `ai.git_*` sub-templates are rendered by
+# those actions and never launched on their own path. Gated on `ai:operate`,
+# which only Admin + Developer hold (security-sensitive — ISO 27001 review).
+# Imported locally to keep concurrent-session edits to this file collision-free.
+from app.core.commands.actions import (  # noqa: E402
+    AIApplyAction as _AIApplyAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    AICaptureDiffAction as _AICaptureDiffAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    AIPreChangeSnapshotAction as _AIPreChangeSnapshotAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    AIRollbackAction as _AIRollbackAction,
+)
+from app.core.permissions import AI_OPERATE as _AI_OPERATE  # noqa: E402
+
+# A git object name (commit/stash sha) captured from `git rev-parse`/`stash
+# create`. Hex only; its own argv element — never a shell.
+_GIT_SHA = r"[0-9a-f]{7,64}"
+
+# The commit message for an applied session. Shell-safe text; passed as its own
+# argv element to `git commit -m` (execve, no shell), so injection isn't possible.
+_AI_COMMIT_MSG = r"[\w .,:@/=+()#-]{1,200}"
+
+
+def _ai_sub(action_name: str, argv: tuple[str, ...], params: tuple) -> None:
+    """Register an `ai.git_*` sub-template (cwd = the jail; never launched
+    directly — rendered by an orchestrator action)."""
+    register(
+        CommandTemplate(
+            action_name=action_name,
+            argv=argv,
+            cwd="{working_dir}",
+            params=params,
+            action_class=_AIRollbackAction,  # unused directly; see block note.
+            idempotent=True,
+            requires_lock=False,
+            required_permission=_AI_OPERATE,
+            run_as=None,
+        )
+    )
+
+
+_WD = ParamSpec("working_dir", regex=ABS_PATH, is_path=True)
+
+_ai_sub("ai.git_add_all", ("git", "add", "-A"), (_WD,))
+_ai_sub("ai.git_status", ("git", "status", "--porcelain"), (_WD,))
+_ai_sub("ai.git_clean", ("git", "clean", "-fd"), (_WD,))
+_ai_sub(
+    "ai.git_diff_cached",
+    ("git", "-c", "core.quotepath=false", "diff", "--cached", "{base}"),
+    (_WD, ParamSpec("base", regex=_GIT_SHA)),
+)
+_ai_sub(
+    "ai.git_reset_hard",
+    ("git", "reset", "--hard", "{ref}"),
+    (_WD, ParamSpec("ref", regex=_GIT_SHA)),
+)
+_ai_sub(
+    "ai.git_stash_apply",
+    ("git", "stash", "apply", "{ref}"),
+    (_WD, ParamSpec("ref", regex=_GIT_SHA)),
+)
+_ai_sub(
+    "ai.git_commit",
+    (
+        "git", "-c", "user.email=ai@fdm.local", "-c", "user.name=FDM AI",
+        "commit", "-m", "{message}",
+    ),
+    (_WD, ParamSpec("message", regex=_AI_COMMIT_MSG)),
+)
+
+# Orchestrator: pre-change snapshot (verify repo + record base/stash). Locked per
+# working dir so two sessions can't snapshot/write the same jail at once.
+register(
+    CommandTemplate(
+        action_name="ai.pre_change_snapshot",
+        argv=("true",),
+        cwd=None,
+        params=(_WD, ParamSpec("session_id", regex=r"[0-9]{1,12}")),
+        action_class=_AIPreChangeSnapshotAction,
+        idempotent=True,  # all reads; a transient SSH blip can retry.
+        requires_lock=True,
+        required_permission=_AI_OPERATE,
+        run_as=None,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="ai.capture_diff",
+        argv=("true",),
+        cwd=None,
+        params=(_WD, ParamSpec("session_id", regex=r"[0-9]{1,12}")),
+        action_class=_AICaptureDiffAction,
+        idempotent=False,  # a read-only violation revert must not silently retry.
+        requires_lock=True,
+        required_permission=_AI_OPERATE,
+        run_as=None,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="ai.apply",
+        argv=("true",),
+        cwd=None,
+        params=(
+            _WD,
+            ParamSpec("session_id", regex=r"[0-9]{1,12}"),
+            ParamSpec("message", regex=_AI_COMMIT_MSG),
+        ),
+        action_class=_AIApplyAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=_AI_OPERATE,
+        run_as=None,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="ai.rollback",
+        argv=("true",),
+        cwd=None,
+        params=(_WD, ParamSpec("session_id", regex=r"[0-9]{1,12}")),
+        action_class=_AIRollbackAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=_AI_OPERATE,
+        run_as=None,
+    )
+)
