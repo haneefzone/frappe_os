@@ -4,6 +4,7 @@ from app.models.audit import AuditLog
 from app.models.auth import ApiToken, Role, User
 from app.models.backup import Backup
 from app.models.bench import Bench
+from app.models.domain import Domain
 from app.models.job import CommandJob, CommandStep, LogEntry
 from app.models.monitoring import MonitoringSample
 from app.models.notification import Notification, NotificationPreference
@@ -23,6 +24,7 @@ __all__ = [
     "Bench",
     "CommandJob",
     "CommandStep",
+    "Domain",
     "InstalledApp",
     "LogEntry",
     "MonitoringSample",

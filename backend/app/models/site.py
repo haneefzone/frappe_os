@@ -79,3 +79,6 @@ class Site(Base):
     )
 
     bench: Mapped["Bench"] = relationship(back_populates="sites")  # noqa: F821
+    domains: Mapped[list["Domain"]] = relationship(  # noqa: F821
+        back_populates="site", cascade="all, delete-orphan"
+    )
