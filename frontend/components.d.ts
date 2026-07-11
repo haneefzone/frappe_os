@@ -24,6 +24,7 @@ declare module 'vue' {
     KPICard: typeof import('./src/components/KPICard.vue')['default']
     LogViewer: typeof import('./src/components/LogViewer.vue')['default']
     NotificationDrawer: typeof import('./src/components/NotificationDrawer.vue')['default']
+    PolicySheet: typeof import('./src/components/PolicySheet.vue')['default']
     ResourceGauge: typeof import('./src/components/ResourceGauge.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']

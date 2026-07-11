@@ -48,6 +48,7 @@
               <th class="px-4 py-2 font-medium">Bench</th>
               <th class="px-4 py-2 font-medium">Environment</th>
               <th class="px-4 py-2 font-medium">Health</th>
+              <th class="px-4 py-2 font-medium">Compliance</th>
               <th class="px-4 py-2 font-medium">Scheduler</th>
               <th class="px-4 py-2 font-medium">Maintenance</th>
               <th class="px-4 py-2 font-medium">Status</th>
@@ -81,6 +82,17 @@
                   <StatusDot :status="healthDot(site.health)" />
                   <span class="text-ink-2">{{ healthLabel[site.health] }}</span>
                 </span>
+              </td>
+              <td class="px-4 py-2.5">
+                <span v-if="complianceState(site.id) === 'compliant'" class="flex items-center gap-1.5 text-ok" title="Meets its backup policy">
+                  <LucideCheck class="h-3.5 w-3.5" />
+                  <span class="text-ink-2">Compliant</span>
+                </span>
+                <span v-else-if="complianceState(site.id) === 'breached'" class="flex items-center gap-1.5 text-err" :title="breachTitle(site.id)">
+                  <LucideCircleAlert class="h-3.5 w-3.5" />
+                  <span class="text-ink-2">Breached</span>
+                </span>
+                <span v-else class="text-ink-3">—</span>
               </td>
               <td class="px-4 py-2.5">
                 <StatusBadge
@@ -117,8 +129,15 @@
 import { Button } from 'frappe-ui'
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import LucideCheck from '~icons/lucide/check'
+import LucideCircleAlert from '~icons/lucide/circle-alert'
 import LucideGlobe from '~icons/lucide/globe'
 import LucidePlus from '~icons/lucide/plus'
+import {
+  complianceApi,
+  type ComplianceState,
+  type ComplianceStatus,
+} from '../api/compliance'
 import { sitesApi, type Site } from '../api/sites'
 import EmptyState from '../components/EmptyState.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
@@ -144,11 +163,36 @@ const sites = ref<Site[]>([])
 const loading = ref(true)
 const loadError = ref('')
 
+// Per-site compliance state, keyed by site id (session 2.3). Sites without a
+// policy simply aren't in the map, so they render a muted dash.
+const statusBySite = ref<Map<number, ComplianceStatus>>(new Map())
+
+function complianceState(siteId: number): ComplianceState | null {
+  return statusBySite.value.get(siteId)?.state ?? null
+}
+
+function breachTitle(siteId: number): string {
+  const breaches = statusBySite.value.get(siteId)?.breaches ?? []
+  return breaches.length ? breaches.map((b) => b.detail).join('\n') : 'Backup policy breached'
+}
+
+async function loadCompliance() {
+  try {
+    const summary = await complianceApi.getSummary()
+    const map = new Map<number, ComplianceStatus>()
+    for (const st of summary.statuses) map.set(st.site_id, st)
+    statusBySite.value = map
+  } catch {
+    // Non-fatal: the compliance column just shows dashes.
+  }
+}
+
 async function load() {
   loading.value = true
   loadError.value = ''
   try {
     sites.value = await sitesApi.list()
+    void loadCompliance()
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : 'Could not load sites.'
   } finally {

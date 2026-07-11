@@ -14,8 +14,8 @@
       <p v-if="loadError" class="mb-3 text-label text-err" role="alert">{{ loadError }}</p>
 
       <!-- Loading skeleton -->
-      <div v-if="loading && !data" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        <div v-for="i in 5" :key="i" class="rounded-lg border border-line bg-surface p-4">
+      <div v-if="loading && !data" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
+        <div v-for="i in 6" :key="i" class="rounded-lg border border-line bg-surface p-4">
           <div class="h-3 w-24 animate-pulse rounded bg-raised" />
           <div class="mt-3 h-7 w-16 animate-pulse rounded bg-raised" />
           <div class="mt-2 h-3 w-32 animate-pulse rounded bg-raised" />
@@ -56,7 +56,7 @@
         <p v-if="data.morning_brief" class="text-body text-ink-1">{{ data.morning_brief }}</p>
 
         <!-- Row 1: KPIs -->
-        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
           <KPICard
             label="Fleet health"
             :value="`${Math.round(data.kpis.fleet_health_pct)}%`"
@@ -73,7 +73,13 @@
             label="Backups 24h"
             :value="String(data.kpis.backups_24h)"
             :status="data.kpis.backups_24h > 0 ? 'ok' : 'muted'"
-            :sublabel="`${Math.round(data.kpis.backup_compliance_pct)}% compliance`"
+            sublabel="Last 24 hours"
+          />
+          <KPICard
+            label="Backup compliance"
+            :value="data.kpis.sites_policied > 0 ? `${Math.round(data.kpis.backup_compliance_pct)}%` : '—'"
+            :status="complianceStatus"
+            :sublabel="complianceSublabel"
           />
           <KPICard
             label="Failed jobs 24h"
@@ -183,7 +189,7 @@
 
 <script setup lang="ts">
 import { Button } from 'frappe-ui'
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import LucideListChecks from '~icons/lucide/list-checks'
 import LucidePlus from '~icons/lucide/plus'
@@ -213,6 +219,19 @@ const onboardingSteps = [
   { title: 'Discover or create a bench', detail: 'Point at an existing bench or run a guided bench init.' },
   { title: 'Create a site', detail: 'Spin up your first Frappe/ERPNext site on that bench.' },
 ]
+
+// Backup compliance card (session 2.3): real per-site policy pass/fail counts.
+const complianceSublabel = computed(() => {
+  const k = data.value?.kpis
+  if (!k || k.sites_policied === 0) return 'No policies yet'
+  return `${k.sites_compliant}/${k.sites_policied} sites compliant`
+})
+
+const complianceStatus = computed<Status>(() => {
+  const k = data.value?.kpis
+  if (!k || k.sites_policied === 0) return 'muted'
+  return pctStatus(k.backup_compliance_pct, true)
+})
 
 function pctStatus(pct: number, higherIsBetter: boolean): Status {
   const good = higherIsBetter ? pct >= 90 : pct < 70

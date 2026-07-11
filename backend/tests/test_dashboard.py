@@ -9,9 +9,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.compliance import evaluate_all
 from app.core.dashboard import build_dashboard
 from app.db import Base
-from app.models import Backup, Server, Site
+from app.models import Backup, BackupPolicy, Server, Site
 from app.models.bench import Bench
 from tests.conftest import login
 
@@ -48,25 +49,33 @@ def test_dashboard_empty_shows_onboarding(sf):
     assert len(data["backup_grid"]) == 7
 
 
-def test_fleet_health_drops_without_recent_backups(sf):
+def test_fleet_health_drops_when_policied_site_breached(sf):
+    # Session 2.3: the backup Health component is now real Backup Compliance %.
+    # Two policied sites with no backups → both breached → backup component 0.
     with sf() as db:
         _, b = _bench(db)
-        db.add(Site(bench_id=b.id, name="a.localhost", status="active"))
-        db.add(Site(bench_id=b.id, name="b.localhost", status="active"))
+        for nm in ("a.localhost", "b.localhost"):
+            db.add(Site(bench_id=b.id, name=nm, status="active"))
         db.commit()
+        for site in db.query(Site).all():
+            db.add(BackupPolicy(site_id=site.id, rpo_hours=24))
+        db.commit()
+        evaluate_all(db)
         data = build_dashboard(db)
-    # 2 active sites, 0 backed up -> backup component 0 -> 40+0+20+10 = 70.
+    # 2 policied sites, 0 compliant -> backup component 0 -> 40+0+20+10 = 70.
     assert data["kpis"]["fleet_health_pct"] == 70
     assert data["kpis"]["backup_compliance_pct"] == 0
-    assert data["kpis"]["sites_total"] == 2
+    assert data["kpis"]["sites_policied"] == 2
+    assert data["kpis"]["sites_compliant"] == 0
 
 
-def test_fleet_health_full_when_all_backed_up(sf):
+def test_fleet_health_full_when_policied_site_compliant(sf):
     with sf() as db:
         _, b = _bench(db)
         db.add(Site(bench_id=b.id, name="a.localhost", status="active"))
         db.commit()
         site = db.query(Site).first()
+        db.add(BackupPolicy(site_id=site.id, rpo_hours=24))
         db.add(
             Backup(
                 site_id=site.id,
@@ -76,10 +85,25 @@ def test_fleet_health_full_when_all_backed_up(sf):
             )
         )
         db.commit()
+        evaluate_all(db)
         data = build_dashboard(db)
     assert data["kpis"]["backup_compliance_pct"] == 100
     assert data["kpis"]["fleet_health_pct"] == 100
+    assert data["kpis"]["sites_compliant"] == 1
     assert data["kpis"]["backups_24h"] == 1
+
+
+def test_backup_compliance_100_when_no_policies(sf):
+    # No policy anywhere → compliance is vacuously 100 (nothing to fail); the
+    # backup Health component stays full so an un-policied fleet is not penalised.
+    with sf() as db:
+        _, b = _bench(db)
+        db.add(Site(bench_id=b.id, name="a.localhost", status="active"))
+        db.commit()
+        data = build_dashboard(db)
+    assert data["kpis"]["backup_compliance_pct"] == 100
+    assert data["kpis"]["sites_policied"] == 0
+    assert data["kpis"]["fleet_health_pct"] == 100
 
 
 def test_backup_grid_buckets_by_day(sf):

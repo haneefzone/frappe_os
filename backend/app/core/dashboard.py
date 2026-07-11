@@ -14,9 +14,10 @@ Two components are **real** today:
   - uptime (40)  → 40 × (fleet 30-day uptime fraction from external HTTP checks;
                    1.0 when nothing has been measured yet — a fresh fleet is not
                    penalised). Became real in session 2.7 (was a placeholder).
-  - backup (30)  → 30 × (fraction of active sites with a successful backup in the
-                   last 24h; 1.0 when there are no sites — nothing to back up is
-                   compliant).
+  - backup (30)  → 30 × Backup Compliance fraction = compliant / policied sites
+                   (session 2.3 — the compliance evaluator; replaces the 1.12
+                   "backed up in last 24h" placeholder). 1.0 when no site has a
+                   policy yet — nothing under policy is vacuously compliant.
 The other two are **placeholders awarded in full** until their engines exist:
   - alerts (20)  → real "no critical alerts" lands with the AlertRule engine
   - updates (10) → real "everything up to date" lands with the update advisor
@@ -31,12 +32,13 @@ from datetime import UTC, date, datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.compliance import compliance_counts
 from app.core.uptime import fleet_uptime_fraction
 from app.models import Backup, CommandJob, Domain, MonitoringSample, Server, Site
 
 # Fleet Health component weights (must sum to 100).
 HEALTH_W_UPTIME = 40  # real (session 2.7 — external HTTP checks)
-HEALTH_W_BACKUP = 30  # real
+HEALTH_W_BACKUP = 30  # real (session 2.3 — backup compliance)
 HEALTH_W_ALERTS = 20  # placeholder (Phase 2)
 HEALTH_W_UPDATES = 10  # placeholder (Phase 3)
 
@@ -59,25 +61,6 @@ def _latest_sample_by_server(db: Session) -> dict[int, MonitoringSample]:
     for s in rows:
         latest.setdefault(s.server_id, s)  # first per server = newest (ts desc)
     return latest
-
-
-def _sites_backup_compliance(db: Session, since: datetime) -> tuple[int, int]:
-    """Return (sites_with_recent_successful_backup, active_sites_total)."""
-    active_site_ids = set(
-        db.scalars(select(Site.id).where(Site.status == "active")).all()
-    )
-    if not active_site_ids:
-        return 0, 0
-    backed_up = set(
-        db.scalars(
-            select(Backup.site_id).where(
-                Backup.status == "success",
-                Backup.created_at >= since,
-                Backup.site_id.in_(active_site_ids),
-            )
-        ).all()
-    )
-    return len(backed_up & active_site_ids), len(active_site_ids)
 
 
 def _backup_grid(db: Session) -> list[dict]:
@@ -188,8 +171,10 @@ def build_dashboard(db: Session) -> dict:
     )
 
     # Fleet Health (see module docstring for the documented formula).
-    backed_up, active_sites = _sites_backup_compliance(db, since_24h)
-    backup_fraction = 1.0 if active_sites == 0 else backed_up / active_sites
+    # Backup component is real Backup Compliance % now (session 2.3): the fraction
+    # of policied sites the evaluator last found compliant. No policies yet → 1.0.
+    compliant_sites, policied_sites = compliance_counts(db)
+    backup_fraction = 1.0 if policied_sites == 0 else compliant_sites / policied_sites
     uptime_fraction, _ = fleet_uptime_fraction(db)  # real 30-day uptime (2.7)
     fleet_health = round(
         HEALTH_W_UPTIME * uptime_fraction
@@ -232,7 +217,10 @@ def build_dashboard(db: Session) -> dict:
             "sites_total": int(sites_total),
             "backups_24h": int(backups_24h),
             "failed_jobs_24h": int(failed_jobs_24h),
+            # Real Backup Compliance % (session 2.3): compliant / policied sites.
             "backup_compliance_pct": round(backup_fraction * 100),
+            "sites_compliant": int(compliant_sites),
+            "sites_policied": int(policied_sites),
             # Real 30-day fleet uptime (session 2.7); pairs with Sites Up (n/n).
             "uptime_30d_pct": round(uptime_fraction * 100),
             # SSL certificates expiring within 30 days (session 2.4).

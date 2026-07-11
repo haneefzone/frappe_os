@@ -18,6 +18,9 @@ export interface DashboardKpis {
   backups_24h: number
   failed_jobs_24h: number
   backup_compliance_pct: number
+  /** Sites passing their backup policy / sites with a policy (session 2.3). */
+  sites_compliant: number
+  sites_policied: number
   /** Real 30-day fleet uptime from external HTTP checks (session 2.7). */
   uptime_30d_pct: number
   /** Count of SSL certs expiring within 30 days (session 2.4). */

@@ -4,6 +4,11 @@ from app.models.audit import AuditLog
 from app.models.auth import ApiToken, Role, User
 from app.models.backup import Backup
 from app.models.bench import Bench
+from app.models.compliance import (
+    BackupPolicy,
+    ComplianceBreachEvent,
+    ComplianceStatus,
+)
 from app.models.domain import Domain
 from app.models.job import CommandJob, CommandStep, LogEntry
 from app.models.monitoring import MonitoringSample
@@ -22,9 +27,12 @@ __all__ = [
     "AppSource",
     "AuditLog",
     "Backup",
+    "BackupPolicy",
     "Bench",
     "CommandJob",
     "CommandStep",
+    "ComplianceBreachEvent",
+    "ComplianceStatus",
     "Domain",
     "InstalledApp",
     "LogEntry",

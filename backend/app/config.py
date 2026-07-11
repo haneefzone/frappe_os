@@ -103,6 +103,12 @@ class Settings(BaseSettings):
     # The RQ queue the recurring tick job is enqueued onto (a normal worker runs
     # it). The CommandJobs each fire then land on the schedule's own priority.
     scheduler_queue: str = "default"
+    # Backup-compliance evaluation (session 2.3): the scheduler process also
+    # registers a recurring sweep that re-evaluates every enabled BackupPolicy at
+    # this cadence (read-only over backup metadata). Hourly by default — RPO is
+    # measured in hours, so minute-level precision buys nothing. SET via
+    # COMPLIANCE_TICK_SECONDS.
+    compliance_tick_seconds: int = 3600
 
     # Notifications (session 2.8): minimal SMTP + signed webhook channels.
     # SMTP: set SMTP_HOST to enable email. TLS defaults on (STARTTLS).

@@ -39,6 +39,9 @@ logger = logging.getLogger("app.scheduler")
 
 # The fully-qualified path rq-scheduler enqueues; a worker imports and runs it.
 TICK_FUNC = "app.workers.scheduler.dispatch_due_schedules"
+# Session 2.3: the same scheduler process also registers a recurring
+# backup-compliance sweep (read-only over backup metadata — no CommandJob).
+COMPLIANCE_FUNC = "app.workers.scheduler.evaluate_compliance"
 
 
 def make_connection() -> Redis:
@@ -61,20 +64,51 @@ def dispatch_due_schedules() -> list[int]:
     return fired
 
 
-def ensure_tick_registered(scheduler, *, interval: int) -> None:
-    """Idempotently register the single recurring tick job. Cancels any existing
-    tick entries first so a restart with a changed interval doesn't leave two."""
+def evaluate_compliance() -> dict:
+    """Recurring job body (runs on an RQ worker): re-evaluate every enabled
+    BackupPolicy and persist each site's ComplianceStatus. Read-only over backup
+    metadata (never deletes); returns the sweep summary for the RQ result."""
+    from app.core.compliance import evaluate_all
+    from app.db import SessionLocal
+
+    with SessionLocal() as db:
+        summary = evaluate_all(db)
+    if summary["events_emitted"]:
+        logger.info(
+            "compliance sweep: %d site(s) entered breach", summary["events_emitted"]
+        )
+    return summary
+
+
+def _register_recurring(scheduler, *, func, func_name: str, interval: int) -> None:
+    """Idempotently register one recurring job, cancelling any existing entry for
+    the same func first so a restart with a changed interval never leaves two."""
     for job in scheduler.get_jobs():
-        if job.func_name == TICK_FUNC:
+        if job.func_name == func_name:
             scheduler.cancel(job)
     scheduler.schedule(
         scheduled_time=_utcnow(),
-        func=dispatch_due_schedules,
+        func=func,
         interval=interval,
         repeat=None,  # forever
         result_ttl=int(interval) * 4,
     )
+
+
+def ensure_tick_registered(scheduler, *, interval: int) -> None:
+    """Idempotently register the single recurring schedule-dispatch tick job."""
+    _register_recurring(
+        scheduler, func=dispatch_due_schedules, func_name=TICK_FUNC, interval=interval
+    )
     logger.info("registered scheduler tick every %ds", interval)
+
+
+def ensure_compliance_registered(scheduler, *, interval: int) -> None:
+    """Idempotently register the recurring backup-compliance sweep (session 2.3)."""
+    _register_recurring(
+        scheduler, func=evaluate_compliance, func_name=COMPLIANCE_FUNC, interval=interval
+    )
+    logger.info("registered compliance sweep every %ds", interval)
 
 
 def _utcnow():
@@ -99,10 +133,14 @@ def main() -> None:  # pragma: no cover - process entrypoint (needs live Redis)
     settings = get_settings()
     scheduler = build_scheduler()
     ensure_tick_registered(scheduler, interval=settings.scheduler_tick_seconds)
+    ensure_compliance_registered(
+        scheduler, interval=settings.compliance_tick_seconds
+    )
     logger.info(
-        "scheduler starting (queue=%s, tick=%ds)",
+        "scheduler starting (queue=%s, tick=%ds, compliance=%ds)",
         settings.scheduler_queue,
         settings.scheduler_tick_seconds,
+        settings.compliance_tick_seconds,
     )
     # run() installs its own graceful SIGINT/SIGTERM handlers and releases the
     # singleton lock on exit (see module docstring).

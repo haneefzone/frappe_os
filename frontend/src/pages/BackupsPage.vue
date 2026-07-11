@@ -21,14 +21,35 @@
       </div>
     </header>
 
-    <div class="min-h-0 flex-1 overflow-y-auto p-8">
+    <!-- Tab navigation (B4.6) -->
+    <nav role="tablist" aria-label="Backup sections" class="flex shrink-0 border-b border-line px-8">
+      <button
+        v-for="tab in TABS"
+        :key="tab.key"
+        role="tab"
+        type="button"
+        :aria-selected="activeTab === tab.key"
+        class="fdm-focus -mb-px border-b-2 px-4 py-3 text-label font-medium transition"
+        :class="
+          activeTab === tab.key
+            ? 'border-ink-1 text-ink-1'
+            : 'border-transparent text-ink-3 hover:text-ink-2'
+        "
+        @click="switchTab(tab.key)"
+      >
+        {{ tab.label }}
+      </button>
+    </nav>
+
+    <!-- Backups tab -->
+    <div v-if="activeTab === 'backups'" class="min-h-0 flex-1 overflow-y-auto p-8">
       <!-- KPI header -->
       <div class="mb-6 grid gap-4 sm:grid-cols-3">
         <KPICard
           label="Backup compliance"
           :value="compliance.label"
           :status="compliance.status"
-          :sublabel="`${compliance.covered}/${compliance.total} sites backed up`"
+          :sublabel="compliance.sublabel"
           :loading="loading"
         />
         <KPICard label="Total size" :value="totalSizeLabel" :sublabel="`${backups.length} backups`" :loading="loading" />
@@ -162,6 +183,129 @@
       </div>
     </div>
 
+    <!-- Policies tab (B4.6) -->
+    <div v-else-if="activeTab === 'policies'" class="min-h-0 flex-1 overflow-y-auto p-8">
+      <div class="mb-4 flex items-center justify-between">
+        <div>
+          <h2 class="text-section font-semibold text-ink-1">Backup policies</h2>
+          <p class="text-label text-ink-3">
+            Per-site compliance targets — RPO, retention, and offsite requirements.
+          </p>
+        </div>
+        <Button
+          v-if="canManagePolicy"
+          variant="subtle"
+          theme="gray"
+          label="Evaluate now"
+          :loading="evaluating"
+          :disabled="evaluating || loading"
+          @click="evaluateNow"
+        >
+          <template #prefix><LucideRefreshCw class="h-3.5 w-3.5" /></template>
+        </Button>
+      </div>
+
+      <p v-if="loadError" class="mb-3 text-label text-err" role="alert">{{ loadError }}</p>
+
+      <div v-if="loading" class="rounded-lg border border-line bg-surface">
+        <div v-for="i in 4" :key="i" class="flex items-center gap-6 border-b border-line px-4 py-3 last:border-0">
+          <div class="h-3.5 w-40 animate-pulse rounded bg-raised" />
+          <div class="h-3.5 w-16 animate-pulse rounded bg-raised" />
+          <div class="h-3.5 w-16 animate-pulse rounded bg-raised" />
+          <div class="h-3.5 w-20 animate-pulse rounded bg-raised" />
+        </div>
+      </div>
+
+      <EmptyState
+        v-else-if="sites.length === 0"
+        :icon="LucideShieldCheck"
+        title="No sites"
+        message="Discover a bench to inventory its sites, then set a backup policy per site."
+      />
+
+      <div v-else class="overflow-hidden rounded-lg border border-line bg-surface">
+        <table class="w-full text-left">
+          <thead>
+            <tr class="border-b border-line text-meta uppercase tracking-wide text-ink-3">
+              <th class="px-4 py-2 font-medium">Site</th>
+              <th class="px-4 py-2 font-medium">Compliance</th>
+              <th class="px-4 py-2 font-medium">RPO</th>
+              <th class="px-4 py-2 font-medium">Retention</th>
+              <th class="px-4 py-2 font-medium">Offsite</th>
+              <th class="px-4 py-2 font-medium">Last backup</th>
+              <th v-if="canManagePolicy" class="px-4 py-2 text-right font-medium">Actions</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-line text-label">
+            <tr v-for="row in policyRows" :key="row.site.id">
+              <td class="px-4 py-2.5">
+                <button
+                  type="button"
+                  class="fdm-focus rounded font-medium text-ink-1 hover:underline"
+                  @click="router.push(`/sites/${row.site.id}`)"
+                >
+                  {{ row.site.name }}
+                </button>
+                <div class="truncate font-mono text-meta text-ink-3">{{ row.site.bench_name }}</div>
+              </td>
+              <td class="px-4 py-2.5">
+                <span class="flex items-center gap-1.5">
+                  <StatusDot :status="complianceDot(row.state)" />
+                  <span class="text-ink-2">{{ complianceLabel(row.state) }}</span>
+                </span>
+                <span
+                  v-if="row.breaches.length"
+                  class="mt-0.5 block truncate text-meta text-err"
+                  :title="row.breaches.map((b) => b.detail).join('\n')"
+                >
+                  {{ row.breaches[0].detail }}
+                </span>
+              </td>
+              <td class="px-4 py-2.5 tabular-nums text-ink-2">
+                {{ row.policy ? `${row.policy.rpo_hours}h` : '—' }}
+              </td>
+              <td class="px-4 py-2.5 tabular-nums text-ink-2">
+                {{ row.policy && row.policy.retention_days != null ? `${row.policy.retention_days}d` : '—' }}
+              </td>
+              <td class="px-4 py-2.5">
+                <StatusBadge
+                  v-if="row.policy?.require_offsite"
+                  status="ok"
+                  label="Required"
+                />
+                <span v-else class="text-ink-3">—</span>
+              </td>
+              <td
+                class="px-4 py-2.5 text-ink-3"
+                :title="row.lastBackupAt ? absoluteTime(row.lastBackupAt) : undefined"
+              >
+                {{ row.lastBackupAt ? relativeTime(row.lastBackupAt) : '—' }}
+              </td>
+              <td v-if="canManagePolicy" class="px-4 py-2.5">
+                <div class="flex justify-end">
+                  <Button
+                    variant="subtle"
+                    theme="gray"
+                    size="sm"
+                    :label="row.policy ? 'Edit policy' : 'Set policy'"
+                    @click="openPolicy(row.site)"
+                  />
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Policy editor sheet -->
+    <PolicySheet
+      :open="policyOpen"
+      :site="policySite"
+      @close="policyOpen = false"
+      @saved="onPolicySaved"
+    />
+
     <!-- Backup now modal -->
     <Teleport to="body">
       <Transition
@@ -239,14 +383,25 @@ import LucideArchive from '~icons/lucide/archive'
 import LucideCheck from '~icons/lucide/check'
 import LucideCloud from '~icons/lucide/cloud'
 import LucideHistory from '~icons/lucide/history'
+import LucideRefreshCw from '~icons/lucide/refresh-cw'
+import LucideShieldCheck from '~icons/lucide/shield-check'
 import { backupsApi, type Backup } from '../api/backups'
 import { ApiError } from '../api/client'
+import {
+  complianceApi,
+  type BackupPolicy,
+  type ComplianceState,
+  type ComplianceStatus,
+  type ComplianceSummary,
+} from '../api/compliance'
 import { sitesApi, type Site } from '../api/sites'
 import { storageApi, type StorageTarget } from '../api/storage'
 import EmptyState from '../components/EmptyState.vue'
 import KPICard from '../components/KPICard.vue'
+import PolicySheet from '../components/PolicySheet.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import StatusDot from '../components/StatusDot.vue'
+import type { Status } from '../components/types'
 import { toast } from '../components/toast'
 import {
   ARTIFACT_LABEL,
@@ -264,14 +419,46 @@ const auth = useAuthStore()
 const canBackup = auth.hasPermission('backup:create')
 const canRestore = auth.hasPermission('backup:restore')
 const canDownload = auth.hasPermission('backup:restore')
+const canManagePolicy = auth.hasPermission('schedule:manage')
 
 const backups = ref<Backup[]>([])
 const sites = ref<Site[]>([])
 const storageTargets = ref<StorageTarget[]>([])
+const summary = ref<ComplianceSummary | null>(null)
+const policies = ref<Record<number, BackupPolicy>>({})
 const loading = ref(true)
 const loadError = ref('')
 const busy = ref(false)
 const offsiteBusy = ref('')
+const evaluating = ref(false)
+
+// -- Tabs (B4.6) -------------------------------------------------------------
+type TabKey = 'backups' | 'policies'
+const TABS: { key: TabKey; label: string }[] = [
+  { key: 'backups', label: 'Backups' },
+  { key: 'policies', label: 'Policies' },
+]
+const activeTab = ref<TabKey>('backups')
+
+function switchTab(key: TabKey) {
+  activeTab.value = key
+  if (key === 'policies' && Object.keys(policies.value).length === 0) {
+    void loadPolicies()
+  }
+}
+
+// -- Policy editor sheet -----------------------------------------------------
+const policyOpen = ref(false)
+const policySite = ref<Site | null>(null)
+
+function openPolicy(site: Site) {
+  policySite.value = site
+  policyOpen.value = true
+}
+
+async function onPolicySaved() {
+  await Promise.all([loadPolicies(), loadSummary()])
+}
 
 const modalInput = {
   class:
@@ -296,20 +483,52 @@ const shortArtifact = (a: string) =>
 
 const totalSizeLabel = computed(() => formatBytes(totalSize(backups.value)))
 
+// Real fleet compliance from the evaluator (session 2.3), not derived client-side.
 const compliance = computed(() => {
-  const total = sites.value.length
-  const backedUp = new Set(
-    backups.value.filter((b) => b.status === 'success').map((b) => b.site_id),
-  )
-  const covered = [...backedUp].filter((id) => sites.value.some((s) => s.id === id)).length
-  const pct = total ? Math.round((covered / total) * 100) : 0
+  const s = summary.value
+  const policied = s?.policied ?? 0
+  if (policied === 0) {
+    return { label: '—', sublabel: 'No policies', status: 'muted' as Status }
+  }
+  const pct = s?.compliance_pct ?? 0
   return {
-    label: total ? `${pct}%` : '—',
-    covered,
-    total,
-    status: (pct >= 100 ? 'ok' : pct >= 50 ? 'warn' : 'err') as 'ok' | 'warn' | 'err',
+    label: `${pct}%`,
+    sublabel: `${s?.compliant ?? 0}/${policied} sites compliant`,
+    status: (pct >= 100 ? 'ok' : pct >= 50 ? 'warn' : 'err') as Status,
   }
 })
+
+// -- Policies tab rows -------------------------------------------------------
+const statusBySite = computed(() => {
+  const map = new Map<number, ComplianceStatus>()
+  for (const st of summary.value?.statuses ?? []) map.set(st.site_id, st)
+  return map
+})
+
+const policyRows = computed(() =>
+  sites.value.map((site) => {
+    const st = statusBySite.value.get(site.id)
+    return {
+      site,
+      policy: policies.value[site.id] ?? null,
+      state: st?.state ?? ('unknown' as ComplianceState),
+      breaches: st?.breaches ?? [],
+      lastBackupAt: st?.last_backup_at ?? null,
+    }
+  }),
+)
+
+function complianceDot(state: ComplianceState): Status {
+  if (state === 'compliant') return 'ok'
+  if (state === 'breached') return 'err'
+  return 'muted'
+}
+
+function complianceLabel(state: ComplianceState): string {
+  if (state === 'compliant') return 'Compliant'
+  if (state === 'breached') return 'Breached'
+  return 'No policy'
+}
 
 const lastFailure = computed(() => backups.value.find((b) => b.status === 'failed') ?? null)
 const lastFailureLabel = computed(() =>
@@ -327,10 +546,51 @@ async function load() {
     // Storage targets drive the offsite selector/labels; listing needs
     // settings:manage, so tolerate a 403 for non-Admin backup operators.
     void loadStorageTargets()
+    // Fleet compliance summary drives the KPI card + Policies tab ticks.
+    void loadSummary()
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : 'Could not load backups.'
   } finally {
     loading.value = false
+  }
+}
+
+async function loadSummary() {
+  try {
+    summary.value = await complianceApi.getSummary()
+  } catch {
+    // Non-fatal: the compliance KPI falls back to "—".
+    summary.value = null
+  }
+}
+
+// Per-site policies, loaded lazily when the Policies tab is first opened.
+async function loadPolicies() {
+  const entries = await Promise.all(
+    sites.value.map(async (s) => {
+      try {
+        return [s.id, await complianceApi.getPolicy(s.id)] as const
+      } catch {
+        // 404 (no policy) or 403 — leave the site without a policy row.
+        return [s.id, null] as const
+      }
+    }),
+  )
+  const next: Record<number, BackupPolicy> = {}
+  for (const [id, policy] of entries) if (policy) next[id] = policy
+  policies.value = next
+}
+
+async function evaluateNow() {
+  if (evaluating.value) return
+  evaluating.value = true
+  try {
+    summary.value = await complianceApi.evaluate()
+    toast.success('Compliance re-evaluated.')
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not evaluate compliance.')
+  } finally {
+    evaluating.value = false
   }
 }
 
