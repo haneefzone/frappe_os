@@ -36,6 +36,18 @@ frappe ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx, /usr/bin/systemctl
 frappe ALL=(root) NOPASSWD: /usr/bin/supervisorctl restart *
 frappe ALL=(root) NOPASSWD: /usr/sbin/nginx -t
 
+# Domains & SSL (Session 2.4). The vhost writer targets the bench-owned
+# config/nginx-vhosts/ dir (no root file write), so the only new root rights it
+# needs are a graceful config reload after the `nginx -t` gate passes, plus
+# certbot to issue/renew Let's Encrypt certs (writes /etc/letsencrypt). `reload`
+# (keeps connections, unlike the existing `restart nginx`) is added; certbot is
+# constrained to the exact sub-commands the SSL jobs run — never a bare wildcard
+# binary. Every argv element is DOMAIN_NAME/EMAIL-validated and passed via execve
+# (no shell); `sudo -n` fails loudly if a line is absent. Ratified in the DOO-135
+# Technical-Architect review before install on a live target.
+frappe ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx
+frappe ALL=(root) NOPASSWD: /usr/bin/certbot certonly *, /usr/bin/certbot renew *, /usr/bin/certbot certificates
+
 # bench setup production needs broader rights ONCE — run it with a temporary elevation, not a
 # permanent allowlist entry (Phase 2.5 decision point).
 #

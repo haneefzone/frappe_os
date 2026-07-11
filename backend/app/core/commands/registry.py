@@ -1000,8 +1000,9 @@ register(
 # together with the remote flock is the "write under filelock" requirement.
 # They need `ssl:manage`. domain.dns_check / ssl.expiry_scan are read-only and
 # idempotent (auto-retry a transient SSH blip). certbot + `systemctl reload
-# nginx` require the ratified sudoers allowlist lines (see deploy/sudoers.d/
-# fdm-platform and docs/implementation-plan.md).
+# nginx` require the two Session-2.4 sudoers allowlist lines added to the
+# ratified allowlist in docs/implementation-plan.md (installed at
+# /etc/sudoers.d/fdm-platform); `sudo -n` fails loudly if they are absent.
 # --------------------------------------------------------------------------- #
 
 register(
