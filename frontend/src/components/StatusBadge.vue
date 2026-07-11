@@ -1,6 +1,6 @@
 <template>
   <span
-    class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-meta font-medium"
+    class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-meta font-medium whitespace-nowrap"
     :style="{
       color: STATUS_COLOR[status],
       borderColor: `color-mix(in srgb, ${STATUS_COLOR[status]} 35%, transparent)`,

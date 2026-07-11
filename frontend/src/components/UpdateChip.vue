@@ -8,7 +8,7 @@
   <StatusBadge v-else-if="behindBy === 0" status="ok" label="Up to date" />
 
   <!-- Behind by N (+ optional security emphasis) -->
-  <span v-else class="inline-flex items-center gap-1.5">
+  <span v-else class="inline-flex flex-nowrap items-center gap-1.5">
     <StatusBadge status="warn" :label="behindLabel" />
     <StatusBadge v-if="securityUpdate" status="err" label="Security" />
   </span>

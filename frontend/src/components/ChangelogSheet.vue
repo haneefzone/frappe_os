@@ -15,6 +15,7 @@
           appear
         >
           <aside
+            ref="el"
             class="flex h-full w-full max-w-[560px] flex-col border-l border-line bg-base"
             role="dialog"
             aria-modal="true"
@@ -130,13 +131,15 @@
 </template>
 
 <script setup lang="ts">
+import { ref, watch } from 'vue'
 import LucideExternalLink from '~icons/lucide/external-link'
 import LucideFileText from '~icons/lucide/file-text'
 import LucideX from '~icons/lucide/x'
 import type { ChangelogPreview } from '../api/updateAdvisor'
+import { useFocusTrap } from '../composables/useFocusTrap'
 import EmptyState from './EmptyState.vue'
 
-defineProps<{
+const props = defineProps<{
   open: boolean
   loading: boolean
   error: string
@@ -144,4 +147,8 @@ defineProps<{
 }>()
 
 defineEmits<{ close: [] }>()
+
+const el = ref<HTMLElement>()
+const { activate, deactivate } = useFocusTrap(el)
+watch(() => props.open, (open) => (open ? activate() : deactivate()), { flush: 'post' })
 </script>
