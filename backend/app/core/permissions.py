@@ -13,6 +13,7 @@ SITE_OPERATE = "site:operate"  # create site, migrate, cache ops, install apps
 APP_MANAGE = "app:manage"  # get-app, app upgrades
 BACKUP_CREATE = "backup:create"
 BACKUP_RESTORE = "backup:restore"
+BACKUP_TRANSFER = "backup:transfer"  # move a backup across servers (session 2.6)
 JOB_MANAGE = "job:manage"  # retry/cancel jobs
 TERMINAL_ACCESS = "terminal:access"
 SERVER_MANAGE = "server:manage"  # register servers, SSH credentials
@@ -41,6 +42,7 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         APP_MANAGE,
         BACKUP_CREATE,
         BACKUP_RESTORE,
+        BACKUP_TRANSFER,
         JOB_MANAGE,
         TERMINAL_ACCESS,
         SCHEDULE_MANAGE,

@@ -62,6 +62,11 @@ class JobContext(Protocol):
         backup artifact to offsite storage without buffering it whole (2.2)."""
         ...
 
+    async def write_file(self, path: str, chunks) -> int:
+        """Stream bytes into a remote file over SSH (binary-safe), returning the
+        exit status — the write side of a cross-server backup move (2.6)."""
+        ...
+
 
 class Action:
     """Base action. The default behaviour runs the template's single rendered
@@ -1280,6 +1285,183 @@ async def _upload_backup_offsite(ctx: JobContext, row, storage_target_id: int) -
             f"All {len(object_keys)} artifact(s) offsite in "
             f"{target.name!r}; checksums re-verified end to end."
         )
+
+
+async def _download_with_digest(client, cfg, key: str, digest):
+    """Stream one S3 object, folding each chunk into `digest` as it passes so the
+    caller learns the artifact's sha256 the moment the write finishes (2.6)."""
+    from app.core import storage as st
+
+    async for chunk in st.download_object(client, cfg, key):
+        digest.update(chunk)
+        yield chunk
+
+
+def _resolve_target_site_id(ctx: JobContext, bench_id: int, site_name: str) -> int:
+    """The Site row for `site_name` on the destination bench — the moved copy is
+    registered against it so it shows up under that site's Backups and is ready
+    to restore. The API validates existence; this re-checks under the job."""
+    from sqlalchemy import select
+
+    from app.models.site import Site
+
+    site = ctx.session.scalars(
+        select(Site).where(Site.bench_id == bench_id, Site.name == site_name)
+    ).first()
+    if site is None:
+        raise RuntimeError(
+            f"site {site_name!r} does not exist on the destination bench "
+            f"(#{bench_id}); create it there before moving a backup onto it"
+        )
+    return site.id
+
+
+def _source_server_id(ctx: JobContext, source_backup) -> int | None:
+    """The server the source backup's artifacts came off (via its bench), for the
+    moved copy's provenance. None if the source bench is gone."""
+    from app.models.bench import Bench
+
+    bench = ctx.session.get(Bench, source_backup.bench_id)
+    return bench.server_id if bench is not None else None
+
+
+class MoveBackupAction(Action):
+    """`backup.move_across_servers` — copy a backup's artifacts from their offsite
+    S3 target down onto another managed server, re-verifying each artifact's
+    sha256 on arrival, then registering the moved copy as a first-class Backup on
+    the destination (session 2.6).
+
+    S3 is the transit medium on purpose: an agentless control plane has no direct
+    A→B trust, so a cross-server move streams each object out of the shared
+    StorageTarget straight into the destination server's file over SSH (never
+    buffered whole), computing the sha256 in flight AND re-running `sha256sum` on
+    the landed file. A mismatch on either check refuses the move — a corrupt or
+    truncated copy must never register as a good backup (rule 5 spirit). The
+    source backup must already be offsite (session 2.2); the API enforces it and
+    passes the source's own storage target so the keys are read server-side.
+    """
+
+    async def run(self, ctx: JobContext) -> None:
+        import hashlib
+        import posixpath
+
+        from app.core import storage as st
+        from app.models.backup import Backup
+        from app.models.storage import StorageTarget
+
+        params = ctx.rendered.params_sanitized
+        source_backup_id = int(params["backup_id"])
+        storage_target_id = int(params["storage_target_id"])
+        dest_dir = params["dest_dir"]
+        target_site = params["target_site"]
+        target_bench_id = int(params["target_bench_id"])
+
+        source = ctx.session.get(Backup, source_backup_id)
+        if source is None:
+            raise RuntimeError(f"source backup #{source_backup_id} no longer exists")
+        target = ctx.session.get(StorageTarget, storage_target_id)
+        if target is None or not target.enabled:
+            raise RuntimeError(
+                f"storage target #{storage_target_id} is unavailable (deleted or "
+                "disabled); the artifacts live there in transit — cannot move"
+            )
+
+        cfg = st.S3Config.from_target(target)  # decrypts keys in memory only
+        client = st.build_client(cfg)
+        object_keys = source.object_keys or {}
+        await ctx.emit(
+            f"Moving backup #{source.id} from {target.name!r} onto "
+            f"{target_site} (bench #{target_bench_id}) at {dest_dir}"
+        )
+
+        moved_artifacts: list[dict] = []
+        by_kind_path: dict[str, str] = {}
+        total = 0
+        for art in source.artifacts or []:
+            kind = art.get("kind", "?")
+            src_path = art.get("path", "")
+            expected = art.get("checksum_sha256", "")
+            key = object_keys.get(kind)
+            if not src_path or not expected or not key:
+                await ctx.emit(f"Skipping {kind}: no offsite object recorded.")
+                continue
+            dest = posixpath.join(dest_dir, posixpath.basename(src_path))
+
+            with ctx.step(f"Transfer {kind} → {dest}"):
+                digest = hashlib.sha256()
+                code = await ctx.write_file(
+                    dest, _download_with_digest(client, cfg, key, digest)
+                )
+                if code != 0:
+                    raise RuntimeError(
+                        f"writing {kind} to {dest} failed (exit {code}); check the "
+                        "destination directory exists and is writable by the bench user"
+                    )
+                in_flight = digest.hexdigest()
+                if in_flight != expected:
+                    raise RuntimeError(
+                        f"{kind} checksum changed in transit (expected "
+                        f"{expected[:12]}…, got {in_flight[:12]}…) — move refused"
+                    )
+
+            with ctx.step(f"Verify {kind} on arrival"):
+                res = await ctx.capture(["sha256sum", "--", dest])
+                if res.exit_code != 0:
+                    raise RuntimeError(
+                        f"could not read back {dest} to verify (exit {res.exit_code})"
+                    )
+                on_disk = (res.stdout.split() or [""])[0]
+                if on_disk != expected:
+                    raise RuntimeError(
+                        f"{kind} checksum on the destination does not match "
+                        f"(expected {expected[:12]}…, got {on_disk[:12]}…) — move refused"
+                    )
+                size = int(art.get("size_bytes") or 0)
+                total += size
+                moved_artifacts.append(
+                    {
+                        "kind": kind,
+                        "path": dest,
+                        "size_bytes": size,
+                        "checksum_sha256": expected,
+                    }
+                )
+                by_kind_path[kind] = dest
+                await ctx.emit(
+                    f"  ✓ {kind}: {size / (1024 * 1024):.1f} MB, sha256 re-verified "
+                    f"on arrival ({expected[:12]}…)"
+                )
+
+        if not moved_artifacts:
+            raise RuntimeError(
+                "no offsite artifacts to move — the source backup has no recorded "
+                "object keys (push it offsite first, session 2.2)"
+            )
+
+        with ctx.step("Register moved copy"):
+            moved = Backup(
+                site_id=_resolve_target_site_id(ctx, target_bench_id, target_site),
+                bench_id=target_bench_id,
+                type=source.type,
+                db_path=by_kind_path.get("database"),
+                public_files_path=by_kind_path.get("public_files"),
+                private_files_path=by_kind_path.get("private_files"),
+                config_path=by_kind_path.get("config"),
+                size_bytes=total,
+                artifacts=moved_artifacts,
+                status="success",
+                frappe_version=source.frappe_version,
+                taken_by_job_id=ctx.job_id,
+                storage_state="local",
+                moved_from_backup_id=source.id,
+                source_server_id=_source_server_id(ctx, source),
+            )
+            ctx.session.add(moved)
+            ctx.session.commit()
+            await ctx.emit(
+                f"Registered moved backup #{moved.id}: {len(moved_artifacts)} "
+                f"artifact(s), {total / (1024 * 1024):.1f} MB, all checksums verified."
+            )
 
 
 class BackupAction(Action):

@@ -42,6 +42,8 @@ export interface Backup {
   storage_target_id: number | null
   /** Artifact kinds available offsite (drive the presigned-download menu). */
   offsite_artifacts: string[]
+  /** Set when this is a cross-server moved copy (2.6): the source backup id. */
+  moved_from_backup_id: number | null
   created_at: string
   updated_at: string
 }
@@ -68,6 +70,15 @@ export interface PresignedDownload {
   url: string
   expires_in: number
   filename: string
+}
+
+/** Move a backup onto another server (session 2.6). */
+export interface MoveBackupPayload {
+  target_bench_id: number
+  /** Site on the destination bench to attach the moved copy to (defaults to the
+   * source backup's own site name). It must already exist on that bench. */
+  target_site?: string | null
+  priority?: 'high' | 'default' | 'low'
 }
 
 export interface RestorePayload {
@@ -109,6 +120,14 @@ export const backupsApi = {
       `/api/restores/compatibility?backup_id=${backupId}&bench_id=${benchId}`,
     ),
   restore: (payload: RestorePayload) => apiClient.post<JobDetail>('/api/restores', payload),
+  /**
+   * Move an offsite backup onto another server (session 2.6). Streams the
+   * artifacts from S3 down onto the destination, re-verifies each checksum on
+   * arrival, and registers the moved copy. Developer+ (`backup:transfer`);
+   * audited. Returns the job to watch on job detail.
+   */
+  move: (id: number, payload: MoveBackupPayload) =>
+    apiClient.post<JobDetail>(`/api/backups/${id}/move`, payload),
   /** Direct download URL for one artifact (opened as an anchor href). */
   downloadUrl: (id: number, artifact: string) =>
     `/api/backups/${id}/download?artifact=${encodeURIComponent(artifact)}`,

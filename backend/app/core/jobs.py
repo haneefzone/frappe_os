@@ -264,6 +264,11 @@ class RemoteExecutor(Protocol):
         whole file (session 2.2)."""
         ...
 
+    async def write_file(self, path: str, chunks: AsyncIterator[bytes]) -> int:
+        """Stream `chunks` into a remote file over SSH (binary-safe), returning
+        the exit status — the write side of a cross-server backup move (2.6)."""
+        ...
+
 
 class LocalExecutor:
     """Executor stand-in for a platform-local job (session 6.2).
@@ -400,6 +405,9 @@ class JobContextImpl:
     def read_file(self, path: str, *, chunk_size: int = 65536) -> AsyncIterator[bytes]:
         return self._executor.read_file(path, chunk_size=chunk_size)
 
+    async def write_file(self, path: str, chunks: AsyncIterator[bytes]) -> int:
+        return await self._executor.write_file(path, chunks)
+
     async def emit(self, text: str, stream: str = "system") -> None:
         self._log.append(stream, text)
 
@@ -454,17 +462,17 @@ class SSHRemoteExecutor:
 
     async def read_file(self, path: str, *, chunk_size: int = 65536):
         """Stream a remote file's bytes over the job's pooled SSH connection
-        (`cat`, binary-safe). Used by the 2.2 offsite upload step."""
-        import shlex
+        (`cat`, binary-safe). Used by the 2.2 offsite upload step. Delegates to
+        the SSHService so the read is metered against the server's session cap
+        (2.6)."""
+        async for chunk in self._ssh.read_file(self._conn, path, chunk_size=chunk_size):
+            yield chunk
 
-        command = f"cat -- {shlex.quote(path)}"
-        async with self._conn.create_process(command, encoding=None) as process:
-            while True:
-                chunk = await process.stdout.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
-            await process.wait()
+    async def write_file(self, path: str, chunks) -> int:
+        """Stream bytes into a remote file over the job's pooled SSH connection,
+        metered against the server's session cap. The write side of a
+        cross-server backup move (2.6)."""
+        return await self._ssh.write_file(self._conn, path, chunks)
 
 
 @dataclass

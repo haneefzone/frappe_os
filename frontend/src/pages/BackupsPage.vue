@@ -103,6 +103,13 @@
                   <span class="font-medium text-ink-1">{{ b.site_name }}</span>
                 </div>
                 <span class="text-meta text-ink-3">{{ b.bench_name }}</span>
+                <StatusBadge
+                  v-if="b.moved_from_backup_id"
+                  class="ml-1"
+                  status="running"
+                  label="Moved"
+                  :title="`Moved from backup #${b.moved_from_backup_id} on another server`"
+                />
               </td>
               <td class="px-4 py-2.5">
                 <StatusBadge :status="b.type === 'with-files' ? 'ok' : 'muted'" :label="typeLabel(b.type)" />
@@ -166,6 +173,15 @@
                     label="Verify"
                     :disabled="busy"
                     @click="validate(b)"
+                  />
+                  <Button
+                    v-if="canMove && b.status === 'success' && b.storage_state === 'offsite'"
+                    variant="subtle"
+                    theme="gray"
+                    size="sm"
+                    label="Move"
+                    title="Move this backup onto another server (via its offsite copy)"
+                    @click="openMove(b)"
                   />
                   <Button
                     v-if="canRestore && b.status === 'success'"
@@ -372,6 +388,75 @@
         </div>
       </Transition>
     </Teleport>
+
+    <!-- Move backup modal (session 2.6) -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-150 ease-out"
+        enter-from-class="opacity-0"
+        leave-active-class="transition duration-150 ease-out"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="moveOpen"
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          @click.self="closeMove"
+        >
+          <div
+            ref="movePanel"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Move backup to another server"
+            tabindex="-1"
+            class="fdm-focus w-full max-w-md rounded-lg border border-line bg-raised"
+            @keydown.esc="closeMove"
+            @keydown.tab="trapMoveFocus"
+          >
+            <div class="border-b border-line px-5 py-4">
+              <h2 class="text-section font-semibold text-ink-1">Move to another server</h2>
+              <p class="mt-0.5 text-label text-ink-2">
+                Copy <span class="font-medium text-ink-1">{{ moveSource?.site_name }}</span>'s
+                backup onto another server. Its artifacts stream from offsite storage, each
+                checksum is re-verified on arrival, and the moved copy is registered there.
+              </p>
+            </div>
+            <div class="space-y-4 px-5 py-4">
+              <div v-if="moveTargetBenches.length">
+                <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2" for="move-bench">
+                  Destination bench
+                </label>
+                <select id="move-bench" v-model="moveForm.benchId" v-bind="modalInput">
+                  <option v-for="bn in moveTargetBenches" :key="bn.id" :value="bn.id">
+                    {{ serverName(bn.server_id) }} — {{ bn.name }}
+                  </option>
+                </select>
+                <p class="mt-1 text-meta text-ink-3">
+                  Only benches on a different server are listed. The destination site
+                  (<span class="font-medium text-ink-2">{{ moveSource?.site_name }}</span>) must
+                  already exist there.
+                </p>
+              </div>
+              <p v-else class="text-label text-ink-3">
+                No eligible destination. Register a second server with a bench that already
+                hosts a site named
+                <span class="font-medium text-ink-2">{{ moveSource?.site_name }}</span>.
+              </p>
+            </div>
+            <div class="flex justify-end gap-2 border-t border-line px-5 py-3.5">
+              <Button variant="subtle" theme="gray" label="Cancel" :disabled="busy" @click="closeMove" />
+              <Button
+                variant="solid"
+                theme="gray"
+                label="Move backup"
+                :loading="busy"
+                :disabled="!moveTargetBenches.length"
+                @click="submitMove"
+              />
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -386,6 +471,7 @@ import LucideHistory from '~icons/lucide/history'
 import LucideRefreshCw from '~icons/lucide/refresh-cw'
 import LucideShieldCheck from '~icons/lucide/shield-check'
 import { backupsApi, type Backup } from '../api/backups'
+import { benchesApi, type Bench } from '../api/benches'
 import { ApiError } from '../api/client'
 import {
   complianceApi,
@@ -394,6 +480,7 @@ import {
   type ComplianceStatus,
   type ComplianceSummary,
 } from '../api/compliance'
+import { serversApi, type Server } from '../api/servers'
 import { sitesApi, type Site } from '../api/sites'
 import { storageApi, type StorageTarget } from '../api/storage'
 import EmptyState from '../components/EmptyState.vue'
@@ -420,9 +507,12 @@ const canBackup = auth.hasPermission('backup:create')
 const canRestore = auth.hasPermission('backup:restore')
 const canDownload = auth.hasPermission('backup:restore')
 const canManagePolicy = auth.hasPermission('schedule:manage')
+const canMove = auth.hasPermission('backup:transfer')
 
 const backups = ref<Backup[]>([])
 const sites = ref<Site[]>([])
+const benches = ref<Bench[]>([])
+const servers = ref<Server[]>([])
 const storageTargets = ref<StorageTarget[]>([])
 const summary = ref<ComplianceSummary | null>(null)
 const policies = ref<Record<number, BackupPolicy>>({})
@@ -548,6 +638,8 @@ async function load() {
     void loadStorageTargets()
     // Fleet compliance summary drives the KPI card + Policies tab ticks.
     void loadSummary()
+    // Benches + servers drive the cross-server Move picker (Developer+ only).
+    if (canMove) void loadMoveTargets()
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : 'Could not load backups.'
   } finally {
@@ -600,6 +692,95 @@ async function loadStorageTargets() {
   } catch {
     // 403 for non-Admin operators: no selector, backend auto-selects offsite.
     storageTargets.value = []
+  }
+}
+
+async function loadMoveTargets() {
+  try {
+    const [bn, sv] = await Promise.all([benchesApi.list(), serversApi.list()])
+    benches.value = bn
+    servers.value = sv
+  } catch {
+    benches.value = []
+    servers.value = []
+  }
+}
+
+const serverName = (id: number) => servers.value.find((s) => s.id === id)?.name ?? `Server #${id}`
+
+// -- Move to another server (session 2.6) ------------------------------------
+const moveOpen = ref(false)
+const movePanel = ref<HTMLElement | null>(null)
+const moveSource = ref<Backup | null>(null)
+const moveForm = reactive({ benchId: null as number | null })
+
+// Benches on a DIFFERENT server than the source backup that already host a site
+// with the same name (the destination the moved copy registers against).
+const moveTargetBenches = computed(() => {
+  const src = moveSource.value
+  if (!src) return []
+  const siteName = src.site_name
+  const benchIdsWithSite = new Set(
+    sites.value.filter((s) => s.name === siteName).map((s) => s.bench_id),
+  )
+  return benches.value.filter(
+    (bn) => bn.server_id !== src.server_id && benchIdsWithSite.has(bn.id),
+  )
+})
+
+function openMove(b: Backup) {
+  moveSource.value = b
+  moveForm.benchId = moveTargetBenches.value[0]?.id ?? null
+  moveOpen.value = true
+}
+
+function closeMove() {
+  if (!busy.value) moveOpen.value = false
+}
+
+watch(moveOpen, (open) => {
+  if (open) nextTick(() => movePanel.value?.focus())
+})
+
+function trapMoveFocus(event: KeyboardEvent) {
+  const panel = movePanel.value
+  if (!panel) return
+  const focusable = Array.from(
+    panel.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  )
+  if (focusable.length === 0) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey) {
+    if (document.activeElement === first || document.activeElement === panel) {
+      event.preventDefault()
+      last.focus()
+    }
+  } else if (document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+async function submitMove() {
+  if (busy.value || moveForm.benchId == null || !moveSource.value) return
+  busy.value = true
+  try {
+    const job = await backupsApi.move(moveSource.value.id, { target_bench_id: moveForm.benchId })
+    moveOpen.value = false
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'A job is already running on the destination site.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not start the move.'
+    toast.error(message)
+  } finally {
+    busy.value = false
   }
 }
 

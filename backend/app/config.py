@@ -120,6 +120,18 @@ class Settings(BaseSettings):
     # A synchronous CSV run is allowed only when the generator's row count stays
     # under this; anything larger must go through the job queue (golden rule 3).
     reports_sync_max_rows: int = 5000
+    # SSH connection-pool limits (session 2.6): cap concurrent AsyncSSH sessions
+    # (channels) opened per managed server so a burst of work — a fan-out job or
+    # many parallel operations on one host — cannot exhaust the host's sshd
+    # MaxSessions/MaxStartups and knock other work offline. Beyond the cap,
+    # callers QUEUE (wait) for a free slot rather than failing; only if no slot
+    # frees within ssh_session_acquire_timeout_seconds does the operation fail
+    # cleanly with backpressure (SessionPoolTimeout) instead of hanging. A
+    # per-server override lives on Server.ssh_pool_limit. The cap must be >= the
+    # most sessions a single job holds at once on one host (normal actions hold 1)
+    # so a job can never deadlock waiting on itself.
+    ssh_max_sessions_per_server: int = 5
+    ssh_session_acquire_timeout_seconds: float = 30.0
 
     # Notifications (session 2.8): minimal SMTP + signed webhook channels.
     # SMTP: set SMTP_HOST to enable email. TLS defaults on (STARTTLS).

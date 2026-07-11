@@ -89,9 +89,62 @@ function readCookie(name: string): string {
   return match ? decodeURIComponent(match[1]) : ''
 }
 
+/** Per-server dashboard rollup (session 2.6, spec B4.2). */
+export interface CapacityRollup {
+  ok: boolean
+  cpu_pct: number | null
+  mem_pct: number | null
+  disk_pct: number | null
+  mem_used_mb: number | null
+  mem_total_mb: number | null
+  disk_used_gb: number | null
+  disk_total_gb: number | null
+  load1: number | null
+  services: Record<string, string>
+  sampled_at: string | null
+  error: string | null
+}
+
+export interface SitesRollup {
+  total: number
+  up: number
+  down: number
+  unknown: number
+}
+
+export interface JobsRollup {
+  total: number
+  success: number
+  failure: number
+  running: number
+}
+
+export interface BackupsRollup {
+  count: number
+  total_size_bytes: number
+  last_backup_at: string | null
+}
+
+export interface ServerDashboard {
+  server_id: number
+  name: string
+  hostname: string
+  env_tag: EnvTag
+  status: ServerStatus
+  last_seen: string | null
+  benches: number
+  capacity: CapacityRollup | null
+  sites: SitesRollup
+  jobs_24h: JobsRollup
+  backups: BackupsRollup
+  generated_at: string
+}
+
 export const serversApi = {
   list: () => apiClient.get<Server[]>('/api/servers'),
   get: (id: number) => apiClient.get<Server>(`/api/servers/${id}`),
+  /** Per-server rollup for the Overview (capacity, inventory, jobs, backups). */
+  dashboard: (id: number) => apiClient.get<ServerDashboard>(`/api/servers/${id}/dashboard`),
   create: (payload: ServerCreatePayload) =>
     apiClient.post<ServerCreated>('/api/servers', payload),
   update: (id: number, payload: Partial<ServerCreatePayload>) =>

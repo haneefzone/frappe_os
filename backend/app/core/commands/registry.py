@@ -27,6 +27,7 @@ from app.core.commands.actions import (
     InstallAppOnSiteAction,
     ListBranchesAction,
     MigrateAllSitesAction,
+    MoveBackupAction,
     RenderVhostAction,
     RestartServiceAction,
     RestoreAction,
@@ -48,6 +49,7 @@ from app.core.permissions import (
     APP_MANAGE,
     BACKUP_CREATE,
     BACKUP_RESTORE,
+    BACKUP_TRANSFER,
     BENCH_OPERATE,
     DANGER,
     SERVER_MANAGE,
@@ -755,6 +757,34 @@ register(
         idempotent=True,
         requires_lock=False,
         required_permission=BACKUP_CREATE,
+        run_as=None,
+    )
+)
+
+# `backup.move_across_servers` — copy an offsite backup down onto another server,
+# re-verifying each artifact's sha256 on arrival, and register the moved copy
+# (session 2.6). Runs on the DESTINATION server; the source backup must already
+# be offsite (its keys/target are passed in). Locked on the destination site so a
+# move can't race a backup/restore of the same site. Non-idempotent (creates one
+# Backup row), so it must never auto-retry into a duplicate.
+register(
+    CommandTemplate(
+        action_name="backup.move_across_servers",
+        argv=("true",),  # nominal; MoveBackupAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("backup_id", regex=BACKUP_ID),
+            ParamSpec("storage_target_id", regex=BACKUP_ID),
+            # Absolute destination directory on the target server (the site's
+            # backups dir); the platform computes it, never the user's shell.
+            ParamSpec("dest_dir", regex=ABS_PATH, is_path=True),
+            ParamSpec("target_site", regex=SITE_NAME),
+            ParamSpec("target_bench_id", regex=BACKUP_ID),
+        ),
+        action_class=MoveBackupAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BACKUP_TRANSFER,
         run_as=None,
     )
 )

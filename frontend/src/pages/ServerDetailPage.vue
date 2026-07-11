@@ -60,6 +60,18 @@
       </div>
 
       <div v-else-if="server" class="grid max-w-4xl gap-6 lg:grid-cols-2">
+        <!-- Per-server rollup (session 2.6, B4.2): KPIs for this server only -->
+        <section v-if="rollupCards.length" class="grid gap-4 sm:grid-cols-2 lg:col-span-2 lg:grid-cols-4">
+          <KPICard
+            v-for="card in rollupCards"
+            :key="card.label"
+            :label="card.label"
+            :value="card.value"
+            :status="card.status"
+            :sublabel="card.sublabel"
+          />
+        </section>
+
         <!-- Specs -->
         <section class="rounded-lg border border-line bg-surface">
           <h2 class="border-b border-line px-4 py-2.5 text-label font-semibold text-ink-1">Overview</h2>
@@ -269,12 +281,19 @@ import {
   type ServiceName,
   type ServiceState,
 } from '../api/monitoring'
-import { serversApi, streamServerTest, type CheckEvent, type Server } from '../api/servers'
+import {
+  serversApi,
+  streamServerTest,
+  type CheckEvent,
+  type Server,
+  type ServerDashboard,
+} from '../api/servers'
 import { driftApi, type DriftBaseline } from '../api/drift'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import DriftChip from '../components/DriftChip.vue'
 import DriftDrawer from '../components/DriftDrawer.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
+import KPICard from '../components/KPICard.vue'
 import ResourceGauge from '../components/ResourceGauge.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { toast } from '../components/toast'
@@ -339,7 +358,67 @@ async function triggerDriftCheck() {
   }
 }
 
-const TOOL_KEYS = ['git', 'python3', 'uv', 'node', 'mariadb', 'redis-server', 'wkhtmltopdf', 'bench']
+// -- Per-server rollup (session 2.6, B4.2) -----------------------------------
+const dashboard = ref<ServerDashboard | null>(null)
+
+async function loadDashboard() {
+  try {
+    dashboard.value = await serversApi.dashboard(serverId)
+  } catch {
+    dashboard.value = null // the rollup strip simply hides on error
+  }
+}
+
+function fmtBytes(n: number): string {
+  if (!n) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)))
+  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`
+}
+
+const rollupCards = computed(() => {
+  const d = dashboard.value
+  if (!d) return []
+  const capacityStatus =
+    d.capacity == null
+      ? 'muted'
+      : !d.capacity.ok
+        ? 'err'
+        : (d.capacity.disk_pct ?? 0) >= 90 || (d.capacity.mem_pct ?? 0) >= 90
+          ? 'warn'
+          : 'ok'
+  return [
+    {
+      label: 'Sites up',
+      value: `${d.sites.up}/${d.sites.total}`,
+      status: (d.sites.down > 0 ? 'warn' : 'ok') as Status,
+      sublabel: `${d.benches} bench${d.benches === 1 ? '' : 'es'}`,
+    },
+    {
+      label: 'Capacity',
+      value: d.capacity?.cpu_pct != null ? `${Math.round(d.capacity.cpu_pct)}% CPU` : 'No data',
+      status: capacityStatus as Status,
+      sublabel:
+        d.capacity?.mem_pct != null && d.capacity?.disk_pct != null
+          ? `RAM ${Math.round(d.capacity.mem_pct)}% · Disk ${Math.round(d.capacity.disk_pct)}%`
+          : 'Awaiting a poll',
+    },
+    {
+      label: 'Jobs (24h)',
+      value: String(d.jobs_24h.total),
+      status: (d.jobs_24h.failure > 0 ? 'err' : 'ok') as Status,
+      sublabel: `${d.jobs_24h.success} ok · ${d.jobs_24h.failure} failed`,
+    },
+    {
+      label: 'Backups',
+      value: String(d.backups.count),
+      status: 'ok' as Status,
+      sublabel: `${fmtBytes(d.backups.total_size_bytes)}${d.backups.last_backup_at ? ` · last ${relativeTime(d.backups.last_backup_at)}` : ''}`,
+    },
+  ]
+})
+
+const TOOL_KEYS =['git', 'python3', 'uv', 'node', 'mariadb', 'redis-server', 'wkhtmltopdf', 'bench']
 const coreRows = reactive<{ key: string; label: string; status: RowStatus; value: string | null }[]>([])
 const toolRows = reactive<{ key: string; label: string; status: RowStatus; value: string | null }[]>([])
 
@@ -528,6 +607,7 @@ async function load() {
   try {
     server.value = await serversApi.get(serverId)
     seedRows()
+    void loadDashboard()
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : 'Could not load this server.'
   } finally {
