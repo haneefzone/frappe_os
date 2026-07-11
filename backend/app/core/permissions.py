@@ -20,6 +20,7 @@ DANGER = "danger"  # drop site, delete bench, restore-over-existing
 USER_MANAGE = "user:manage"
 SETTINGS_MANAGE = "settings:manage"
 SCHEDULE_MANAGE = "schedule:manage"  # create/edit/enable/disable recurring schedules
+SSL_MANAGE = "ssl:manage"  # manage site domains, nginx vhosts, TLS certificates
 
 # name -> permissions. Admin gets the wildcard; Read-only can never mutate
 # (CLAUDE.md golden rule 7).
@@ -36,12 +37,14 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         JOB_MANAGE,
         TERMINAL_ACCESS,
         SCHEDULE_MANAGE,
+        SSL_MANAGE,
     ],
     "Operator": [
         READ,
         SITE_OPERATE,
         BACKUP_CREATE,
         JOB_MANAGE,
+        SSL_MANAGE,
     ],
     "Read-only": [READ],
 }

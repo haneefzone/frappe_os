@@ -162,6 +162,11 @@ def _build_fire(db: Session, schedule: Schedule) -> tuple[int, str, dict, object
             params["keep_days"] = str(schedule.retention_keep_days)
         return server_id, target_id, params, None
 
+    if schedule.action_name in ("ssl.certbot_renew", "ssl.expiry_scan"):
+        # Both operate on the site's domains; the action loads the Domain rows.
+        params = {"site": site.name, "bench_path": bench.path}
+        return server_id, target_id, params, None
+
     raise ScheduleError(f"unschedulable action {schedule.action_name!r}")
 
 

@@ -14,15 +14,19 @@ from app.core.commands.actions import (
     BenchPreflightAction,
     BenchRestartAction,
     BenchUpdateAction,
+    CertbotIssueAction,
+    CertbotRenewAction,
     CreateBenchAction,
     CreateSiteAction,
     DetectToolsAction,
     DiscoverBenchesAction,
+    DnsCheckAction,
     EchoDemoAction,
     GetAppAction,
     InstallAppOnSiteAction,
     ListBranchesAction,
     MigrateAllSitesAction,
+    RenderVhostAction,
     RestartServiceAction,
     RestoreAction,
     SetMaintenanceAction,
@@ -30,6 +34,7 @@ from app.core.commands.actions import (
     SetupProductionAction,
     SiteBackupAction,
     SiteMaintenanceAction,
+    SslExpiryScanAction,
     UninstallAppAction,
     ValidateBackupAction,
 )
@@ -46,6 +51,7 @@ from app.core.permissions import (
     DANGER,
     SERVER_MANAGE,
     SITE_OPERATE,
+    SSL_MANAGE,
 )
 from app.core.version_matrix import SUPPORTED_BRANCHES, SUPPORTED_MAJORS
 
@@ -71,6 +77,23 @@ ABS_PATH = r"/[\w./-]{1,300}"
 # alnum plus . - (dots for FQDNs like test1.localhost; no slashes, no shell
 # metacharacters). `bench new-site <name>` creates sites/<name> under the bench.
 SITE_NAME = r"[a-z0-9][a-z0-9.-]{1,80}"
+
+# A custom domain / hostname (session 2.4): lowercase FQDN, at least one dot,
+# labels of 1–63 chars from alnum + hyphen. No slashes, no shell metacharacters,
+# so it is injection-safe as its own argv element to certbot / in an nginx
+# server_name. The DNS/cert actions never build a shell string from it.
+DOMAIN_NAME = r"[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9](?:[a-z0-9-]{0,62}))+"
+
+# A contact email for Let's Encrypt registration (certbot -m). Character
+# whitelist only (no shell metacharacters); passed as its own argv element.
+EMAIL = r"[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]{1,190}\.[a-zA-Z]{2,63}"
+
+# A numeric Domain-row id threaded into a domain/SSL job so the action can update
+# the right row (dns_ok / cert_expires_at). Digits only.
+DOMAIN_ID = r"[0-9]{1,12}"
+
+# nginx vhost TLS toggle: whether render_vhost emits the 443 server block.
+SSL_STATES = ("on", "off")
 
 # A secret password value (admin / MariaDB root). Passed as its own argv element
 # to `bench new-site` (execve, no shell), so injection isn't possible; this
@@ -963,6 +986,113 @@ register(
         idempotent=False,
         requires_lock=True,
         required_permission=BACKUP_CREATE,
+        run_as=None,
+    )
+)
+
+
+# --------------------------------------------------------------------------- #
+# Domains & SSL (session 2.4)
+#
+# nginx.render_vhost / ssl.certbot_* touch nginx and issue certs, so they take a
+# per-server lock (requires_lock=True, target_type="server" at the API) — two
+# nginx-mutating jobs must never race on the same server (golden rule 4), which
+# together with the remote flock is the "write under filelock" requirement.
+# They need `ssl:manage`. domain.dns_check / ssl.expiry_scan are read-only and
+# idempotent (auto-retry a transient SSH blip). certbot + `systemctl reload
+# nginx` require the ratified sudoers allowlist lines (see deploy/sudoers.d/
+# fdm-platform and docs/implementation-plan.md).
+# --------------------------------------------------------------------------- #
+
+register(
+    CommandTemplate(
+        action_name="domain.dns_check",
+        argv=("true",),  # nominal; DnsCheckAction runs getent + the IP probe.
+        cwd=None,
+        params=(
+            ParamSpec("domain", regex=DOMAIN_NAME),
+            ParamSpec("domain_id", regex=DOMAIN_ID),
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=DnsCheckAction,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=SSL_MANAGE,
+        run_as=None,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="nginx.render_vhost",
+        argv=("true",),  # nominal; RenderVhostAction writes + validates + reloads.
+        cwd=None,
+        params=(
+            ParamSpec("domain", regex=DOMAIN_NAME),
+            ParamSpec("domain_id", regex=DOMAIN_ID),
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("ssl", enum=SSL_STATES),
+        ),
+        action_class=RenderVhostAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SSL_MANAGE,
+        run_as=None,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="ssl.certbot_issue",
+        argv=("true",),  # nominal; CertbotIssueAction drives certbot + vhost.
+        cwd=None,
+        params=(
+            ParamSpec("domain", regex=DOMAIN_NAME),
+            ParamSpec("domain_id", regex=DOMAIN_ID),
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("email", regex=EMAIL),
+        ),
+        action_class=CertbotIssueAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SSL_MANAGE,
+        run_as=None,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="ssl.certbot_renew",
+        argv=("true",),  # nominal; CertbotRenewAction renews the site's certs.
+        cwd=None,
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=CertbotRenewAction,
+        idempotent=True,
+        requires_lock=True,
+        required_permission=SSL_MANAGE,
+        run_as=None,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="ssl.expiry_scan",
+        argv=("true",),  # nominal; SslExpiryScanAction reads certbot certificates.
+        cwd=None,
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=SslExpiryScanAction,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=SSL_MANAGE,
         run_as=None,
     )
 )

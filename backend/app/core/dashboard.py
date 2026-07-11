@@ -32,7 +32,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.uptime import fleet_uptime_fraction
-from app.models import Backup, CommandJob, MonitoringSample, Server, Site
+from app.models import Backup, CommandJob, Domain, MonitoringSample, Server, Site
 
 # Fleet Health component weights (must sum to 100).
 HEALTH_W_UPTIME = 40  # real (session 2.7 — external HTTP checks)
@@ -173,6 +173,20 @@ def build_dashboard(db: Session) -> dict:
         or 0
     )
 
+    # SSL expiring ≤30d (session 2.4, B4.1 KPI): SSL-enabled domains whose
+    # certificate expires within 30 days (and hasn't already lapsed) — the
+    # renewal watch-list the dashboard surfaces.
+    ssl_expiring_30d = (
+        db.scalar(
+            select(func.count(Domain.id)).where(
+                Domain.ssl_enabled.is_(True),
+                Domain.cert_expires_at.is_not(None),
+                Domain.cert_expires_at <= now + timedelta(days=30),
+            )
+        )
+        or 0
+    )
+
     # Fleet Health (see module docstring for the documented formula).
     backed_up, active_sites = _sites_backup_compliance(db, since_24h)
     backup_fraction = 1.0 if active_sites == 0 else backed_up / active_sites
@@ -221,6 +235,8 @@ def build_dashboard(db: Session) -> dict:
             "backup_compliance_pct": round(backup_fraction * 100),
             # Real 30-day fleet uptime (session 2.7); pairs with Sites Up (n/n).
             "uptime_30d_pct": round(uptime_fraction * 100),
+            # SSL certificates expiring within 30 days (session 2.4).
+            "ssl_expiring_30d": int(ssl_expiring_30d),
         },
         "morning_brief": _morning_brief(
             servers_total=len(servers),

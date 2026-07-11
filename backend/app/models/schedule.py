@@ -43,7 +43,14 @@ from app.db import Base
 # The actions a schedule may drive. Both target a site; future maintenance-window
 # actions (session 3.5) will extend this — kept as a plain tuple the API validates
 # against rather than a DB enum so adding an action needs no migration.
-SCHEDULE_ACTIONS = ("site.backup", "backup.retention_sweep")
+SCHEDULE_ACTIONS = (
+    "site.backup",
+    "backup.retention_sweep",
+    # Domains & SSL (session 2.4): certbot renewal + cert-expiry refresh, both
+    # scoped to a site's domains, wired here so 2.1 fires them on a cadence.
+    "ssl.certbot_renew",
+    "ssl.expiry_scan",
+)
 
 # What a schedule points at. Only "site" today (backups + sweeps operate on a
 # site); "bench"/"server" become valid when their scheduled actions land.

@@ -1848,3 +1848,380 @@ class RetentionSweepAction(Action):
             await ctx.emit(
                 f"Pruned {len(removed_ids)} backup(s); {len(keep)} kept (ids {kept_ids})."
             )
+
+
+# --------------------------------------------------------------------------- #
+# Domains & SSL (session 2.4)
+#
+# Managing a site's custom domains and TLS. See app/core/domains.py for the pure
+# renderers/parsers and the documented nginx-write policy (no root file writes;
+# vhosts live in the bench-user-writable config/nginx-vhosts/ include dir; the
+# only sudo is the ratified `nginx -t` gate + `systemctl reload nginx`).
+# --------------------------------------------------------------------------- #
+
+# Best-effort discovery of the server's own public IP(s): try the public
+# reflector, then fall back to the host's configured addresses. Read-only.
+_PUBLIC_IP_SCRIPT = (
+    "curl -fsS -4 --max-time 5 https://api.ipify.org 2>/dev/null; echo; "
+    "hostname -I 2>/dev/null || true"
+)
+
+# Atomically write a generated vhost under a flock, after a pre-change tar backup
+# of the vhosts dir (golden rule 5). All values arrive as their own argv
+# elements ($1..$4) — no user text is interpolated into the script text.
+_VHOST_WRITE_SCRIPT = r"""
+set -eu
+VHOSTS="$1"; TARGET="$2"; B64="$3"; BACKUP="$4"
+mkdir -p "$VHOSTS"
+# Pre-change backup of the whole vhosts include dir so a bad write can be rolled
+# back (best-effort; empty dir is fine).
+tar czf "$BACKUP" -C "$VHOSTS" . 2>/dev/null || true
+exec 9>"$VHOSTS/.fdm-vhosts.lock"
+flock 9
+TMP="$(mktemp "$VHOSTS/.tmp.XXXXXX")"
+printf '%s' "$B64" | base64 -d > "$TMP"
+mv -f "$TMP" "$TARGET"
+echo "WROTE $TARGET"
+"""
+
+# Restore the vhosts dir from a pre-change backup tar (used when `nginx -t`
+# rejects the new config, so the live config is never left broken).
+_VHOST_RESTORE_SCRIPT = r"""
+set -eu
+VHOSTS="$1"; BACKUP="$2"; TARGET="$3"
+exec 9>"$VHOSTS/.fdm-vhosts.lock"
+flock 9
+rm -f "$TARGET"
+if [ -s "$BACKUP" ]; then
+  tar xzf "$BACKUP" -C "$VHOSTS" 2>/dev/null || true
+fi
+echo "RESTORED $VHOSTS"
+"""
+
+_NGINX_TEST_ARGV = ["sudo", "-n", "/usr/sbin/nginx", "-t"]
+_NGINX_RELOAD_ARGV = ["sudo", "-n", "/usr/bin/systemctl", "reload", "nginx"]
+
+
+def _load_domain(ctx: JobContext, domain_id: int):
+    """Fetch the Domain row this job acts on, or None."""
+    from app.models.domain import Domain
+
+    return ctx.session.get(Domain, int(domain_id))
+
+
+def _server_public_ips(ctx: JobContext, probe_stdout: str) -> set[str]:
+    """The server's public IP set: whatever the probe found, plus the Server
+    row's hostname when it is itself a literal IP."""
+    from app.core import domains as dom
+    from app.models.server import Server
+
+    ips = dom.parse_public_ips(probe_stdout)
+    server = ctx.session.get(Server, ctx.server_id)
+    if server is not None and server.hostname:
+        ips |= dom.parse_public_ips(server.hostname)
+    return ips
+
+
+class DnsCheckAction(Action):
+    """`domain.dns_check` — resolve a domain's A/AAAA records on the managed
+    server and compare them to the server's public IP, recording dns_ok on the
+    Domain row. Read-only on the server (getent/curl), idempotent."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from datetime import UTC, datetime
+
+        from app.core import domains as dom
+
+        params = ctx.rendered.params_sanitized
+        domain = params["domain"]
+        domain_id = int(params["domain_id"])
+
+        resolved: set[str] = set()
+        with ctx.step(f"Resolve DNS for {domain}"):
+            for family in ("ahostsv4", "ahostsv6"):
+                res = await ctx.capture(["getent", family, domain])
+                resolved |= dom.parse_getent_ips(res.stdout)
+            await ctx.emit(
+                f"{domain} resolves to: "
+                + (", ".join(sorted(resolved)) or "no records")
+            )
+
+        with ctx.step("Determine server public IP"):
+            res = await ctx.capture(["bash", "-c", _PUBLIC_IP_SCRIPT])
+            server_ips = _server_public_ips(ctx, res.stdout)
+            await ctx.emit(
+                "Server public IP(s): "
+                + (", ".join(sorted(server_ips)) or "unknown")
+            )
+
+        ok = dom.dns_ok(resolved, server_ips)
+        row = _load_domain(ctx, domain_id)
+        with ctx.step("Record DNS result"):
+            if row is not None:
+                row.dns_ok = ok
+                row.last_checked = datetime.now(UTC)
+                row.last_error = (
+                    None
+                    if ok
+                    else f"{domain} does not resolve to the server's public IP"
+                )
+                ctx.session.commit()
+            await ctx.emit(
+                "DNS OK — points at this server."
+                if ok
+                else "DNS MISMATCH — the A/AAAA record does not point here yet."
+            )
+
+
+def _vhost_paths(bench_path: str, domain: str, site: str) -> tuple[str, str, str, str]:
+    """Return (vhosts_dir, target_file, webroot, cert_dir) for a domain."""
+    from app.core.domains import VHOSTS_SUBDIR
+
+    vhosts_dir = f"{bench_path}/{VHOSTS_SUBDIR}"
+    target = f"{vhosts_dir}/{domain}.conf"
+    webroot = f"{bench_path}/sites/{site}/public"
+    cert_dir = f"/etc/letsencrypt/live/{domain}"
+    return vhosts_dir, target, webroot, cert_dir
+
+
+async def _write_vhost_and_reload(ctx: JobContext, *, domain: str, bench_path: str,
+                                  site: str, ssl_enabled: bool) -> None:
+    """Render the domain's vhost, write it under a flock with a pre-change
+    backup, gate on `nginx -t`, and reload. If `nginx -t` fails, restore the
+    pre-change backup and raise — the live config is never left broken."""
+    import base64
+
+    from app.core import domains as dom
+
+    bench = _load_bench(ctx, bench_path)
+    port = (bench.webserver_port if bench else None) or 8000
+    vhosts_dir, target, webroot, cert_dir = _vhost_paths(bench_path, domain, site)
+    backup = f"{vhosts_dir}/.fdm-backup-{domain}.tgz"
+
+    content = dom.render_vhost(
+        domain,
+        upstream_host="127.0.0.1",
+        upstream_port=port,
+        ssl_enabled=ssl_enabled,
+        webroot=webroot,
+        cert_dir=cert_dir,
+    )
+    b64 = base64.b64encode(content.encode()).decode()
+
+    with ctx.step(f"Write nginx vhost for {domain}"):
+        await ctx.emit(f"Backing up {vhosts_dir} then writing {target} (under flock).")
+        res = await ctx.capture(
+            ["bash", "-c", _VHOST_WRITE_SCRIPT, "_", vhosts_dir, target, b64, backup]
+        )
+        if res.exit_code != 0:
+            raise RuntimeError(f"vhost write failed: {res.stderr.strip()}")
+        await ctx.emit(res.stdout.strip())
+
+    with ctx.step("Validate nginx config (nginx -t)"):
+        await ctx.emit("$ sudo -n /usr/sbin/nginx -t")
+        code = await ctx.stream(_NGINX_TEST_ARGV)
+        if code != 0:
+            await ctx.emit("nginx -t FAILED — restoring the previous vhosts config.")
+            await ctx.capture(
+                ["bash", "-c", _VHOST_RESTORE_SCRIPT, "_", vhosts_dir, backup, target]
+            )
+            raise RuntimeError(
+                "nginx -t rejected the generated vhost; the live config was "
+                "restored and left untouched (is the fdm-platform sudoers "
+                "allowlist installed?)"
+            )
+
+    with ctx.step("Reload nginx"):
+        await ctx.emit("$ sudo -n /usr/bin/systemctl reload nginx")
+        code = await ctx.stream(_NGINX_RELOAD_ARGV)
+        if code != 0:
+            raise RuntimeError(
+                f"systemctl reload nginx exited {code} (allowlist installed?)"
+            )
+
+
+class RenderVhostAction(Action):
+    """`nginx.render_vhost` — (re)generate a domain's nginx vhost, validate with
+    `nginx -t` under a filelock with a config pre-backup, and reload. Dangerous
+    class (touches nginx), so it takes a per-server lock."""
+
+    async def run(self, ctx: JobContext) -> None:
+        params = ctx.rendered.params_sanitized
+        await _write_vhost_and_reload(
+            ctx,
+            domain=params["domain"],
+            bench_path=params["bench_path"],
+            site=params["site"],
+            ssl_enabled=params.get("ssl") == "on",
+        )
+
+
+def _certbot_issue_argv(domain: str, email: str, webroot: str) -> list[str]:
+    """The fixed certbot argv for a webroot HTTP-01 issue. Every value is its own
+    argv element (execve, no shell) and pre-validated by the ParamSpecs."""
+    return [
+        "sudo", "-n", "/usr/bin/certbot", "certonly",
+        "--webroot", "-w", webroot,
+        "-d", domain,
+        "--non-interactive", "--agree-tos", "--keep-until-expiring",
+        "-m", email,
+        "--cert-name", domain,
+    ]
+
+
+async def _refresh_cert_expiry(ctx: JobContext, domain_ids: list[int]) -> None:
+    """Read `certbot certificates` and update cert_expires_at for the given
+    Domain rows (matched by certificate name == domain)."""
+    from datetime import UTC, datetime
+
+    from app.core import domains as dom
+
+    res = await ctx.capture(["sudo", "-n", "/usr/bin/certbot", "certificates"])
+    by_name = dom.parse_certbot_certificates(res.stdout)
+    for did in domain_ids:
+        row = _load_domain(ctx, did)
+        if row is None:
+            continue
+        expiry = by_name.get(row.domain)
+        if expiry is not None:
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=UTC)
+            row.cert_expires_at = expiry
+            row.cert_status = "issued"
+            row.ssl_enabled = True
+        row.last_checked = datetime.now(UTC)
+    ctx.session.commit()
+
+
+class CertbotIssueAction(Action):
+    """`ssl.certbot_issue` — obtain a Let's Encrypt certificate for a domain via
+    the webroot plugin, then re-render the vhost with TLS on, validate and
+    reload. Records cert_status/expiry on the Domain row. Per-server lock (shares
+    nginx with render_vhost)."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from datetime import UTC, datetime
+
+        params = ctx.rendered.params_sanitized
+        domain = params["domain"]
+        bench_path = params["bench_path"]
+        site = params["site"]
+        email = params["email"]
+        domain_id = int(params["domain_id"])
+        _, _, webroot, _ = _vhost_paths(bench_path, domain, site)
+
+        # Ensure an HTTP vhost serving the ACME challenge exists first.
+        await _write_vhost_and_reload(
+            ctx, domain=domain, bench_path=bench_path, site=site, ssl_enabled=False
+        )
+
+        try:
+            with ctx.step(f"Issue certificate for {domain} (certbot)"):
+                await ctx.emit(f"$ sudo -n certbot certonly --webroot -d {domain}")
+                code = await ctx.stream(_certbot_issue_argv(domain, email, webroot))
+                if code != 0:
+                    raise RuntimeError(
+                        f"certbot exited {code}; check that {domain} resolves here "
+                        "and ports 80/443 are reachable from the internet"
+                    )
+        except Exception as exc:
+            row = _load_domain(ctx, domain_id)
+            if row is not None:
+                row.cert_status = "error"
+                row.last_error = str(exc)[:500]
+                row.last_checked = datetime.now(UTC)
+                ctx.session.commit()
+            raise
+
+        # Cert now on disk — re-render the vhost with TLS on and reload.
+        await _write_vhost_and_reload(
+            ctx, domain=domain, bench_path=bench_path, site=site, ssl_enabled=True
+        )
+        with ctx.step("Record certificate expiry"):
+            await _refresh_cert_expiry(ctx, [domain_id])
+            row = _load_domain(ctx, domain_id)
+            when = row.cert_expires_at.isoformat() if row and row.cert_expires_at else "?"
+            await ctx.emit(f"Certificate issued for {domain}; expires {when}.")
+
+
+class CertbotRenewAction(Action):
+    """`ssl.certbot_renew` — renew the SSL-enabled domains of a site (scheduled
+    via 2.1) and reload nginx, then refresh recorded expiry. `certbot renew`
+    is a no-op for certs not near expiry, so this is safe to run on a cadence."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from sqlalchemy import select
+
+        from app.models.domain import Domain
+
+        params = ctx.rendered.params_sanitized
+        site = params["site"]
+        bench_path = params["bench_path"]
+
+        bench = _load_bench(ctx, bench_path)
+        site_row = _load_site(ctx, bench, site)
+        rows = []
+        if site_row is not None:
+            rows = list(
+                ctx.session.scalars(
+                    select(Domain).where(
+                        Domain.site_id == site_row.id, Domain.ssl_enabled.is_(True)
+                    )
+                ).all()
+            )
+
+        if not rows:
+            with ctx.step("Nothing to renew"):
+                await ctx.emit(f"No SSL-enabled domains on {site}.")
+            return
+
+        with ctx.step(f"Renew {len(rows)} certificate(s)"):
+            for row in rows:
+                await ctx.emit(f"$ sudo -n certbot renew --cert-name {row.domain}")
+                code = await ctx.stream(
+                    ["sudo", "-n", "/usr/bin/certbot", "renew",
+                     "--cert-name", row.domain, "--non-interactive"]
+                )
+                if code != 0:
+                    await ctx.emit(f"certbot renew for {row.domain} exited {code}.")
+
+        with ctx.step("Reload nginx"):
+            await ctx.stream(_NGINX_RELOAD_ARGV)
+
+        with ctx.step("Refresh recorded expiry"):
+            await _refresh_cert_expiry(ctx, [r.id for r in rows])
+            await ctx.emit("Renewal pass complete.")
+
+
+class SslExpiryScanAction(Action):
+    """`ssl.expiry_scan` — read `certbot certificates` and update cert_expires_at
+    for a site's domains (scheduled via 2.1). Feeds the dashboard "SSL expiring
+    ≤30d" KPI. Read-only on the server, idempotent."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from sqlalchemy import select
+
+        from app.models.domain import Domain
+
+        params = ctx.rendered.params_sanitized
+        site = params["site"]
+        bench_path = params["bench_path"]
+
+        bench = _load_bench(ctx, bench_path)
+        site_row = _load_site(ctx, bench, site)
+        rows = []
+        if site_row is not None:
+            rows = list(
+                ctx.session.scalars(
+                    select(Domain).where(Domain.site_id == site_row.id)
+                ).all()
+            )
+
+        with ctx.step(f"Scan certificate expiry for {site}"):
+            if not rows:
+                await ctx.emit(f"No domains on {site}.")
+                return
+            await _refresh_cert_expiry(ctx, [r.id for r in rows])
+            for row in rows:
+                when = row.cert_expires_at.isoformat() if row.cert_expires_at else "no cert"
+                await ctx.emit(f"  {row.domain}: {when}")
