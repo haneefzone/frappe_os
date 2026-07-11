@@ -3,7 +3,7 @@
     <!-- Bell button -->
     <button
       type="button"
-      class="relative flex h-8 w-8 items-center justify-center rounded-md transition-colors duration-150 ease-out"
+      class="fdm-focus relative flex h-8 w-8 items-center justify-center rounded-md transition-colors duration-150 ease-out"
       :style="{ color: open ? 'var(--text-primary)' : 'var(--text-secondary)' }"
       aria-label="Notifications"
       :aria-expanded="open"
@@ -15,8 +15,8 @@
       <span
         v-if="store.unreadCount > 0"
         class="absolute right-0.5 top-0.5 flex h-4 min-w-[1rem] items-center justify-center rounded-full px-0.5 text-[10px] font-bold"
-        :style="{ background: '#EF4444', color: '#fff' }"
-        aria-label="`${store.unreadCount} unread notifications`"
+        :style="{ background: '#B91C1C', color: '#fff' }"
+        :aria-label="`${store.unreadCount} unread notifications`"
       >
         {{ store.unreadCount > 99 ? '99+' : store.unreadCount }}
       </span>
@@ -52,7 +52,7 @@
             <button
               v-if="store.unreadCount > 0"
               type="button"
-              class="text-xs transition-colors duration-150"
+              class="fdm-focus text-xs transition-colors duration-150"
               :style="{ color: 'var(--text-secondary)' }"
               @click="markAllRead"
             >
@@ -60,8 +60,9 @@
             </button>
             <button
               type="button"
-              class="ml-1 text-xs transition-colors duration-150"
+              class="fdm-focus ml-1 text-xs transition-colors duration-150"
               :style="{ color: 'var(--text-secondary)' }"
+              aria-label="Notification preferences"
               @click="showPrefs = !showPrefs"
             >
               <LucideSettings class="h-4 w-4" />
@@ -173,22 +174,24 @@
                   </router-link>
                 </div>
               </div>
-              <div class="flex shrink-0 flex-col gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+              <div class="flex shrink-0 flex-col gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
                 <button
                   v-if="!n.read"
                   type="button"
-                  class="text-[11px]"
+                  class="fdm-focus text-[11px]"
                   :style="{ color: 'var(--text-muted)' }"
                   title="Mark read"
+                  aria-label="Mark read"
                   @click="store.markRead(n.id)"
                 >
                   <LucideCheck class="h-3.5 w-3.5" />
                 </button>
                 <button
                   type="button"
-                  class="text-[11px]"
+                  class="fdm-focus text-[11px]"
                   :style="{ color: 'var(--text-muted)' }"
                   title="Dismiss"
+                  aria-label="Dismiss"
                   @click="store.dismiss(n.id)"
                 >
                   <LucideX class="h-3.5 w-3.5" />

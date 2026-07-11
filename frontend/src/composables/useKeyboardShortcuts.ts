@@ -5,7 +5,7 @@
  *   g j          — navigate to jobs
  *   t            — navigate to terminal
  *   /            — focus command palette search
- *   ?            — shortcut help sheet (not yet built; keyboard event captured)
+ *   ?            — open palette with shortcut legend visible
  *
  * Call once from App.vue so the listener is globally active on authenticated screens.
  */
@@ -14,8 +14,8 @@ import { onBeforeUnmount, onMounted, type Ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 export interface KeyboardShortcutsOptions {
-  /** Ref to the CommandPalette component exposing `openPalette()`. */
-  palette: Ref<{ openPalette: () => void } | null>
+  /** Ref to the CommandPalette component exposing `openPalette()` and `showShortcuts()`. */
+  palette: Ref<{ openPalette: () => void; showShortcuts: () => void } | null>
 }
 
 export function useKeyboardShortcuts({ palette }: KeyboardShortcutsOptions) {
@@ -60,6 +60,9 @@ export function useKeyboardShortcuts({ palette }: KeyboardShortcutsOptions) {
     } else if (e.key === '/' && !e.metaKey && !e.ctrlKey) {
       e.preventDefault()
       palette.value?.openPalette()
+    } else if (e.key === '?' && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault()
+      palette.value?.showShortcuts()
     }
   }
 

@@ -34,7 +34,7 @@
               ref="inputEl"
               v-model="query"
               type="text"
-              class="flex-1 bg-transparent text-sm outline-none"
+              class="fdm-focus flex-1 bg-transparent text-sm focus-visible:outline-none"
               :style="{ color: 'var(--text-primary)' }"
               placeholder="Search servers, sites, jobs, actions…"
               aria-label="Search"
@@ -47,21 +47,21 @@
             />
             <kbd
               class="shrink-0 rounded border px-1.5 py-0.5 text-[10px]"
-              :style="{ borderColor: 'var(--border-strong)', color: 'var(--text-muted)' }"
+              :style="{ borderColor: 'var(--border-strong)', color: 'var(--text-secondary)' }"
             >
               ESC
             </kbd>
           </div>
 
           <!-- Results list -->
-          <div ref="listEl" class="max-h-96 overflow-y-auto py-2">
+          <div ref="listEl" class="max-h-96 overflow-y-auto py-2" aria-live="polite" aria-atomic="false">
             <template v-if="loading">
-              <div class="px-4 py-3 text-sm" :style="{ color: 'var(--text-muted)' }">
+              <div class="px-4 py-3 text-sm" :style="{ color: 'var(--text-secondary)' }">
                 Searching…
               </div>
             </template>
             <template v-else-if="results.length === 0 && query.trim()">
-              <div class="px-4 py-3 text-sm" :style="{ color: 'var(--text-muted)' }">
+              <div class="px-4 py-3 text-sm" :style="{ color: 'var(--text-secondary)' }">
                 No results for "{{ query }}"
               </div>
             </template>
@@ -70,7 +70,7 @@
               <template v-for="group in groupedResults" :key="group.kind">
                 <div
                   class="px-3 py-1 text-[11px] font-medium uppercase tracking-wide"
-                  :style="{ color: 'var(--text-muted)' }"
+                  :style="{ color: 'var(--text-secondary)' }"
                 >
                   {{ kindLabel(group.kind) }}
                 </div>
@@ -78,7 +78,7 @@
                   v-for="(item, idx) in group.items"
                   :key="item.id"
                   type="button"
-                  class="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm transition-colors duration-100"
+                  class="fdm-focus flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm transition-colors duration-100"
                   :class="
                     flatIndex(group.kind, idx) === activeIndex
                       ? 'bg-white/10 text-white'
@@ -102,7 +102,7 @@
                     <span
                       v-if="item.subtitle"
                       class="block truncate text-xs"
-                      :style="{ color: 'var(--text-muted)' }"
+                      :style="{ color: 'var(--text-secondary)' }"
                     >
                       {{ item.subtitle }}
                     </span>
@@ -110,7 +110,7 @@
                   <kbd
                     v-if="flatIndex(group.kind, idx) === activeIndex"
                     class="shrink-0 rounded border px-1.5 py-0.5 text-[10px]"
-                    :style="{ borderColor: 'var(--border-strong)', color: 'var(--text-muted)' }"
+                    :style="{ borderColor: 'var(--border-strong)', color: 'var(--text-secondary)' }"
                   >
                     Enter
                   </kbd>
@@ -121,12 +121,18 @@
 
           <!-- Footer hint -->
           <div
-            class="flex items-center gap-4 border-t px-4 py-2 text-[11px]"
-            :style="{ borderColor: 'var(--border)', color: 'var(--text-muted)' }"
+            class="flex flex-wrap items-center gap-x-4 gap-y-1 border-t px-4 py-2 text-[11px]"
+            :style="{ borderColor: 'var(--border)', color: 'var(--text-secondary)' }"
           >
             <span><kbd class="font-mono">↑↓</kbd> navigate</span>
             <span><kbd class="font-mono">↵</kbd> open</span>
             <span><kbd class="font-mono">Esc</kbd> dismiss</span>
+            <span class="ml-auto flex flex-wrap gap-x-3">
+              <span><kbd class="font-mono">g d</kbd> dashboard</span>
+              <span><kbd class="font-mono">g j</kbd> jobs</span>
+              <span><kbd class="font-mono">t</kbd> terminal</span>
+              <span><kbd class="font-mono">/</kbd> search</span>
+            </span>
           </div>
         </div>
       </div>
@@ -137,6 +143,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { useFocusTrap } from '../composables/useFocusTrap'
 import LucideActivity from '~icons/lucide/activity'
 import LucideArrowRight from '~icons/lucide/arrow-right'
 import LucideCalendar from '~icons/lucide/calendar'
@@ -156,8 +163,10 @@ const results = ref<SearchResult[]>([])
 const loading = ref(false)
 const activeIndex = ref(0)
 const inputEl = ref<HTMLInputElement | null>(null)
-const paletteEl = ref<HTMLElement | null>(null)
+const paletteEl = ref<HTMLElement | undefined>()
 const listEl = ref<HTMLElement | null>(null)
+
+const { activate: trapActivate, deactivate: trapDeactivate } = useFocusTrap(paletteEl)
 
 let _debounce: ReturnType<typeof setTimeout> | null = null
 
@@ -310,15 +319,24 @@ function openPalette() {
         { kind: 'nav', id: 'nav:dashboard', title: 'Dashboard', url: '/' },
         { kind: 'nav', id: 'nav:jobs', title: 'Jobs', url: '/jobs' },
       ]
-  nextTick(() => inputEl.value?.focus())
+  nextTick(() => {
+    inputEl.value?.focus()
+    trapActivate()
+  })
 }
 
 function close() {
+  trapDeactivate()
   open.value = false
   query.value = ''
   results.value = []
 }
 
 // Expose open() for external callers (AppTopbar bind, keyboard shortcuts).
-defineExpose({ openPalette, close })
+// showShortcuts() opens the palette in shortcut-legend mode (? key).
+function showShortcuts() {
+  openPalette()
+}
+
+defineExpose({ openPalette, close, showShortcuts })
 </script>
