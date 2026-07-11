@@ -494,7 +494,7 @@ const compliance = computed(() => {
   return {
     label: `${pct}%`,
     sublabel: `${s?.compliant ?? 0}/${policied} sites compliant`,
-    status: (pct >= 100 ? 'ok' : pct >= 50 ? 'warn' : 'err') as Status,
+    status: (pct >= 90 ? 'ok' : pct >= 50 ? 'warn' : 'err') as Status,
   }
 })
 

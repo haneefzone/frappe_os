@@ -15,10 +15,13 @@
           appear
         >
           <aside
+            ref="sheetEl"
             class="flex h-full w-full max-w-[520px] flex-col border-l border-line bg-base"
             role="dialog"
             aria-modal="true"
             :aria-label="`Backup policy for ${site?.name ?? 'site'}`"
+            tabindex="-1"
+            @keydown.esc.stop="tryClose"
           >
             <!-- Header -->
             <header class="flex items-center justify-between border-b border-line px-5 py-4">
@@ -151,7 +154,7 @@
 
 <script setup lang="ts">
 import { Button } from 'frappe-ui'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import LucideX from '~icons/lucide/x'
 import { ApiError } from '../api/client'
 import { complianceApi } from '../api/compliance'
@@ -171,6 +174,7 @@ const inputAttrs = {
     'fdm-focus w-full rounded-lg border border-line bg-surface px-2.5 py-1.5 text-label text-ink-1 placeholder:text-ink-3 focus:border-line-strong',
 }
 
+const sheetEl = ref<HTMLElement | null>(null)
 const loading = ref(false)
 const submitting = ref(false)
 const removing = ref(false)
@@ -231,6 +235,7 @@ watch(
       submitting.value = false
       removing.value = false
       void loadPolicy()
+      nextTick(() => sheetEl.value?.focus())
     }
   },
 )
