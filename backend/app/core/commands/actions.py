@@ -1901,6 +1901,13 @@ echo "RESTORED $VHOSTS"
 _NGINX_TEST_ARGV = ["sudo", "-n", "/usr/sbin/nginx", "-t"]
 _NGINX_RELOAD_ARGV = ["sudo", "-n", "/usr/bin/systemctl", "reload", "nginx"]
 
+# certbot is invoked ONLY through the fixed root-owned wrapper (deploy/fdm-certbot,
+# installed at this path). The wrapper pins the exact argv shape and refuses any
+# flag-shaped argument, so the NOPASSWD sudoers line targets the wrapper — never a
+# `certbot certonly *` / `renew *` wildcard, which would let a `--deploy-hook`
+# run arbitrary commands as root (DOO-220). Mirrors the fdm-elevate pattern (2.5).
+_FDM_CERTBOT = "/usr/local/sbin/fdm-certbot"
+
 
 def _load_domain(ctx: JobContext, domain_id: int):
     """Fetch the Domain row this job acts on, or None."""
@@ -2057,15 +2064,14 @@ class RenderVhostAction(Action):
 
 
 def _certbot_issue_argv(domain: str, email: str, webroot: str) -> list[str]:
-    """The fixed certbot argv for a webroot HTTP-01 issue. Every value is its own
-    argv element (execve, no shell) and pre-validated by the ParamSpecs."""
+    """The webroot HTTP-01 issue argv, routed through the fixed fdm-certbot
+    wrapper. The wrapper builds the certbot command line itself from these three
+    validated positionals and rejects any flag-shaped argument, so no
+    `--deploy-hook` can reach certbot. Every value is its own argv element
+    (execve, no shell) and pre-validated by the ParamSpecs (DOO-220)."""
     return [
-        "sudo", "-n", "/usr/bin/certbot", "certonly",
-        "--webroot", "-w", webroot,
-        "-d", domain,
-        "--non-interactive", "--agree-tos", "--keep-until-expiring",
-        "-m", email,
-        "--cert-name", domain,
+        "sudo", "-n", _FDM_CERTBOT, "issue",
+        domain, email, webroot,
     ]
 
 
@@ -2076,7 +2082,7 @@ async def _refresh_cert_expiry(ctx: JobContext, domain_ids: list[int]) -> None:
 
     from app.core import domains as dom
 
-    res = await ctx.capture(["sudo", "-n", "/usr/bin/certbot", "certificates"])
+    res = await ctx.capture(["sudo", "-n", _FDM_CERTBOT, "certificates"])
     by_name = dom.parse_certbot_certificates(res.stdout)
     for did in domain_ids:
         row = _load_domain(ctx, did)
@@ -2117,7 +2123,7 @@ class CertbotIssueAction(Action):
 
         try:
             with ctx.step(f"Issue certificate for {domain} (certbot)"):
-                await ctx.emit(f"$ sudo -n certbot certonly --webroot -d {domain}")
+                await ctx.emit(f"$ sudo -n fdm-certbot issue {domain}")
                 code = await ctx.stream(_certbot_issue_argv(domain, email, webroot))
                 if code != 0:
                     raise RuntimeError(
@@ -2177,10 +2183,9 @@ class CertbotRenewAction(Action):
 
         with ctx.step(f"Renew {len(rows)} certificate(s)"):
             for row in rows:
-                await ctx.emit(f"$ sudo -n certbot renew --cert-name {row.domain}")
+                await ctx.emit(f"$ sudo -n fdm-certbot renew {row.domain}")
                 code = await ctx.stream(
-                    ["sudo", "-n", "/usr/bin/certbot", "renew",
-                     "--cert-name", row.domain, "--non-interactive"]
+                    ["sudo", "-n", _FDM_CERTBOT, "renew", row.domain]
                 )
                 if code != 0:
                     await ctx.emit(f"certbot renew for {row.domain} exited {code}.")

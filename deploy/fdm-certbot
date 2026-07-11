@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+#
+# fdm-certbot — the FDM Platform's single-purpose privileged helper for issuing,
+# renewing and listing Let's Encrypt certificates (session 2.4, "Domains & SSL").
+#
+# THE DECISION (documented for the ISO review — DOO-220):
+#   `certbot` genuinely needs root (it writes /etc/letsencrypt and installs the
+#   ACME account). The obvious sudoers grant —
+#       frappe ALL=(root) NOPASSWD: /usr/bin/certbot certonly *, /usr/bin/certbot renew *
+#   is a ROOT-ESCALATION VECTOR: a sudoers `*` matches spaces and arbitrary args,
+#   and both `certbot certonly` and `certbot renew` accept `--deploy-hook` /
+#   `--pre-hook` / `--post-hook`, which run an arbitrary shell command AS ROOT.
+#   So any code running as `frappe` (or a compromise of that account) could do
+#       sudo -n /usr/bin/certbot certonly --webroot -w /tmp -d x --deploy-hook 'id > /root/pwned'
+#   i.e. full root RCE. Sudoers cannot reliably exclude an injected `--*-hook`
+#   via glob matching, so — exactly like `fdm-elevate` did for `bench setup
+#   production` (2.5) — the platform routes certbot through THIS fixed, root-owned
+#   wrapper. The NOPASSWD line targets only the wrapper, never the raw certbot
+#   binary. The wrapper pins the exact argv shapes the SSL jobs use, builds the
+#   certbot command line itself (the caller passes only validated positionals),
+#   and REFUSES any argument that looks like a flag — so no `--deploy-hook` (or
+#   any other unexpected flag) can ever reach certbot.
+#
+# Install once per managed server (see docs/production-setup.md):
+#   sudo install -m 0755 -o root -g root deploy/fdm-certbot /usr/local/sbin/fdm-certbot
+#   # add to /etc/sudoers.d/fdm-platform (validated with visudo -cf):
+#   #   frappe ALL=(root) NOPASSWD: /usr/local/sbin/fdm-certbot
+#
+# Subcommands (each argument-validated; any flag-shaped or malformed argument
+# exits non-zero BEFORE certbot is invoked):
+#   issue <DOMAIN> <EMAIL> <WEBROOT>
+#       certbot certonly --webroot -w <WEBROOT> -d <DOMAIN> --cert-name <DOMAIN>
+#               -m <EMAIL> --non-interactive --agree-tos --keep-until-expiring
+#   renew <DOMAIN>
+#       certbot renew --cert-name <DOMAIN> --non-interactive
+#   certificates
+#       certbot certificates      (read-only)
+#
+set -euo pipefail
+
+CERTBOT=/usr/bin/certbot
+
+die() { echo "fdm-certbot: $*" >&2; exit 1; }
+
+# --------------------------------------------------------------------------- #
+# Input validators — every positional is fully validated before it is placed in
+# the certbot argv. The single most important rule: NOTHING may start with '-',
+# so an injected `--deploy-hook`/`--pre-hook`/`--post-hook` (or any other flag)
+# can never be smuggled through a positional and reach certbot. The shape
+# patterns are a superset-safe belt over that suspenders.
+# --------------------------------------------------------------------------- #
+
+# Reject flag-shaped arguments outright (defence in depth over the shape checks).
+reject_flaglike() {
+  case "$1" in
+    -*) die "refusing flag-shaped argument '$1' — hooks/unknown flags are not permitted" ;;
+  esac
+}
+
+# A DNS hostname: labels of [a-z0-9-], dot-separated, must start alphanumeric.
+# Mirrors the platform's DOMAIN_NAME ParamSpec (lowercase, <=253 chars, no
+# spaces, no shell metacharacters, no leading dash).
+valid_domain() {
+  [[ "$1" =~ ^[a-z0-9]([a-z0-9-]{0,62})(\.[a-z0-9]([a-z0-9-]{0,62}))+$ ]] \
+    && [[ ${#1} -le 253 ]]
+}
+
+# A conservative e-mail shape: local@domain, no spaces/metacharacters.
+valid_email() {
+  [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[a-z0-9]([a-z0-9-]{0,62})(\.[a-z0-9]([a-z0-9-]{0,62}))+$ ]] \
+    && [[ ${#1} -le 254 ]]
+}
+
+# An absolute filesystem path with no '..' segment and no shell metacharacters.
+# The webroot is the bench-owned ACME challenge dir the platform renders.
+valid_webroot() {
+  [[ "$1" == /* ]] || return 1
+  [[ "$1" != *".."* ]] || return 1
+  [[ "$1" =~ ^[A-Za-z0-9/._-]+$ ]]
+}
+
+cmd_issue() {
+  [[ $# -eq 3 ]] || die "issue needs exactly: <domain> <email> <webroot>"
+  local domain="$1" email="$2" webroot="$3"
+  reject_flaglike "$domain"; reject_flaglike "$email"; reject_flaglike "$webroot"
+  valid_domain  "$domain"  || die "invalid domain '$domain'"
+  valid_email   "$email"   || die "invalid email '$email'"
+  valid_webroot "$webroot" || die "invalid webroot '$webroot'"
+  # Fixed argv, built HERE — the caller never supplies flags. execve, no shell.
+  exec "$CERTBOT" certonly \
+    --webroot -w "$webroot" \
+    -d "$domain" \
+    --cert-name "$domain" \
+    -m "$email" \
+    --non-interactive --agree-tos --keep-until-expiring
+}
+
+cmd_renew() {
+  [[ $# -eq 1 ]] || die "renew needs exactly: <domain>"
+  local domain="$1"
+  reject_flaglike "$domain"
+  valid_domain "$domain" || die "invalid domain '$domain'"
+  exec "$CERTBOT" renew --cert-name "$domain" --non-interactive
+}
+
+cmd_certificates() {
+  [[ $# -eq 0 ]] || die "certificates takes no arguments"
+  exec "$CERTBOT" certificates
+}
+
+main() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    issue)        cmd_issue "$@" ;;
+    renew)        cmd_renew "$@" ;;
+    certificates) cmd_certificates "$@" ;;
+    *) die "unknown subcommand: ${sub:-<none>}" ;;
+  esac
+}
+
+# Only run when executed directly, so the validators can be sourced and
+# unit-tested without invoking certbot (mirrors fdm-elevate).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

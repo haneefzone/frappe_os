@@ -40,13 +40,25 @@ frappe ALL=(root) NOPASSWD: /usr/sbin/nginx -t
 # config/nginx-vhosts/ dir (no root file write), so the only new root rights it
 # needs are a graceful config reload after the `nginx -t` gate passes, plus
 # certbot to issue/renew Let's Encrypt certs (writes /etc/letsencrypt). `reload`
-# (keeps connections, unlike the existing `restart nginx`) is added; certbot is
-# constrained to the exact sub-commands the SSL jobs run — never a bare wildcard
-# binary. Every argv element is DOMAIN_NAME/EMAIL-validated and passed via execve
-# (no shell); `sudo -n` fails loudly if a line is absent. Ratified in the DOO-135
-# Technical-Architect review before install on a live target.
+# (keeps connections, unlike the existing `restart nginx`) is added.
+#
+# certbot is NOT granted directly. A sudoers `*` matches spaces and arbitrary
+# args, and `certbot certonly`/`renew` accept `--deploy-hook`/`--pre-hook`/
+# `--post-hook`, which run an arbitrary shell command AS ROOT — so a bare
+# `certonly *` / `renew *` grant is a root-escalation vector (DOO-220: any code
+# running as `frappe` could inject `--deploy-hook 'id > /root/pwned'`). Sudoers
+# glob matching cannot reliably exclude an injected `--*-hook`, so — exactly like
+# `fdm-elevate` for `bench setup production` (2.5) — certbot is routed through the
+# fixed root-owned wrapper `deploy/fdm-certbot` (installed at
+# /usr/local/sbin/fdm-certbot). The wrapper pins the exact certonly/renew argv,
+# builds the certbot command line itself, and REFUSES any flag-shaped argument, so
+# the NOPASSWD line targets only the wrapper — never the raw certbot binary.
+# `certbot certificates` is read-only (no hook that mutates) and the wrapper's
+# `certificates` subcommand takes no arguments. Ratified in the DOO-135/DOO-214
+# Technical-Architect review; the wrapper is the DOO-220 fix required before a
+# live install.
 frappe ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx
-frappe ALL=(root) NOPASSWD: /usr/bin/certbot certonly *, /usr/bin/certbot renew *, /usr/bin/certbot certificates
+frappe ALL=(root) NOPASSWD: /usr/local/sbin/fdm-certbot
 
 # bench setup production needs broader rights ONCE — run it with a temporary elevation, not a
 # permanent allowlist entry (Phase 2.5 decision point).
@@ -58,8 +70,10 @@ frappe ALL=(root) NOPASSWD: /usr/local/sbin/fdm-elevate
 ```
 
 The Session 2.5 elevation mechanism and rollback are documented in
-`docs/production-setup.md`. The `fdm-elevate` helper ships in `deploy/fdm-elevate`; drift
-detection (6.7) hashes both `/etc/sudoers.d/fdm-platform` and asserts no
+`docs/production-setup.md`. The `fdm-elevate` helper ships in `deploy/fdm-elevate`; the
+`fdm-certbot` SSL helper (Session 2.4 / DOO-220) ships in `deploy/fdm-certbot` and installs
+to `/usr/local/sbin/fdm-certbot` (root-owned, 0755); both are standing, fixed-argv wrappers.
+Drift detection (6.7) hashes `/etc/sudoers.d/fdm-platform` and asserts no
 `/etc/sudoers.d/fdm-prod-elevation` drop-in remains at rest.
 
 Rules: no wildcard binaries, no shell built-ins, absolute paths only, one drop-in file owned by the

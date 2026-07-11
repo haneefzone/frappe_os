@@ -16,6 +16,7 @@ from sqlalchemy.pool import StaticPool
 from app.api.routes.jobs import get_job_runner
 from app.core import domains as dom
 from app.core.commands.actions import (
+    _FDM_CERTBOT,
     _NGINX_RELOAD_ARGV,
     _NGINX_TEST_ARGV,
     _PUBLIC_IP_SCRIPT,
@@ -186,7 +187,7 @@ class DomainExecutor:
             if script == _VHOST_RESTORE_SCRIPT:
                 self.restored = True
                 return CaptureResult(0, "RESTORED", "")
-        if argv[:4] == ["sudo", "-n", "/usr/bin/certbot", "certificates"]:
+        if argv[:4] == ["sudo", "-n", _FDM_CERTBOT, "certificates"]:
             return CaptureResult(0, self.certbot_certs, "")
         raise AssertionError(f"unexpected capture {argv}")
 
@@ -196,9 +197,9 @@ class DomainExecutor:
             return self.nginx_t_exit
         if argv == _NGINX_RELOAD_ARGV:
             return 0
-        if argv[:4] == ["sudo", "-n", "/usr/bin/certbot", "certonly"]:
+        if argv[:4] == ["sudo", "-n", _FDM_CERTBOT, "issue"]:
             return self.certbot_exit
-        if argv[:4] == ["sudo", "-n", "/usr/bin/certbot", "renew"]:
+        if argv[:4] == ["sudo", "-n", _FDM_CERTBOT, "renew"]:
             return 0
         return 0
 
@@ -355,7 +356,7 @@ def test_certbot_renew_renews_ssl_domains(sf):
     _run(sf, server_id, "ssl.certbot_renew",
          {"site": "erp.localhost", "bench_path": BENCH_PATH},
          ex, target_type="server", target_id=None)
-    renews = [a for a in ex.streamed if a[:4] == ["sudo", "-n", "/usr/bin/certbot", "renew"]]
+    renews = [a for a in ex.streamed if a[:4] == ["sudo", "-n", _FDM_CERTBOT, "renew"]]
     assert len(renews) == 1  # only the SSL-enabled domain
     assert "erp.acme.com" in renews[0]
 

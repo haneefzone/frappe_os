@@ -11,7 +11,10 @@ trust exactly that one proxy:
 1. **nginx** — copy `deploy/nginx.conf` to `/etc/nginx/conf.d/fdm.conf`, set
    `server_name`, run certbot for TLS, `nginx -t && systemctl reload nginx`.
    The config **sets** `X-Forwarded-For` from `$remote_addr` (never appends a
-   client-supplied chain).
+   client-supplied chain). When the platform manages TLS for a bench site it
+   drives certbot through the fixed root-owned wrapper `deploy/fdm-certbot`
+   (never a raw `certbot certonly *` sudoers grant — see DOO-220 and
+   `docs/production-setup.md`).
 
 2. **App** — in `backend/.env` (or `FDM_TRUSTED_PROXY_IPS` on a fresh
    `install.sh` run):

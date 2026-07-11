@@ -94,6 +94,38 @@ sudo chmod 0440 /etc/sudoers.d/fdm-platform
 `nginx -t` uses the already-ratified `/usr/sbin/nginx -t` allowlist line — no
 extra grant.
 
+### Domains & SSL helper — fdm-certbot (Session 2.4 / DOO-220)
+
+certbot needs root (it writes `/etc/letsencrypt`), but a bare
+`frappe ALL=(root) NOPASSWD: /usr/bin/certbot certonly *, /usr/bin/certbot renew *`
+grant is a **root-escalation vector**: the `*` matches arbitrary args, and
+`certonly`/`renew` accept `--deploy-hook`/`--pre-hook`/`--post-hook`, each of which
+runs an arbitrary shell command **as root**. So certbot is routed through the fixed,
+root-owned wrapper `deploy/fdm-certbot`, exactly as `fdm-elevate` handles
+`bench setup production`. The wrapper pins the certonly/renew argv, builds the
+certbot command line itself, and **refuses any flag-shaped argument** — a
+`--deploy-hook` can never reach certbot. Install it **once per managed server, as
+root**:
+
+```bash
+# 1. Install the SSL helper (root-owned, not writable by the bench user).
+sudo install -m 0755 -o root -g root deploy/fdm-certbot /usr/local/sbin/fdm-certbot
+
+# 2. Grant ONLY the wrapper + the graceful nginx reload (append, then validate).
+#    NOTE: do NOT add `/usr/bin/certbot certonly *` / `renew *` — that is the
+#    vector the wrapper exists to close.
+printf '%s\n' \
+  'frappe ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx' \
+  'frappe ALL=(root) NOPASSWD: /usr/local/sbin/fdm-certbot' \
+  | sudo tee -a /etc/sudoers.d/fdm-platform
+sudo visudo -cf /etc/sudoers.d/fdm-platform     # must print "parsed OK"
+sudo chmod 0440 /etc/sudoers.d/fdm-platform
+```
+
+The SSL jobs invoke `sudo -n /usr/local/sbin/fdm-certbot issue|renew|certificates …`
+(fixed argv, execve, no shell). `certbot certificates` is read-only and the wrapper's
+`certificates` subcommand takes no arguments.
+
 ### bench must resolve to a root-owned binary (DOO-163)
 
 `grant` refuses if the resolved bench binary (or any directory on its path) is
