@@ -20,11 +20,17 @@
     </header>
 
     <!-- Tab navigation -->
-    <nav class="flex shrink-0 border-b border-line px-8" aria-label="Site sections">
+    <nav
+      role="tablist"
+      aria-label="Site sections"
+      class="flex shrink-0 border-b border-line px-8"
+    >
       <button
         v-for="tab in TABS"
         :key="tab.key"
+        role="tab"
         type="button"
+        :aria-selected="activeTab === tab.key"
         class="fdm-focus -mb-px border-b-2 px-4 py-3 text-label font-medium transition"
         :class="
           activeTab === tab.key
