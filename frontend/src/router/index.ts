@@ -18,6 +18,7 @@ import SettingsPage from '../pages/SettingsPage.vue'
 import SitesPage from '../pages/SitesPage.vue'
 import TerminalPage from '../pages/TerminalPage.vue'
 import ToolsPage from '../pages/ToolsPage.vue'
+import UpdatesPage from '../pages/UpdatesPage.vue'
 
 // Real screens replace the placeholder as each session lands one.
 const pageOverrides: Record<string, Component> = {
@@ -26,6 +27,7 @@ const pageOverrides: Record<string, Component> = {
   benches: BenchesPage,
   sites: SitesPage,
   apps: AppsPage,
+  updates: UpdatesPage,
   backups: BackupsPage,
   restore: RestorePage,
   schedules: SchedulesPage,

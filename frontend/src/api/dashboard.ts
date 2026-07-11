@@ -45,6 +45,13 @@ export interface BackupGridDay {
   failed: number
 }
 
+export interface DashboardNeedsAttention {
+  /** Installed apps behind their upstream (session 3.2). */
+  updates_available: number
+  sites_behind: number
+  security_updates: number
+}
+
 export interface DashboardRunningJob {
   id: number
   action_name: string
@@ -76,6 +83,7 @@ export interface Dashboard {
   generated_at: string
   onboarding: DashboardOnboarding
   kpis: DashboardKpis
+  needs_attention: DashboardNeedsAttention
   morning_brief: string
   servers: DashboardServer[]
   /** 7 entries, oldest → newest. */

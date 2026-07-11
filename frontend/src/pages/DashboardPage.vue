@@ -55,6 +55,33 @@
       <div v-else-if="data" class="space-y-6">
         <p v-if="data.morning_brief" class="text-body text-ink-1">{{ data.morning_brief }}</p>
 
+        <!-- Needs attention: available app updates -->
+        <RouterLink
+          v-if="updatesAvailable > 0"
+          to="/updates"
+          class="fdm-focus flex items-center gap-3 rounded-lg border px-4 py-3 transition-colors"
+          :class="
+            securityUpdates > 0
+              ? 'border-err/40 bg-err/10 hover:bg-err/15'
+              : 'border-warn/40 bg-warn/10 hover:bg-warn/15'
+          "
+        >
+          <StatusDot :status="securityUpdates > 0 ? 'err' : 'warn'" />
+          <span class="text-label font-medium text-ink-1">
+            Updates available: {{ updatesAvailable }}
+            <span v-if="sitesBehind > 0" class="font-normal text-ink-2">
+              across {{ sitesBehind }} {{ sitesBehind === 1 ? 'site' : 'sites' }}
+            </span>
+          </span>
+          <span
+            v-if="securityUpdates > 0"
+            class="ml-1 inline-flex items-center rounded-full border border-err/40 bg-err/10 px-2 py-0.5 text-meta font-medium text-err"
+          >
+            Security: {{ securityUpdates }}
+          </span>
+          <span class="ml-auto text-meta text-ink-3">Review updates →</span>
+        </RouterLink>
+
         <!-- Row 1: KPIs -->
         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
           <KPICard
@@ -306,6 +333,12 @@ const loading = ref(true)
 const loadError = ref('')
 const activeDriftId = ref<number | null>(null)
 let timer: ReturnType<typeof setInterval> | null = null
+
+// Needs-attention: available app updates (session 3.2). Guard the field in
+// case the payload predates it.
+const updatesAvailable = computed(() => data.value?.needs_attention?.updates_available ?? 0)
+const sitesBehind = computed(() => data.value?.needs_attention?.sites_behind ?? 0)
+const securityUpdates = computed(() => data.value?.needs_attention?.security_updates ?? 0)
 
 const onboardingSteps = [
   { title: 'Add a server', detail: 'Register an Ubuntu host reachable over SSH.' },

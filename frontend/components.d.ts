@@ -13,6 +13,7 @@ declare module 'vue' {
     AlertRuleSheet: typeof import('./src/components/AlertRuleSheet.vue')['default']
     AppSidebar: typeof import('./src/components/layout/AppSidebar.vue')['default']
     AppTopbar: typeof import('./src/components/layout/AppTopbar.vue')['default']
+    ChangelogSheet: typeof import('./src/components/ChangelogSheet.vue')['default']
     CommandPalette: typeof import('./src/components/CommandPalette.vue')['default']
     ComplianceReportGenerator: typeof import('./src/components/ComplianceReportGenerator.vue')['default']
     ConfirmModal: typeof import('./src/components/ConfirmModal.vue')['default']
@@ -40,6 +41,7 @@ declare module 'vue' {
     StorageTargetSheet: typeof import('./src/components/StorageTargetSheet.vue')['default']
     TerminalTab: typeof import('./src/components/TerminalTab.vue')['default']
     ToastHost: typeof import('./src/components/ToastHost.vue')['default']
+    UpdateChip: typeof import('./src/components/UpdateChip.vue')['default']
     Wizard: typeof import('./src/components/Wizard.vue')['default']
   }
 }

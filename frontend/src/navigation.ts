@@ -1,6 +1,7 @@
 import type { FunctionalComponent, SVGAttributes } from 'vue'
 import LucideActivity from '~icons/lucide/activity'
 import LucideArchive from '~icons/lucide/archive'
+import LucideArrowUpCircle from '~icons/lucide/arrow-up-circle'
 import LucideBlocks from '~icons/lucide/blocks'
 import LucideBot from '~icons/lucide/bot'
 import LucideCalendarClock from '~icons/lucide/calendar-clock'
@@ -80,6 +81,13 @@ export const navGroups: NavGroup[] = [
         path: '/apps',
         icon: LucideBlocks,
         description: 'App sources and the installed app-by-site version matrix.',
+      },
+      {
+        name: 'updates',
+        label: 'Updates',
+        path: '/updates',
+        icon: LucideArrowUpCircle,
+        description: 'How far behind each installed app is from its upstream, with changelogs.',
       },
     ],
   },

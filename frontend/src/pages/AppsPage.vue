@@ -141,13 +141,21 @@
                 <tr v-for="app in matrixApps" :key="app">
                   <td class="sticky left-0 z-10 bg-surface px-4 py-2.5 font-medium text-ink-1">{{ app }}</td>
                   <td v-for="site in matrixSites" :key="site" class="px-4 py-2.5">
-                    <span
-                      v-if="cell(app, site)"
-                      class="inline-block rounded-full border border-line bg-raised px-2 py-0.5 font-mono text-meta text-ink-1"
-                      :title="cellTitle(app, site)"
-                    >
-                      {{ cell(app, site) }}
-                    </span>
+                    <div v-if="cell(app, site)" class="flex flex-col items-start gap-1">
+                      <span
+                        class="inline-block rounded-full border border-line bg-raised px-2 py-0.5 font-mono text-meta text-ink-1"
+                        :title="cellTitle(app, site)"
+                      >
+                        {{ cell(app, site) }}
+                      </span>
+                      <UpdateChip
+                        v-if="entryFor(app, site)"
+                        compact
+                        :behind-by="entryFor(app, site)!.behind_by"
+                        :latest-ref="entryFor(app, site)!.latest_ref"
+                        :security-update="entryFor(app, site)!.security_update"
+                      />
+                    </div>
                     <span v-else class="text-ink-3">—</span>
                   </td>
                 </tr>
@@ -192,6 +200,7 @@ import AddSourceSheet from '../components/AddSourceSheet.vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import EmptyState from '../components/EmptyState.vue'
 import StatusBadge from '../components/StatusBadge.vue'
+import UpdateChip from '../components/UpdateChip.vue'
 import { toast } from '../components/toast'
 import type { Status } from '../components/types'
 import { absoluteTime, relativeTime } from '../lib/servers'

@@ -47,6 +47,11 @@ export interface InstalledApp {
   branch: string | null
   version: string | null
   installed_at: string | null
+  /** Update advisor (session 3.2): how many releases behind, if tracked. */
+  behind_by?: number | null
+  latest_ref?: string | null
+  security_update?: boolean
+  update_checked_at?: string | null
 }
 
 export interface InstallAppPayload {

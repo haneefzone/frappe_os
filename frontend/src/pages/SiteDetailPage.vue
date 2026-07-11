@@ -315,6 +315,7 @@
                 <th class="px-4 py-2 font-medium">App</th>
                 <th class="px-4 py-2 font-medium">Branch</th>
                 <th class="px-4 py-2 font-medium">Version</th>
+                <th class="px-4 py-2 font-medium">Updates</th>
                 <th class="px-4 py-2 font-medium">Installed</th>
                 <th v-if="canRemove" class="px-4 py-2 text-right font-medium">Actions</th>
               </tr>
@@ -331,6 +332,13 @@
                     {{ a.version }}
                   </span>
                   <span v-else class="text-ink-3">—</span>
+                </td>
+                <td class="px-4 py-2.5">
+                  <UpdateChip
+                    :behind-by="a.behind_by"
+                    :latest-ref="a.latest_ref"
+                    :security-update="a.security_update"
+                  />
                 </td>
                 <td class="px-4 py-2.5 text-ink-3" :title="absoluteTime(a.installed_at)">
                   {{ relativeTime(a.installed_at) }}
@@ -854,6 +862,7 @@ import EnvironmentBadge from '../components/EnvironmentBadge.vue'
 import Sparkline from '../components/Sparkline.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import StatusDot from '../components/StatusDot.vue'
+import UpdateChip from '../components/UpdateChip.vue'
 import { toast } from '../components/toast'
 import type { Status } from '../components/types'
 import {
