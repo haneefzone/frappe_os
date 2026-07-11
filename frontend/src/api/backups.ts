@@ -11,6 +11,8 @@ import type { JobDetail } from './jobs'
 
 export type BackupType = 'db' | 'with-files'
 export type BackupStatus = 'pending' | 'success' | 'failed'
+/** Offsite lifecycle (session 2.2): local -> uploading -> offsite | failed. */
+export type StorageState = 'local' | 'uploading' | 'offsite' | 'failed'
 export type ArtifactKind = 'database' | 'public_files' | 'private_files' | 'config'
 export type RestoreMode = 'same_site' | 'new_site' | 'different_bench'
 
@@ -35,6 +37,11 @@ export interface Backup {
   frappe_version: string | null
   restore_tested: boolean
   taken_by_job_id: number | null
+  /** Offsite storage (session 2.2): drives the storage chip in the table (B4.6). */
+  storage_state: StorageState
+  storage_target_id: number | null
+  /** Artifact kinds available offsite (drive the presigned-download menu). */
+  offsite_artifacts: string[]
   created_at: string
   updated_at: string
 }
@@ -49,6 +56,18 @@ export interface BackupFilters {
 export interface CreateBackupPayload {
   with_files: boolean
   priority?: 'high' | 'default' | 'low'
+  /**
+   * Push artifacts to this S3 target after the backup (session 2.2). Omit to let
+   * the API auto-select the single enabled target; send 0 to force local-only.
+   */
+  storage_target_id?: number | null
+}
+
+/** Response of the presigned offsite-download endpoint (short-lived URL). */
+export interface PresignedDownload {
+  url: string
+  expires_in: number
+  filename: string
 }
 
 export interface RestorePayload {
@@ -93,6 +112,15 @@ export const backupsApi = {
   /** Direct download URL for one artifact (opened as an anchor href). */
   downloadUrl: (id: number, artifact: string) =>
     `/api/backups/${id}/download?artifact=${encodeURIComponent(artifact)}`,
+  /**
+   * Short-lived presigned GET URL for one offsite (S3) artifact. The returned
+   * URL carries only an HMAC signature — never the secret key — so it is safe to
+   * open in the browser. Developer+ (`backup:restore`); each request is audited.
+   */
+  offsiteDownload: (id: number, artifact: string) =>
+    apiClient.get<PresignedDownload>(
+      `/api/backups/${id}/offsite-download?artifact=${encodeURIComponent(artifact)}`,
+    ),
 }
 
 /** Parse the `VALIDATE_RESULT <json>` line the validate job emits. */

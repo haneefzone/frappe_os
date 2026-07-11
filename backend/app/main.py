@@ -26,6 +26,7 @@ from app.api.routes.search import router as search_router
 from app.api.routes.servers import router as servers_router
 from app.api.routes.settings import router as settings_router
 from app.api.routes.sites import router as sites_router
+from app.api.routes.storage_targets import router as storage_targets_router
 from app.api.routes.terminal import router as terminal_router
 from app.config import get_settings
 from app.core.logging import configure_logging
@@ -159,6 +160,7 @@ def create_app() -> FastAPI:
     app.include_router(schedules_router)
     app.include_router(dashboard_router)
     app.include_router(settings_router)
+    app.include_router(storage_targets_router)
     app.include_router(ai_settings_router)
     app.include_router(audit_router)
     app.include_router(notifications_router)

@@ -37,6 +37,11 @@ class BackupOut(BaseModel):
     frappe_version: str | None
     restore_tested: bool
     taken_by_job_id: int | None
+    # Offsite storage (session 2.2): drives the storage chip in the table (B4.6).
+    storage_state: str
+    storage_target_id: int | None
+    # Artifact kinds present offsite (drive the presigned-download menu).
+    offsite_artifacts: list[str]
     created_at: datetime
     updated_at: datetime
 
@@ -67,6 +72,9 @@ class BackupOut(BaseModel):
             frappe_version=backup.frappe_version,
             restore_tested=backup.restore_tested,
             taken_by_job_id=backup.taken_by_job_id,
+            storage_state=backup.storage_state or "local",
+            storage_target_id=backup.storage_target_id,
+            offsite_artifacts=sorted((backup.object_keys or {}).keys()),
             created_at=backup.created_at,
             updated_at=backup.updated_at,
         )
@@ -79,6 +87,10 @@ class CreateBackupRequest(BaseModel):
     with_files: bool = True
     # bench backup is longer-running; default it to the high queue.
     priority: str = "high"
+    # Push the artifacts to this S3 target after the backup (session 2.2). Omit
+    # to let the API auto-select the single enabled target, or send 0/-1 to force
+    # a local-only backup even when a target exists.
+    storage_target_id: int | None = None
 
 
 class RestoreRequest(BaseModel):

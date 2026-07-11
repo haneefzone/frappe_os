@@ -28,16 +28,19 @@ from app.api.deps import CurrentUser, require
 from app.api.routes.jobs import get_job_runner
 from app.audit import Audit
 from app.core import backups as bk
+from app.core import storage as st
 from app.core.commands import RenderError, get_template
 from app.core.jobs import JobRunner, LockConflict
 from app.core.permissions import BACKUP_RESTORE, DANGER, READ, role_allows
 from app.core.secrets_resolve import SecretResolutionError
+from app.core.security import SecretsService, get_secrets_service
 from app.core.ssh import SSHService, get_ssh_service
 from app.db import get_db
 from app.models import Server
 from app.models.backup import Backup
 from app.models.bench import Bench
 from app.models.site import Site
+from app.models.storage import StorageTarget
 from app.schemas.backup import (
     BackupOut,
     CompatibilityOut,
@@ -53,6 +56,7 @@ router = APIRouter(prefix="/api", tags=["backups"])
 DbSession = Annotated[Session, Depends(get_db)]
 Runner = Annotated[JobRunner, Depends(get_job_runner)]
 Ssh = Annotated[SSHService, Depends(get_ssh_service)]
+Secrets = Annotated[SecretsService, Depends(get_secrets_service)]
 
 BACKUP_ACTION = "site.backup"
 VALIDATE_ACTION = "backup.validate"
@@ -92,6 +96,34 @@ def _conflict(exc: LockConflict, message: str) -> JSONResponse:
     )
 
 
+def _resolve_storage_target(db: Session, requested: int | None) -> int | None:
+    """Which storage target (if any) a new backup should upload to.
+
+    - requested is a positive id  -> that target (must exist + be enabled).
+    - requested is None (omitted)  -> auto-select the single enabled target, if
+      exactly one exists; if zero or several exist, upload nothing (a local-only
+      backup) rather than guess.
+    - requested is 0 / negative    -> force a local-only backup.
+    """
+    if requested is not None and requested <= 0:
+        return None
+    if requested is not None:
+        target = db.get(StorageTarget, requested)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Storage target not found.")
+        if not target.enabled:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Storage target {target.name!r} is disabled — enable it or "
+                "back up locally.",
+            )
+        return target.id
+    enabled = db.scalars(
+        select(StorageTarget).where(StorageTarget.enabled.is_(True))
+    ).all()
+    return enabled[0].id if len(enabled) == 1 else None
+
+
 def _backup_out(db: Session, backup: Backup) -> BackupOut:
     site = db.get(Site, backup.site_id)
     bench = db.get(Bench, backup.bench_id)
@@ -126,6 +158,8 @@ def create_backup(
     if bench is None:  # pragma: no cover - FK-guaranteed
         raise HTTPException(status_code=404, detail="Site's bench is missing.")
 
+    target_id = _resolve_storage_target(db, body.storage_target_id)
+
     row = bk.create_pending_backup(
         db,
         site_id=site.id,
@@ -133,6 +167,14 @@ def create_backup(
         backup_type="with-files" if body.with_files else "db",
         taken_by_job_id=None,
     )
+    params = {
+        "site": site.name,
+        "bench_path": bench.path,
+        "with_files": "1" if body.with_files else "0",
+        "backup_id": str(row.id),
+    }
+    if target_id is not None:
+        params["storage_target_id"] = str(target_id)
     try:
         job = runner.create(
             db,
@@ -140,12 +182,7 @@ def create_backup(
             server_id=bench.server_id,
             target_type="site",
             target_id=f"{bench.path}::{site.name}",
-            params={
-                "site": site.name,
-                "bench_path": bench.path,
-                "with_files": "1" if body.with_files else "0",
-                "backup_id": str(row.id),
-            },
+            params=params,
             priority=body.priority,
             created_by=user.id,
         )
@@ -310,6 +347,66 @@ async def download_artifact(
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# --------------------------------------------------------------------------- #
+# Presigned offsite download (S3-compatible target, short TTL, Developer+, audited)
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/backups/{backup_id}/offsite-download")
+def presign_offsite_download(
+    backup_id: int,
+    db: DbSession,
+    secrets: Secrets,
+    audit: Audit,
+    user: Annotated[object, Depends(require(BACKUP_RESTORE))],
+    artifact: str = Query(...),
+) -> dict:
+    """Return a short-lived presigned GET URL for one offsite artifact. The URL
+    carries only an HMAC signature — never the S3 secret key — so it is safe to
+    hand to the browser. Developer+ (`backup:restore`); each request is audited."""
+    backup = db.get(Backup, backup_id)
+    if backup is None:
+        raise HTTPException(status_code=404, detail="Backup not found.")
+    if backup.storage_state != "offsite" or backup.storage_target_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This backup has no offsite copy — it is stored locally only.",
+        )
+    key = (backup.object_keys or {}).get(artifact)
+    if not key:
+        raise HTTPException(
+            status_code=404,
+            detail=f"This backup has no offsite {artifact!r} artifact. "
+            f"Available: {sorted((backup.object_keys or {}).keys())}.",
+        )
+    target = db.get(StorageTarget, backup.storage_target_id)
+    if target is None:
+        raise HTTPException(
+            status_code=409,
+            detail="The backup's storage target has been deleted.",
+        )
+    filename = posixpath.basename(key)
+    try:
+        url = st.presign_get(
+            target,
+            key,
+            ttl_seconds=st.PRESIGN_TTL_SECONDS,
+            filename=filename,
+            secrets=secrets,
+        )
+    except st.StorageError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    audit.record(
+        action="backup.offsite_download",
+        summary=f"Presigned offsite {artifact} download of backup #{backup_id}",
+        entity_type="backup",
+        entity_id=backup_id,
+        params={"artifact": artifact, "filename": filename, "target": target.name},
+    )
+    return {"url": url, "expires_in": st.PRESIGN_TTL_SECONDS, "filename": filename}
 
 
 # --------------------------------------------------------------------------- #

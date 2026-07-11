@@ -57,6 +57,11 @@ class JobContext(Protocol):
         """Write a synthetic (runner-generated) log line."""
         ...
 
+    def read_file(self, path: str, *, chunk_size: int = ...):
+        """Yield a remote file's raw bytes over SSH in chunks — for streaming a
+        backup artifact to offsite storage without buffering it whole (2.2)."""
+        ...
+
 
 class Action:
     """Base action. The default behaviour runs the template's single rendered
@@ -1202,14 +1207,92 @@ async def _run_backup(
     return row
 
 
+async def _upload_backup_offsite(ctx: JobContext, row, storage_target_id: int) -> None:
+    """Push a recorded backup's artifacts to an S3-compatible target, re-verifying
+    each artifact's sha256 against what 1.11 recorded (session 2.2).
+
+    The backup itself already succeeded (artifacts are on-server); this is the
+    offsite copy. `storage_state` tracks the outcome (uploading -> offsite/failed)
+    while the Backup's own `status` stays success — a failed upload never
+    invalidates a good local backup. An upload/verify failure raises so the job
+    (and the step) surface it; the operator re-runs once the target is fixed.
+    """
+    from app.core import storage as st
+    from app.models.storage import StorageTarget
+
+    target = ctx.session.get(StorageTarget, storage_target_id)
+    if target is None or not target.enabled:
+        await ctx.emit(
+            f"Storage target #{storage_target_id} is not available (deleted or "
+            "disabled) — the backup stays local. Configure a target and re-run "
+            "to push it offsite."
+        )
+        return
+
+    with ctx.step(f"Upload to offsite storage ({target.name})"):
+        cfg = st.S3Config.from_target(target)  # decrypts keys in memory only
+        client = st.build_client(cfg)
+        row.storage_state = "uploading"
+        ctx.session.commit()
+
+        object_keys: dict[str, str] = {}
+        failures: list[str] = []
+        for art in row.artifacts or []:
+            kind = art.get("kind", "?")
+            path = art.get("path", "")
+            expected = art.get("checksum_sha256", "")
+            if not path or not expected:
+                continue
+            await ctx.emit(f"Uploading {kind} → s3://{cfg.bucket}/…")
+            result = await st.upload_artifact(
+                client,
+                cfg,
+                kind=kind,
+                artifact_path=path,
+                expected_sha256=expected,
+                backup_id=row.id,
+                read_chunks=ctx.read_file,
+            )
+            if result.ok:
+                object_keys[kind] = result.key
+                size_mb = result.size_bytes / (1024 * 1024)
+                await ctx.emit(
+                    f"  ✓ {kind}: {size_mb:.1f} MB, sha256 re-verified "
+                    f"({result.actual_sha256[:12]}…) → {result.key}"
+                )
+            else:
+                failures.append(f"{kind} ({result.error})")
+                await ctx.emit(f"  ✗ {kind}: {result.error}")
+
+        if failures:
+            row.storage_state = "failed"
+            row.object_keys = object_keys
+            ctx.session.commit()
+            raise RuntimeError(
+                "offsite upload failed for: " + ", ".join(failures)
+            )
+
+        row.object_keys = object_keys
+        row.storage_target_id = target.id
+        row.storage_state = "offsite"
+        ctx.session.commit()
+        await ctx.emit(
+            f"All {len(object_keys)} artifact(s) offsite in "
+            f"{target.name!r}; checksums re-verified end to end."
+        )
+
+
 class BackupAction(Action):
-    """`site.backup` — the full backup engine (session 1.11).
+    """`site.backup` — the full backup engine (session 1.11) + offsite upload (2.2).
 
     Detects dev vs production, runs the dev-bench Redis dance (gotcha #3) around
     `bench backup [--with-files]`, then inspects the site's backups dir to capture
     each artifact's absolute path, size and sha256 and record a `Backup` row. The
     API pre-creates a `pending` Backup row and passes its id so a failed backup
-    still leaves a visible failed record. Non-idempotent: one row per run."""
+    still leaves a visible failed record. Non-idempotent: one row per run.
+
+    When a `storage_target_id` is supplied, each recorded artifact is then
+    streamed to that S3-compatible target with its sha256 re-verified offsite."""
 
     async def run(self, ctx: JobContext) -> None:
         params = ctx.rendered.params_sanitized
@@ -1217,6 +1300,8 @@ class BackupAction(Action):
         bench_path = params["bench_path"]
         with_files = params.get("with_files") == "1"
         backup_id = params.get("backup_id")
+        raw_target = params.get("storage_target_id")
+        storage_target_id = int(raw_target) if raw_target else None
 
         bench = _load_bench(ctx, bench_path)
         queue_port, cache_port = _redis_ports(bench)
@@ -1227,7 +1312,7 @@ class BackupAction(Action):
             if is_dev:
                 await _start_dev_redis(ctx, bench_path)
                 started_redis = True
-            await _run_backup(
+            row = await _run_backup(
                 ctx,
                 site=site,
                 bench_path=bench_path,
@@ -1235,6 +1320,8 @@ class BackupAction(Action):
                 with_files=with_files,
                 backup_id=backup_id,
             )
+            if storage_target_id and row is not None and row.status == "success":
+                await _upload_backup_offsite(ctx, row, storage_target_id)
         finally:
             if started_redis:
                 await _stop_dev_redis(ctx, queue_port, cache_port)

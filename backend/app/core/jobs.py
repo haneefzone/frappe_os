@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import time
 import traceback
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -258,6 +258,12 @@ class RemoteExecutor(Protocol):
         """Run a fixed argv and return its collected output (no streaming)."""
         ...
 
+    def read_file(self, path: str, *, chunk_size: int = 65536) -> AsyncIterator[bytes]:
+        """Yield the raw bytes of a remote file over SSH, in chunks — for
+        streaming a backup artifact to offsite storage without buffering the
+        whole file (session 2.2)."""
+        ...
+
 
 class JobContextImpl:
     """Concrete `JobContext` (see app/core/commands/actions.py). Owns step
@@ -355,6 +361,9 @@ class JobContextImpl:
     ) -> CaptureResult:
         return await self._executor.capture(argv, cwd=cwd, timeout=timeout)
 
+    def read_file(self, path: str, *, chunk_size: int = 65536) -> AsyncIterator[bytes]:
+        return self._executor.read_file(path, chunk_size=chunk_size)
+
     async def emit(self, text: str, stream: str = "system") -> None:
         self._log.append(stream, text)
 
@@ -406,6 +415,20 @@ class SSHRemoteExecutor:
         return CaptureResult(
             exit_code=out.exit_status, stdout=out.stdout, stderr=out.stderr
         )
+
+    async def read_file(self, path: str, *, chunk_size: int = 65536):
+        """Stream a remote file's bytes over the job's pooled SSH connection
+        (`cat`, binary-safe). Used by the 2.2 offsite upload step."""
+        import shlex
+
+        command = f"cat -- {shlex.quote(path)}"
+        async with self._conn.create_process(command, encoding=None) as process:
+            while True:
+                chunk = await process.stdout.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+            await process.wait()
 
 
 @dataclass

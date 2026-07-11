@@ -15,6 +15,10 @@ dependencies = [
     "redis>=5.2",
     "asyncssh>=2.18",
     "cryptography>=43",
+    # S3-compatible offsite storage (session 2.2). Imported lazily in
+    # app/core/storage.py so it is only needed when the platform uploads/
+    # downloads; unit tests inject a fake S3 client (no boto3/network).
+    "boto3>=1.35",
     # Claude API integration layer (session 5.0). Imported lazily in
     # app/core/ai.py so the package is only needed when the platform actually
     # calls out; unit tests run against a mocked client.

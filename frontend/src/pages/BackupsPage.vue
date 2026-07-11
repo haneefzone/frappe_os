@@ -68,6 +68,7 @@
               <th class="px-4 py-2 font-medium">Type</th>
               <th class="px-4 py-2 font-medium">Size</th>
               <th class="px-4 py-2 font-medium">Integrity</th>
+              <th class="px-4 py-2 font-medium">Storage</th>
               <th class="px-4 py-2 font-medium">Restore-tested</th>
               <th class="px-4 py-2 font-medium">Taken</th>
               <th class="px-4 py-2 text-right font-medium">Actions</th>
@@ -98,6 +99,13 @@
               </td>
               <td class="px-4 py-2.5">
                 <StatusBadge
+                  :status="storageChip(b.storage_state).status"
+                  :label="storageChip(b.storage_state).label"
+                  :title="storageTitle(b)"
+                />
+              </td>
+              <td class="px-4 py-2.5">
+                <StatusBadge
                   v-if="b.restore_tested"
                   status="ok"
                   label="Tested"
@@ -113,11 +121,23 @@
                     :key="art"
                     :href="downloadUrl(b.id, art)"
                     class="fdm-focus rounded px-1.5 py-1 text-meta text-ink-3 transition hover:bg-raised hover:text-ink-1"
-                    :title="`Download ${artifactLabel(art)}`"
+                    :title="`Download ${artifactLabel(art)} (local)`"
                     download
                   >
                     {{ shortArtifact(art) }}
                   </a>
+                  <button
+                    v-for="art in b.offsite_artifacts"
+                    v-show="canDownload && b.storage_state === 'offsite'"
+                    :key="`s3-${art}`"
+                    type="button"
+                    class="fdm-focus inline-flex items-center gap-0.5 rounded px-1.5 py-1 text-meta text-ok transition hover:bg-raised disabled:opacity-50"
+                    :title="`Download ${artifactLabel(art)} from offsite storage (S3)`"
+                    :disabled="offsiteBusy === `${b.id}:${art}`"
+                    @click="downloadOffsite(b, art)"
+                  >
+                    <LucideCloud class="h-3 w-3" />{{ shortArtifact(art) }}
+                  </button>
                   <Button
                     v-if="canBackup"
                     variant="subtle"
@@ -173,6 +193,21 @@
                 <input v-model="backupForm.withFiles" type="checkbox" class="accent-white" />
                 Include files (public + private) — larger, slower
               </label>
+              <div v-if="storageTargets.length">
+                <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2" for="pick-target">
+                  Offsite storage
+                </label>
+                <select id="pick-target" v-model="backupForm.storageTargetId" v-bind="modalInput">
+                  <option :value="'auto'">
+                    {{ storageTargets.length === 1 ? `Push to ${storageTargets[0].name}` : 'Auto (skip if ambiguous)' }}
+                  </option>
+                  <option :value="'local'">Local only (no offsite copy)</option>
+                  <option v-for="t in storageTargets" :key="t.id" :value="t.id">Push to {{ t.name }}</option>
+                </select>
+                <p class="mt-1 text-meta text-ink-3">
+                  Artifacts upload after the backup, with each checksum re-verified offsite.
+                </p>
+              </div>
               <p class="text-meta text-ink-3">
                 Each backup runs as a job; you'll land on its live log (or the Jobs page for all sites).
               </p>
@@ -194,10 +229,12 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import LucideArchive from '~icons/lucide/archive'
 import LucideCheck from '~icons/lucide/check'
+import LucideCloud from '~icons/lucide/cloud'
 import LucideHistory from '~icons/lucide/history'
 import { backupsApi, type Backup } from '../api/backups'
 import { ApiError } from '../api/client'
 import { sitesApi, type Site } from '../api/sites'
+import { storageApi, type StorageTarget } from '../api/storage'
 import EmptyState from '../components/EmptyState.vue'
 import KPICard from '../components/KPICard.vue'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -208,6 +245,7 @@ import {
   BACKUP_TYPE_LABEL,
   backupStatusDot as statusDot,
   formatBytes,
+  storageChip,
   totalSize,
 } from '../lib/backups'
 import { absoluteTime, relativeTime } from '../lib/servers'
@@ -221,9 +259,11 @@ const canDownload = auth.hasPermission('backup:restore')
 
 const backups = ref<Backup[]>([])
 const sites = ref<Site[]>([])
+const storageTargets = ref<StorageTarget[]>([])
 const loading = ref(true)
 const loadError = ref('')
 const busy = ref(false)
+const offsiteBusy = ref('')
 
 const modalInput = {
   class:
@@ -233,6 +273,16 @@ const modalInput = {
 const downloadUrl = backupsApi.downloadUrl
 const typeLabel = (t: string) => BACKUP_TYPE_LABEL[t] ?? t
 const artifactLabel = (a: string) => ARTIFACT_LABEL[a] ?? a
+
+function storageTitle(b: Backup): string {
+  if (b.storage_state === 'offsite') {
+    const name = storageTargets.value.find((t) => t.id === b.storage_target_id)?.name
+    return name ? `Offsite in ${name}, checksums re-verified` : 'Offsite, checksums re-verified'
+  }
+  if (b.storage_state === 'uploading') return 'Upload in progress'
+  if (b.storage_state === 'failed') return 'Offsite upload failed — artifacts remain local'
+  return 'Stored on the source server only'
+}
 const shortArtifact = (a: string) =>
   ({ database: 'DB', public_files: 'Pub', private_files: 'Priv', config: 'Cfg' })[a] ?? a
 
@@ -266,6 +316,9 @@ async function load() {
     // Newest first (the API already sorts, but keep it explicit for safety).
     backups.value = bk
     sites.value = st
+    // Storage targets drive the offsite selector/labels; listing needs
+    // settings:manage, so tolerate a 403 for non-Admin backup operators.
+    void loadStorageTargets()
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : 'Could not load backups.'
   } finally {
@@ -273,14 +326,37 @@ async function load() {
   }
 }
 
+async function loadStorageTargets() {
+  try {
+    storageTargets.value = (await storageApi.list()).filter((t) => t.enabled)
+  } catch {
+    // 403 for non-Admin operators: no selector, backend auto-selects offsite.
+    storageTargets.value = []
+  }
+}
+
 // -- Backup now --------------------------------------------------------------
 const backupOpen = ref(false)
-const backupForm = reactive({ siteId: 'all' as number | 'all', withFiles: true })
+const backupForm = reactive({
+  siteId: 'all' as number | 'all',
+  withFiles: true,
+  // 'auto' = let the API auto-select; 'local' = force local-only; else a target id.
+  storageTargetId: 'auto' as number | 'auto' | 'local',
+})
 
 function openBackup() {
   backupForm.siteId = sites.value.length ? sites.value[0].id : 'all'
   backupForm.withFiles = true
+  backupForm.storageTargetId = 'auto'
   backupOpen.value = true
+}
+
+// Map the modal selection to the API's storage_target_id contract:
+// omit (undefined) = auto-select; 0 = force local-only; a positive id = that target.
+function storagePayload(): number | undefined {
+  if (backupForm.storageTargetId === 'auto') return undefined
+  if (backupForm.storageTargetId === 'local') return 0
+  return backupForm.storageTargetId
 }
 
 function closeBackup() {
@@ -291,11 +367,12 @@ async function submitBackup() {
   if (busy.value) return
   busy.value = true
   try {
+    const storage_target_id = storagePayload()
     if (backupForm.siteId === 'all') {
       let launched = 0
       for (const s of sites.value) {
         try {
-          await backupsApi.create(s.id, { with_files: backupForm.withFiles })
+          await backupsApi.create(s.id, { with_files: backupForm.withFiles, storage_target_id })
           launched++
         } catch {
           // keep going; one busy site shouldn't block the rest
@@ -306,7 +383,10 @@ async function submitBackup() {
       await load()
       router.push('/jobs')
     } else {
-      const job = await backupsApi.create(backupForm.siteId, { with_files: backupForm.withFiles })
+      const job = await backupsApi.create(backupForm.siteId, {
+        with_files: backupForm.withFiles,
+        storage_target_id,
+      })
       backupOpen.value = false
       router.push(`/jobs/${job.id}`)
     }
@@ -333,6 +413,22 @@ async function validate(b: Backup) {
     toast.error(error instanceof Error ? error.message : 'Could not start verification.')
   } finally {
     busy.value = false
+  }
+}
+
+async function downloadOffsite(b: Backup, artifact: string) {
+  const token = `${b.id}:${artifact}`
+  if (offsiteBusy.value === token) return
+  offsiteBusy.value = token
+  try {
+    // The endpoint returns a short-lived presigned URL (Developer+, audited);
+    // opening it downloads straight from S3 — the secret key never travels.
+    const { url } = await backupsApi.offsiteDownload(b.id, artifact)
+    window.open(url, '_blank', 'noopener')
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not sign the offsite download.')
+  } finally {
+    offsiteBusy.value = ''
   }
 }
 

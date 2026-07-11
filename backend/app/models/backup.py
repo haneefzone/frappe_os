@@ -45,6 +45,13 @@ BACKUP_TYPES = ("db", "with-files")
 # pending = row created before the job finished; success/failed set by the job.
 BACKUP_STATUSES = ("pending", "success", "failed")
 
+# Offsite storage lifecycle (session 2.2):
+#  local     — artifacts exist only on the source server (default; no target).
+#  uploading — an upload step is in flight.
+#  offsite   — every artifact is in the S3 target with its sha256 re-verified.
+#  failed    — the upload or a checksum re-verify failed (artifacts stay local).
+STORAGE_STATES = ("local", "uploading", "offsite", "failed")
+
 
 class Backup(Base):
     """One captured backup of a site (its artifacts + integrity metadata)."""
@@ -90,6 +97,21 @@ class Backup(Base):
     )
     # True once this backup has been restored into a site and verified.
     restore_tested: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # --- Offsite storage (session 2.2) ------------------------------------- #
+    # local | uploading | offsite | failed (see STORAGE_STATES). Defaults to
+    # local: a backup with no configured target is simply on-server only.
+    storage_state: Mapped[str] = mapped_column(
+        String(20), default="local", index=True
+    )
+    # The StorageTarget this backup was uploaded to (SET NULL if the target is
+    # later deleted so the offsite record survives).
+    storage_target_id: Mapped[int | None] = mapped_column(
+        ForeignKey("storage_targets.id", ondelete="SET NULL"), index=True
+    )
+    # kind -> object key in the target bucket, for the presigned-download
+    # endpoint ({"database": "prefix/backup-42/…-database.sql.gz", ...}).
+    object_keys: Mapped[dict] = mapped_column(ArtifactsJSON, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

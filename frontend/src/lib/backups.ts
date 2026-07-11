@@ -1,7 +1,7 @@
 /** Shared presentation helpers for the backups inventory (session 1.11). */
 
 import type { Status } from '../components/types'
-import type { ArtifactKind, Backup, BackupStatus } from '../api/backups'
+import type { ArtifactKind, Backup, BackupStatus, StorageState } from '../api/backups'
 
 /** Backup lifecycle -> StatusDot color. */
 export function backupStatusDot(status: BackupStatus): Status {
@@ -24,6 +24,24 @@ export const BACKUP_STATUS_LABEL: Record<BackupStatus, string> = {
 export const BACKUP_TYPE_LABEL: Record<string, string> = {
   db: 'Database only',
   'with-files': 'With files',
+}
+
+/**
+ * The storage chip shown per backup row (B4.6): a backup lives on the source
+ * server (local) until an offsite upload lands (offsite), with in-flight
+ * (uploading) and failed states surfaced distinctly.
+ */
+export function storageChip(state: StorageState | string): { label: string; status: Status } {
+  switch (state) {
+    case 'offsite':
+      return { label: 'S3', status: 'ok' }
+    case 'uploading':
+      return { label: 'Uploading', status: 'running' }
+    case 'failed':
+      return { label: 'Upload failed', status: 'err' }
+    default:
+      return { label: 'Local', status: 'muted' }
+  }
 }
 
 export const ARTIFACT_LABEL: Record<ArtifactKind | string, string> = {

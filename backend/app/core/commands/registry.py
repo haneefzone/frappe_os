@@ -718,6 +718,9 @@ register(
             # The pending Backup row created by the API before the job runs, so a
             # failed backup still leaves a visible (failed) record.
             ParamSpec("backup_id", regex=BACKUP_ID, required=False),
+            # Optional S3-compatible target to push the artifacts to after the
+            # backup is recorded (session 2.2); its keys are read server-side.
+            ParamSpec("storage_target_id", regex=BACKUP_ID, required=False),
         ),
         action_class=BackupAction,
         idempotent=False,

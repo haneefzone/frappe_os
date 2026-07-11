@@ -157,6 +157,75 @@
           </div>
         </section>
 
+        <!-- Storage: S3-compatible offsite targets (session 2.2) -->
+        <section v-show="tab === 'storage'" class="max-w-3xl space-y-5">
+          <div class="rounded-lg border border-line bg-surface">
+            <div class="flex items-center justify-between border-b border-line px-5 py-3.5">
+              <div>
+                <h2 class="text-section font-semibold text-ink-1">Offsite storage</h2>
+                <p class="mt-0.5 text-label text-ink-2">
+                  S3-compatible buckets backup artifacts are pushed to, with checksum re-verification.
+                </p>
+              </div>
+              <Button v-if="canManage" variant="solid" theme="gray" size="sm" label="Add target" @click="openTargetSheet(null)">
+                <template #prefix><LucidePlus class="h-4 w-4" /></template>
+              </Button>
+            </div>
+
+            <p v-if="storageError" class="px-5 py-3 text-label text-err" role="alert">{{ storageError }}</p>
+
+            <div v-if="storageLoading" class="p-5">
+              <div v-for="i in 2" :key="i" class="mb-2 h-12 w-full animate-pulse rounded bg-raised" />
+            </div>
+
+            <EmptyState
+              v-else-if="targets.length === 0"
+              :icon="LucideCloud"
+              title="No storage targets"
+              message="Add an S3-compatible bucket to push backups offsite."
+              :cta-label="canManage ? 'Add target' : undefined"
+              @cta="openTargetSheet(null)"
+            />
+
+            <ul v-else class="divide-y divide-line">
+              <li v-for="t in targets" :key="t.id" class="flex items-center gap-4 px-5 py-3.5">
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    <span class="truncate font-medium text-ink-1">{{ t.name }}</span>
+                    <StatusBadge :status="t.enabled ? 'ok' : 'muted'" :label="providerLabel(t.provider)" />
+                    <StatusBadge v-if="!t.enabled" status="muted" label="Disabled" />
+                    <StatusBadge v-if="!t.keys_set" status="warn" label="No keys" />
+                  </div>
+                  <p class="mt-0.5 truncate font-mono text-meta text-ink-3">
+                    {{ t.bucket }}<span v-if="t.path_prefix">/{{ t.path_prefix }}</span>
+                    <span v-if="t.endpoint_url"> · {{ t.endpoint_url }}</span>
+                  </p>
+                  <p
+                    v-if="testResults[t.id]"
+                    class="mt-1 text-meta"
+                    :class="testTone(testResults[t.id])"
+                    role="status"
+                  >
+                    {{ testLine(testResults[t.id]) }}
+                  </p>
+                </div>
+                <div v-if="canManage" class="flex items-center gap-1">
+                  <Button
+                    variant="subtle"
+                    theme="gray"
+                    size="sm"
+                    :label="testingId === t.id ? 'Testing…' : 'Test'"
+                    :loading="testingId === t.id"
+                    @click="testTarget(t)"
+                  />
+                  <Button variant="subtle" theme="gray" size="sm" label="Edit" @click="openTargetSheet(t)" />
+                  <Button variant="subtle" theme="gray" size="sm" label="Delete" @click="confirmDelete(t)" />
+                </div>
+              </li>
+            </ul>
+          </div>
+        </section>
+
         <!-- Environment (read-only) -->
         <section v-show="tab === 'environment'" class="max-w-2xl">
           <div class="rounded-lg border border-line bg-surface">
@@ -174,12 +243,36 @@
         </section>
       </template>
     </div>
+
+    <StorageTargetSheet
+      :open="targetSheetOpen"
+      :target="editingTarget"
+      @close="targetSheetOpen = false"
+      @saved="onTargetSaved"
+    />
+
+    <ConfirmModal
+      :model-value="deleteTarget != null"
+      title="Delete storage target"
+      :message="deleteTarget ? `Remove “${deleteTarget.name}”?` : ''"
+      verb="Delete target"
+      variant="destructive"
+      :consequences="[
+        'Existing offsite backups keep their records but can no longer be downloaded through this target.',
+      ]"
+      :loading="deleting"
+      @confirm="doDelete"
+      @cancel="deleteTarget = null"
+      @update:model-value="(v: boolean) => { if (!v) deleteTarget = null }"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { Button } from 'frappe-ui'
 import { computed, onMounted, reactive, ref } from 'vue'
+import LucideCloud from '~icons/lucide/cloud'
+import LucidePlus from '~icons/lucide/plus'
 import { ApiError } from '../api/client'
 import {
   type Environment,
@@ -187,6 +280,16 @@ import {
   type Settings,
   settingsApi,
 } from '../api/settings'
+import {
+  STORAGE_PROVIDER_LABEL,
+  type StorageTarget,
+  type TestConnectionResult,
+  storageApi,
+} from '../api/storage'
+import ConfirmModal from '../components/ConfirmModal.vue'
+import EmptyState from '../components/EmptyState.vue'
+import StatusBadge from '../components/StatusBadge.vue'
+import StorageTargetSheet from '../components/StorageTargetSheet.vue'
 import { toast } from '../components/toast'
 import { useAuthStore } from '../stores/auth'
 import { useSettingsStore } from '../stores/settings'
@@ -195,12 +298,15 @@ const auth = useAuthStore()
 const settingsStore = useSettingsStore()
 const canManage = auth.hasPermission('settings:manage')
 
-type TabKey = 'general' | 'defaults' | 'environment'
-const tabs: { key: TabKey; label: string }[] = [
+type TabKey = 'general' | 'defaults' | 'storage' | 'environment'
+const tabs = computed<{ key: TabKey; label: string }[]>(() => [
   { key: 'general', label: 'General' },
   { key: 'defaults', label: 'Defaults' },
+  // Storage-target endpoints are Admin-only (settings:manage); hide the tab
+  // entirely for read-only users since even listing requires that permission.
+  ...(canManage ? ([{ key: 'storage', label: 'Storage' }] as const) : []),
   { key: 'environment', label: 'Environment' },
-]
+])
 const tab = ref<TabKey>('general')
 
 const inputAttrs = {
@@ -375,5 +481,90 @@ async function uploadLogo(contentType: LogoContentType, dataUrl: string) {
   }
 }
 
-onMounted(load)
+// -- Storage targets (session 2.2) ------------------------------------------
+const targets = ref<StorageTarget[]>([])
+const storageLoading = ref(false)
+const storageError = ref('')
+const testResults = reactive<Record<number, TestConnectionResult>>({})
+const testingId = ref<number | null>(null)
+
+const targetSheetOpen = ref(false)
+const editingTarget = ref<StorageTarget | null>(null)
+const deleteTarget = ref<StorageTarget | null>(null)
+const deleting = ref(false)
+
+const providerLabel = (p: string) => STORAGE_PROVIDER_LABEL[p] ?? p
+
+async function loadTargets() {
+  if (!canManage) return
+  storageLoading.value = true
+  storageError.value = ''
+  try {
+    targets.value = await storageApi.list()
+  } catch (error) {
+    storageError.value = error instanceof Error ? error.message : 'Could not load storage targets.'
+  } finally {
+    storageLoading.value = false
+  }
+}
+
+function openTargetSheet(t: StorageTarget | null) {
+  editingTarget.value = t
+  targetSheetOpen.value = true
+}
+
+async function onTargetSaved() {
+  toast.success('Storage target saved.')
+  await loadTargets()
+}
+
+async function testTarget(t: StorageTarget) {
+  if (testingId.value != null) return
+  testingId.value = t.id
+  try {
+    testResults[t.id] = await storageApi.testConnection(t.id)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not run the connection test.')
+  } finally {
+    testingId.value = null
+  }
+}
+
+function testTone(r: TestConnectionResult): string {
+  if (!r.reachable) return 'text-err'
+  return r.writable ? 'text-ok' : 'text-warn'
+}
+
+function testLine(r: TestConnectionResult): string {
+  if (!r.reachable) return `Not reachable — ${r.error ?? 'connection failed'}.`
+  const latency = r.latency_ms != null ? ` · ${r.latency_ms} ms` : ''
+  if (!r.writable) return `Reachable, not writable${latency} — ${r.error ?? 'write denied'}.`
+  return `Reachable and writable${latency}.`
+}
+
+function confirmDelete(t: StorageTarget) {
+  deleteTarget.value = t
+}
+
+async function doDelete() {
+  const t = deleteTarget.value
+  if (!t || deleting.value) return
+  deleting.value = true
+  try {
+    await storageApi.remove(t.id)
+    delete testResults[t.id]
+    deleteTarget.value = null
+    toast.success(`Deleted storage target “${t.name}”.`)
+    await loadTargets()
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not delete the storage target.')
+  } finally {
+    deleting.value = false
+  }
+}
+
+onMounted(() => {
+  load()
+  loadTargets()
+})
 </script>
