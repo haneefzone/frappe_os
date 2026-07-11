@@ -92,10 +92,83 @@
       <p v-else-if="actionError" class="mb-3 text-label text-err" role="alert">{{ actionError }}</p>
 
       <div v-if="job" class="grid h-full min-h-0 gap-6 lg:grid-cols-[minmax(280px,380px)_1fr]">
-        <section class="min-h-0 overflow-y-auto rounded-lg border border-line bg-surface p-5">
-          <h2 class="mb-4 text-label font-semibold text-ink-1">Steps</h2>
-          <JobTimeline v-if="timelineSteps.length" :steps="timelineSteps" auto-expand-failed />
-          <p v-else class="text-meta text-ink-3">Waiting for the first step…</p>
+        <section class="flex min-h-0 flex-col gap-6 overflow-y-auto">
+          <!-- Ask AI to analyze (uiux-spec §8/§17) — only for failed jobs -->
+          <div
+            v-if="job.status === 'failure' && (canManage || analysis)"
+            class="rounded-lg border border-line bg-surface p-5"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <h2 class="flex items-center gap-1.5 text-label font-semibold text-ink-1">
+                  <LucideSparkles class="h-4 w-4 text-run" />
+                  AI analysis
+                </h2>
+                <p class="mt-1 text-meta text-ink-3">
+                  Send the sanitized log and job context to Claude for a root-cause read.
+                </p>
+              </div>
+              <Button
+                v-if="canManage && !analysisRunning && (!analysis || analysis.status === 'failure')"
+                variant="subtle"
+                theme="gray"
+                :label="analysis ? 'Re-analyze' : 'Ask AI to analyze'"
+                @click="analyze"
+              >
+                <template #prefix><LucideSparkles class="h-4 w-4" /></template>
+              </Button>
+            </div>
+
+            <p v-if="analysisError" class="mt-3 text-label text-err" role="alert">
+              {{ analysisError }}
+            </p>
+
+            <div
+              v-if="analysisRunning"
+              class="mt-4 flex items-center gap-2 text-label text-ink-2"
+              aria-live="polite"
+            >
+              <LucideLoader2 class="h-4 w-4 animate-spin text-run" />
+              Analyzing…
+            </div>
+
+            <div v-else-if="analysis && analysis.status === 'success'" class="mt-4 flex flex-col gap-4">
+              <div v-if="analysis.root_cause">
+                <h3 class="text-meta font-semibold uppercase tracking-wide text-ink-3">Root cause</h3>
+                <p class="mt-1 whitespace-pre-wrap text-label leading-relaxed text-ink-1">
+                  {{ analysis.root_cause }}
+                </p>
+              </div>
+              <div v-if="analysis.suggested_fix">
+                <h3 class="text-meta font-semibold uppercase tracking-wide text-ink-3">Suggested fix</h3>
+                <p class="mt-1 whitespace-pre-wrap text-label leading-relaxed text-ink-1">
+                  {{ analysis.suggested_fix }}
+                </p>
+              </div>
+              <div v-if="analysis.summary && !analysis.root_cause && !analysis.suggested_fix">
+                <p class="whitespace-pre-wrap text-label leading-relaxed text-ink-1">
+                  {{ analysis.summary }}
+                </p>
+              </div>
+              <p v-if="analysis.model" class="text-meta text-ink-3">
+                Analyzed with {{ analysis.model }}
+              </p>
+            </div>
+
+            <p
+              v-else-if="analysis && analysis.status === 'failure'"
+              class="mt-3 text-label text-err"
+              role="alert"
+            >
+              {{ analysis.error || 'The analysis could not be completed.' }}
+            </p>
+          </div>
+
+          <div class="min-h-0 rounded-lg border border-line bg-surface p-5">
+            <h2 class="mb-4 text-label font-semibold text-ink-1">Steps</h2>
+            <JobTimeline v-if="timelineSteps.length" :steps="timelineSteps" auto-expand-failed />
+            <p v-else class="text-meta text-ink-3">Waiting for the first step…</p>
+          </div>
         </section>
 
         <section class="min-h-0">
@@ -136,7 +209,11 @@ import { useRoute, useRouter } from 'vue-router'
 import LucideArrowLeft from '~icons/lucide/arrow-left'
 import LucideBan from '~icons/lucide/ban'
 import LucideChevronRight from '~icons/lucide/chevron-right'
+import LucideLoader2 from '~icons/lucide/loader-2'
 import LucideRotateCcw from '~icons/lucide/rotate-ccw'
+import LucideSparkles from '~icons/lucide/sparkles'
+import { ApiError } from '../api/client'
+import { type JobAnalysis, copilotApi } from '../api/copilot'
 import { type JobDetail, jobsApi, streamJobLogs } from '../api/jobs'
 import JobTimeline from '../components/JobTimeline.vue'
 import LogViewer from '../components/LogViewer.vue'
@@ -262,17 +339,72 @@ async function retry() {
   }
 }
 
+// --- AI analysis ("Ask AI to analyze", uiux-spec §8) ----------------------- //
+const analysis = ref<JobAnalysis | null>(null)
+const analysisError = ref('')
+let analysisTimer: ReturnType<typeof setTimeout> | null = null
+
+// True while a request is in flight or the latest analysis is still cooking.
+const analysisRunning = computed(
+  () => analysis.value?.status === 'pending' || analysis.value?.status === 'running',
+)
+
+function stopAnalysisPoll() {
+  if (analysisTimer) {
+    clearTimeout(analysisTimer)
+    analysisTimer = null
+  }
+}
+
+function pollAnalysis() {
+  stopAnalysisPoll()
+  analysisTimer = setTimeout(async () => {
+    try {
+      analysis.value = await copilotApi.getAnalysis(jobId)
+    } catch {
+      // Transient read error — keep the last known state and retry.
+    }
+    if (analysisRunning.value) pollAnalysis()
+    else analysisTimer = null
+  }, 2000)
+}
+
+async function analyze() {
+  analysisError.value = ''
+  try {
+    analysis.value = await copilotApi.analyzeJob(jobId)
+    if (analysisRunning.value) pollAnalysis()
+  } catch (e) {
+    // 409 = AI disabled/unkeyed, 422 = job not failed — surface the message.
+    analysisError.value = e instanceof ApiError ? e.message : 'Could not start the analysis.'
+  }
+}
+
+async function loadExistingAnalysis() {
+  try {
+    analysis.value = await copilotApi.getAnalysis(jobId)
+    if (analysisRunning.value) pollAnalysis()
+  } catch (e) {
+    // 404 = no prior analysis — that's the common case, stay silent.
+    if (!(e instanceof ApiError && e.status === 404)) {
+      // Any other error is non-fatal; the button lets the user try again.
+    }
+  }
+}
+
 onMounted(async () => {
   await refreshJob()
   if (loadError.value) return
   void connectLogs()
   if (job.value && !isTerminal(job.value.status)) scheduleJobPoll()
+  if (job.value?.status === 'failure') void loadExistingAnalysis()
 })
 
 onUnmounted(() => {
   stopped = true
   abort?.abort()
   if (pollTimer) clearTimeout(pollTimer)
+  stopAnalysisPoll()
 })
 
 // If a cancel/other action finishes the job, ensure the poll loop restarts to
