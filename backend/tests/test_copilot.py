@@ -403,3 +403,92 @@ def test_run_job_analysis_entrypoint_handles_missing_row(db_session, monkeypatch
 
     monkeypatch.setattr(appdb, "SessionLocal", lambda: db_session)
     run_job_analysis(999999)  # should not raise
+
+
+# --------------------------------------------------------------------------- #
+# Stuck-'running' cleanup — failure_callback + lazy reaper + dedup            #
+# --------------------------------------------------------------------------- #
+
+
+def test_analyze_dedups_in_flight_analysis(copilot_client, db_session):
+    # A second analyze while one is pending/running returns the SAME row (200),
+    # never stacks a fresh row + AI spend.
+    _enable_ai(db_session)
+    job = _make_failed_job(db_session)
+    login(copilot_client, "developer@example.com")
+
+    r1 = copilot_client.post(
+        f"/api/jobs/{job.id}/analyze", headers=csrf_headers(copilot_client)
+    )
+    assert r1.status_code == 202
+    first_id = r1.json()["id"]
+
+    r2 = copilot_client.post(
+        f"/api/jobs/{job.id}/analyze", headers=csrf_headers(copilot_client)
+    )
+    assert r2.status_code == 200  # returned the existing one, not a new 202
+    assert r2.json()["id"] == first_id
+    assert copilot_client.enqueued == [first_id]  # enqueued exactly once
+
+
+def test_mark_analysis_failed_flips_stuck_running_row(db_session, monkeypatch):
+    # RQ failure_callback: a timed-out / crashed job leaves the row 'running';
+    # the callback flips it to 'failure' without leaking the exception detail.
+    from app.core import copilot as copmod
+
+    _enable_ai(db_session)
+    job = _make_failed_job(db_session)
+    analysis = JobAnalysis(job_id=job.id, status="running")
+    db_session.add(analysis)
+    db_session.commit()
+    aid = analysis.id
+
+    # The callback opens (and closes) its own SessionLocal in prod; point it at
+    # the test session and re-query afterwards (close() detaches the instance).
+    monkeypatch.setattr("app.db.SessionLocal", lambda: db_session)
+
+    class _FakeRQJob:
+        args = (aid,)
+
+    copmod.mark_analysis_failed(
+        _FakeRQJob(), None, RuntimeError, RuntimeError(f"timeout {SECRET}"), None
+    )
+    refreshed = db_session.get(JobAnalysis, aid)
+    assert refreshed.status == "failure"
+    assert refreshed.completed_at is not None
+    assert SECRET not in (refreshed.error or "")
+
+
+def test_reap_if_stale_fails_a_long_running_row(copilot_client, db_session):
+    # A 'running' row older than the job timeout + grace is reaped on the poll
+    # endpoint so the panel stops polling a dead worker's row.
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.copilot import ANALYSIS_STALE_AFTER
+
+    _enable_ai(db_session)
+    job = _make_failed_job(db_session)
+    stale = JobAnalysis(job_id=job.id, status="running")
+    stale.created_at = datetime.now(UTC) - ANALYSIS_STALE_AFTER - timedelta(seconds=60)
+    db_session.add(stale)
+    db_session.commit()
+
+    login(copilot_client, "developer@example.com")
+    r = copilot_client.get(f"/api/jobs/{job.id}/analyze")
+    assert r.status_code == 200
+    assert r.json()["status"] == "failure"
+
+
+def test_reap_if_stale_leaves_a_fresh_running_row(copilot_client, db_session):
+    # A recently-started 'running' row is NOT reaped — we must never race a live
+    # in-flight AI call.
+    _enable_ai(db_session)
+    job = _make_failed_job(db_session)
+    fresh = JobAnalysis(job_id=job.id, status="running")
+    db_session.add(fresh)
+    db_session.commit()
+
+    login(copilot_client, "developer@example.com")
+    r = copilot_client.get(f"/api/jobs/{job.id}/analyze")
+    assert r.status_code == 200
+    assert r.json()["status"] == "running"

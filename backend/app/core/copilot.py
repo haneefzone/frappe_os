@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -45,6 +45,13 @@ from app.models import Bench, CommandJob, JobAnalysis, LogEntry, Server, Site
 # the prompt (and the cost) up — the tail is where a failure surfaces.
 LOG_TAIL_LINES = 200
 MAX_ANALYSIS_TOKENS = 1500
+
+# RQ job timeout for one analysis (kept in sync with the enqueue in the API).
+ANALYSIS_JOB_TIMEOUT = 600
+# A 'running' analysis that has outlived the job timeout + grace is presumed dead
+# (a hard worker crash the failure_callback couldn't catch) and reaped so the
+# panel stops polling it. Generous over the timeout to never race a live call.
+ANALYSIS_STALE_AFTER = timedelta(seconds=ANALYSIS_JOB_TIMEOUT + 300)
 
 # The structured-output contract (output_config.format). The deep model must
 # return exactly these fields, so the panel can render them without parsing.
@@ -234,6 +241,53 @@ def run_job_analysis(analysis_id: int) -> None:
         db.close()
 
 
+def mark_analysis_failed(job, connection, exc_type, exc_value, tb) -> None:  # noqa: ANN001, ARG001
+    """RQ failure_callback: a `job_timeout` mid-call or a raised exception leaves
+    the row stuck `running` (``analyze_job`` commits it before the AI call), so
+    the panel would poll it forever. Flip it to `failure`.
+
+    Best-effort and **secret-free**: no exception detail is persisted — a raised
+    SDK/timeout message could carry log content (rule 6). RQ passes the failing
+    ``job``; its first arg is the analysis id.
+    """
+    from app.db import SessionLocal  # noqa: PLC0415
+
+    analysis_id = job.args[0] if getattr(job, "args", None) else None
+    if analysis_id is None:  # pragma: no cover — the enqueue always passes the id.
+        return
+    db = SessionLocal()
+    try:
+        analysis = db.get(JobAnalysis, analysis_id)
+        if analysis is None or analysis.status in ("success", "failure"):
+            return
+        analysis.status = "failure"
+        analysis.error = "Analysis timed out or the worker stopped before finishing."
+        analysis.completed_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
+
+
+def reap_if_stale(db: Session, analysis: JobAnalysis) -> JobAnalysis:
+    """Backstop for a hard worker crash (SIGKILL/OOM) that the failure_callback
+    can't catch: if a `running` analysis has outlived the job timeout + grace,
+    mark it `failure` so the panel stops polling a dead row. Called lazily from
+    the poll endpoint — no separate reaper process to run."""
+    if analysis.status != "running":
+        return analysis
+    started = analysis.created_at
+    if started is None:  # pragma: no cover — created_at has a server default.
+        return analysis
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    if datetime.now(UTC) - started > ANALYSIS_STALE_AFTER:
+        analysis.status = "failure"
+        analysis.error = "Analysis did not complete (the worker stopped)."
+        analysis.completed_at = datetime.now(UTC)
+        db.commit()
+    return analysis
+
+
 # --------------------------------------------------------------------------- #
 # 2. Natural-language → registered-template resolver                          #
 # --------------------------------------------------------------------------- #
@@ -292,7 +346,7 @@ _INTENTS: tuple[Intent, ...] = (
     Intent(
         key="migrate",
         template="site.migrate",
-        keywords=("migrate", "run migrate", "migration", "bench migrate"),
+        keywords=("migrate", "run migrate", "migration"),
         title_verb="Migrate",
         run_path="/api/sites/{id}/migrate",
     ),

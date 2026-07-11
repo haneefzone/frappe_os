@@ -1,7 +1,7 @@
 """job analyses — AI root-cause of failed jobs (session 5.2 panel copilot)
 
 Revision ID: a1d2c3b4e5f6
-Revises: f5a2c9d1e7b4
+Revises: f7a2c9e1b3d4
 Create Date: 2026-07-11 15:00:00.000000
 
 """

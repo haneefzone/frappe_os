@@ -15,14 +15,14 @@ shell (rule 1).
 from collections.abc import Callable
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, require
 from app.audit import Audit
 from app.core.ai import AnthropicClient
-from app.core.copilot import resolve_nl_command
+from app.core.copilot import reap_if_stale, resolve_nl_command
 from app.core.permissions import JOB_MANAGE, READ
 from app.core.security import SecretsService, get_secrets_service
 from app.db import get_db
@@ -45,17 +45,22 @@ def dispatch_analysis(analysis_id: int) -> None:
     """Enqueue the AI analysis on the low-priority RQ queue (rule 3). Overridden
     in tests to run the analysis synchronously against the test session."""
     from redis import Redis  # noqa: PLC0415
-    from rq import Queue  # noqa: PLC0415
+    from rq import Callback, Queue  # noqa: PLC0415
 
     from app.config import get_settings  # noqa: PLC0415
+    from app.core.copilot import ANALYSIS_JOB_TIMEOUT  # noqa: PLC0415
 
     conn = Redis.from_url(get_settings().redis_url)
     Queue("low", connection=conn).enqueue(
         "app.core.copilot.run_job_analysis",
         analysis_id,
-        job_timeout=600,
+        job_timeout=ANALYSIS_JOB_TIMEOUT,
         result_ttl=86400,
         failure_ttl=604800,
+        # A job_timeout / worker exception leaves the row 'running' forever; flip
+        # it to 'failure' so the panel stops polling (rule 3 stays: still no work
+        # in the request). Hard crashes are caught by reap_if_stale on GET.
+        on_failure=Callback("app.core.copilot.mark_analysis_failed"),
     )
 
 
@@ -81,6 +86,7 @@ def analyze_failed_job(
     audit: Audit,
     dispatch: Dispatcher,
     user: CurrentUser,
+    response: Response,
     _: Annotated[object, Depends(require(JOB_MANAGE))],
 ) -> JobAnalysisOut:
     """Kick off a background AI analysis of a failed job.
@@ -88,12 +94,30 @@ def analyze_failed_job(
     Only failed jobs can be analyzed (422 otherwise). If the AI integration is
     disabled/unkeyed, refuse cleanly (409) — no half-created analysis. The row is
     committed and audited *before* the AI call is enqueued (never blocks, rule 3).
+
+    Idempotent while one is in flight: if the latest analysis is still
+    `pending`/`running`, return it (200) instead of stacking a fresh row + AI
+    spend — the panel is already polling it.
     """
     job = _load_job(db, job_id)
     if job.status != "failure":
         raise HTTPException(
             status_code=422, detail="Only failed jobs can be analyzed."
         )
+
+    existing = (
+        db.execute(
+            select(JobAnalysis)
+            .where(JobAnalysis.job_id == job.id)
+            .order_by(JobAnalysis.created_at.desc(), JobAnalysis.id.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    if existing is not None and existing.status in ("pending", "running"):
+        response.status_code = 200
+        return JobAnalysisOut.from_model(existing)
 
     row = AISettings.get_or_create(db)
     client = AnthropicClient(row, secrets, db=db)
@@ -151,6 +175,8 @@ def get_job_analysis(
     )
     if analysis is None:
         raise HTTPException(status_code=404, detail="No analysis for this job yet.")
+    # Self-heal a row a crashed worker left 'running' so the panel stops polling.
+    analysis = reap_if_stale(db, analysis)
     return JobAnalysisOut.from_model(analysis)
 
 
