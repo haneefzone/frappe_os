@@ -123,6 +123,12 @@ function open(id: number) {
   router.push(`/jobs/${id}`)
 }
 
+function expand() {
+  expanded.value = true
+}
+
+defineExpose({ expand })
+
 // Keep the poll loop alive for the whole authenticated session — the tray is
 // always mounted, so it is the app-wide watcher.
 let release: (() => void) | null = null

@@ -5,7 +5,7 @@
   >
     <button
       type="button"
-      class="flex h-8 w-8 items-center justify-center rounded-md transition-colors duration-150 ease-out"
+      class="fdm-focus flex h-8 w-8 items-center justify-center rounded-md transition-colors duration-150 ease-out"
       :style="{ color: 'var(--text-secondary)' }"
       aria-label="Toggle sidebar"
       @click="$emit('toggle-sidebar')"
@@ -16,7 +16,7 @@
     <!-- ⌘K search / command palette trigger -->
     <button
       type="button"
-      class="flex h-8 w-full max-w-md items-center gap-2 rounded-md border px-3 text-sm text-left transition-colors duration-150 ease-out hover:border-opacity-80"
+      class="fdm-focus flex h-8 w-full max-w-md items-center gap-2 rounded-md border px-3 text-sm text-left transition-colors duration-150 ease-out hover:border-opacity-80"
       :style="{ borderColor: 'var(--border)', color: 'var(--text-muted)', background: 'var(--bg-base)' }"
       aria-label="Open command palette"
       @click="$emit('open-palette')"
@@ -33,12 +33,30 @@
 
     <div class="flex-1" />
 
+    <!-- Running jobs indicator: pulsing dot + count, only when jobs are active -->
+    <button
+      v-if="jobsStore.runningCount > 0"
+      type="button"
+      class="fdm-focus flex h-8 items-center gap-1.5 rounded-md px-2 transition-colors duration-150 ease-out"
+      :style="{ color: 'var(--text-secondary)' }"
+      :aria-label="`${jobsStore.runningCount} jobs running — open jobs tray`"
+      @click="$emit('open-tray')"
+    >
+      <span
+        class="h-2 w-2 animate-pulse rounded-full"
+        :style="{ background: 'var(--status-info)' }"
+      />
+      <span class="text-xs tabular-nums" :style="{ color: 'var(--text-primary)' }">
+        {{ jobsStore.runningCount }}
+      </span>
+    </button>
+
     <!-- Notification bell -->
     <NotificationDrawer />
 
     <button
       type="button"
-      class="flex h-8 w-8 items-center justify-center rounded-md transition-colors duration-150 ease-out"
+      class="fdm-focus flex h-8 w-8 items-center justify-center rounded-md transition-colors duration-150 ease-out"
       :style="{ color: 'var(--text-secondary)' }"
       :aria-label="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
       @click="toggle"
@@ -51,7 +69,8 @@
     <div v-if="auth.user" ref="menuRoot" class="relative">
       <button
         type="button"
-        class="flex h-7 w-7 items-center justify-center rounded-full border border-line bg-raised text-meta font-semibold text-ink-1"
+        class="fdm-focus flex h-7 w-7 items-center justify-center rounded-full border font-semibold text-sm"
+        :style="{ background: 'var(--bg-raised)', borderColor: 'var(--border)', color: 'var(--text-primary)' }"
         aria-label="User menu"
         aria-haspopup="menu"
         :aria-expanded="menuOpen"
@@ -62,13 +81,19 @@
       <div
         v-if="menuOpen"
         role="menu"
-        class="absolute right-0 top-9 z-20 w-56 rounded-lg border border-line bg-raised py-1"
+        class="absolute right-0 top-9 z-20 w-56 rounded-lg border py-1"
+        :style="{ background: 'var(--bg-raised)', borderColor: 'var(--border-strong)' }"
       >
-        <div class="border-b border-line px-3 py-2">
-          <p class="truncate text-body font-medium text-ink-1">{{ auth.user.full_name }}</p>
-          <p class="truncate text-meta text-ink-3">{{ auth.user.email }}</p>
+        <div class="border-b px-3 py-2" :style="{ borderColor: 'var(--border)' }">
+          <p class="truncate text-sm font-medium" :style="{ color: 'var(--text-primary)' }">
+            {{ auth.user.full_name }}
+          </p>
+          <p class="truncate text-xs" :style="{ color: 'var(--text-muted)' }">
+            {{ auth.user.email }}
+          </p>
           <span
-            class="mt-1.5 inline-block rounded border border-line px-1.5 py-0.5 text-meta text-ink-2"
+            class="mt-1.5 inline-block rounded border px-1.5 py-0.5 text-xs"
+            :style="{ borderColor: 'var(--border)', color: 'var(--text-secondary)' }"
           >
             {{ auth.user.role }}
           </span>
@@ -76,7 +101,8 @@
         <button
           type="button"
           role="menuitem"
-          class="flex w-full items-center gap-2 px-3 py-2 text-left text-body text-ink-2 transition-colors duration-150 ease-out hover:bg-surface hover:text-ink-1"
+          class="fdm-focus flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors duration-150 ease-out hover:bg-white/5"
+          :style="{ color: 'var(--text-secondary)' }"
           @click="logout"
         >
           <LucideLogOut class="h-4 w-4" />
@@ -97,11 +123,13 @@ import LucideSun from '~icons/lucide/sun'
 import NotificationDrawer from '../NotificationDrawer.vue'
 import { useTheme } from '../../composables/useTheme'
 import { useAuthStore } from '../../stores/auth'
+import { useJobsStore } from '../../stores/jobs'
 
-defineEmits<{ 'toggle-sidebar': []; 'open-palette': [] }>()
+defineEmits<{ 'toggle-sidebar': []; 'open-palette': []; 'open-tray': [] }>()
 
 const { theme, toggle } = useTheme()
 const auth = useAuthStore()
+const jobsStore = useJobsStore()
 
 const menuOpen = ref(false)
 const menuRoot = ref<HTMLElement | null>(null)

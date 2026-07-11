@@ -125,7 +125,7 @@
         </div>
 
         <!-- Feed -->
-        <div class="min-h-0 flex-1 overflow-y-auto">
+        <div class="min-h-0 flex-1 overflow-y-auto" aria-live="polite" aria-label="Notifications feed">
           <div v-if="store.loading && store.items.length === 0" class="px-4 py-6 text-center text-sm" :style="{ color: 'var(--text-muted)' }">
             Loading…
           </div>

@@ -55,6 +55,7 @@
 
           <!-- Results list -->
           <div ref="listEl" class="max-h-96 overflow-y-auto py-2" aria-live="polite" aria-atomic="false">
+            <span class="sr-only" aria-live="polite">{{ resultStatusText }}</span>
             <template v-if="loading">
               <div class="px-4 py-3 text-sm" :style="{ color: 'var(--text-secondary)' }">
                 Searching…
@@ -169,6 +170,13 @@ const listEl = ref<HTMLElement | null>(null)
 const { activate: trapActivate, deactivate: trapDeactivate } = useFocusTrap(paletteEl)
 
 let _debounce: ReturnType<typeof setTimeout> | null = null
+
+const resultStatusText = computed(() => {
+  if (loading.value) return 'Searching'
+  if (!query.value.trim()) return ''
+  if (results.value.length === 0) return 'No results'
+  return `${results.value.length} result${results.value.length === 1 ? '' : 's'}`
+})
 
 // Group results by kind for display.
 const KIND_ORDER = ['nav', 'server', 'bench', 'site', 'job', 'schedule', 'action'] as const

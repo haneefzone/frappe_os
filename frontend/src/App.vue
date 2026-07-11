@@ -4,13 +4,17 @@
   <div v-else class="flex h-screen" :style="{ background: 'var(--bg-base)' }">
     <AppSidebar :collapsed="sidebarCollapsed" />
     <div class="flex min-w-0 flex-1 flex-col">
-      <AppTopbar @toggle-sidebar="toggleSidebar" @open-palette="paletteRef?.openPalette()" />
+      <AppTopbar
+        @toggle-sidebar="toggleSidebar"
+        @open-palette="paletteRef?.openPalette()"
+        @open-tray="trayRef?.expand()"
+      />
       <main class="min-h-0 flex-1 overflow-y-auto">
         <RouterView />
       </main>
     </div>
     <!-- Global job tray: bottom-right, present on every authenticated screen. -->
-    <JobTray />
+    <JobTray ref="trayRef" />
     <!-- ⌘K command palette: global, portal-rendered over all content. -->
     <CommandPalette ref="paletteRef" />
   </div>
@@ -35,6 +39,7 @@ const COLLAPSE_KEY = 'fdm-sidebar-collapsed'
 const route = useRoute()
 const sidebarCollapsed = ref(localStorage.getItem(COLLAPSE_KEY) === '1')
 const paletteRef = ref<InstanceType<typeof CommandPalette> | null>(null)
+const trayRef = ref<InstanceType<typeof JobTray> | null>(null)
 
 // Load white-label branding once the operator is authenticated so the sidebar
 // shows the configured product name + logo (falls back to defaults otherwise).
