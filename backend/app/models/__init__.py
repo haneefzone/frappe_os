@@ -34,6 +34,7 @@ from app.models.site import Site
 from app.models.storage import StorageTarget
 from app.models.terminal import TerminalSession
 from app.models.update_pipeline import UpdatePipeline
+from app.models.updates import AppVersionStatus, UpstreamTagCache
 from app.models.uptime import UptimeSample
 
 __all__ = [
@@ -43,6 +44,7 @@ __all__ = [
     "AlertRuleState",
     "ApiToken",
     "AppSource",
+    "AppVersionStatus",
     "AuditLog",
     "Backup",
     "BackupPolicy",
@@ -74,6 +76,7 @@ __all__ = [
     "StorageTarget",
     "TerminalSession",
     "UpdatePipeline",
+    "UpstreamTagCache",
     "UptimeSample",
     "User",
     "UserSession",

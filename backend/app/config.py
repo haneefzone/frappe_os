@@ -190,6 +190,16 @@ class Settings(BaseSettings):
     notification_webhook_url: str = ""
     notification_webhook_secret: str = ""
 
+    # Update advisor (session 3.2): a recurring poll (registered on the 2.1
+    # scheduler) reads upstream git tags and records "behind by N" per app. It is
+    # read-only against upstream and needs no credentials for public repos.
+    # Default cadence hourly; tags are cached with a TTL so back-to-back polls (or
+    # a run-now) reuse a fresh fetch instead of hammering the remote.
+    updates_advisor_enabled: bool = True
+    updates_poll_interval_seconds: int = 3600  # hourly
+    updates_tag_cache_ttl_seconds: int = 1800  # 30 min
+    git_remote_timeout_seconds: int = 20
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

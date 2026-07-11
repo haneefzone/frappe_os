@@ -33,6 +33,7 @@ from app.models import Server
 from app.models.app import AppSource, InstalledApp
 from app.models.bench import Bench
 from app.models.site import Site
+from app.models.updates import AppVersionStatus
 from app.schemas.app import (
     AppSourceOut,
     CreateAppSourceRequest,
@@ -277,6 +278,11 @@ def list_installed_apps(
 
     sites = {s.id: s for s in db.scalars(select(Site)).all()}
     benches = {b.id: b for b in db.scalars(select(Bench)).all()}
+    # Advisor verdicts keyed by installed-app id → "behind by N" chip data (3.2).
+    statuses = {
+        st.installed_app_id: st
+        for st in db.scalars(select(AppVersionStatus)).all()
+    }
     out: list[InstalledAppOut] = []
     for ia in rows:
         site = sites.get(ia.site_id)
@@ -285,7 +291,11 @@ def list_installed_apps(
             continue
         out.append(
             InstalledAppOut.from_model(
-                ia, site_name=site.name, bench_name=b.name, server_id=b.server_id
+                ia,
+                site_name=site.name,
+                bench_name=b.name,
+                server_id=b.server_id,
+                update_status=statuses.get(ia.id),
             )
         )
     return out

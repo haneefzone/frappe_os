@@ -215,6 +215,27 @@ def ensure_restore_tests_registered(scheduler, *, interval: int) -> None:
     logger.info("registered restore-test sweep every %ds", interval)
 
 
+def ensure_updates_poll_registered(scheduler, *, interval: int) -> None:
+    """Idempotently register the recurring update-advisor poll (session 3.2) on
+    the same rq-scheduler process. Reads upstream git tags on a worker and records
+    "behind by N" per app — read-only, no update performed (that is 3.3). Cancels
+    any existing poll entry first so a restart with a changed interval never leaves
+    two."""
+    from app.workers.updates import POLL_FUNC, run_poll
+
+    for job in scheduler.get_jobs():
+        if job.func_name == POLL_FUNC:
+            scheduler.cancel(job)
+    scheduler.schedule(
+        scheduled_time=_utcnow(),
+        func=run_poll,
+        interval=interval,
+        repeat=None,  # forever
+        result_ttl=int(interval) * 4,
+    )
+    logger.info("registered update-advisor poll every %ds", interval)
+
+
 def _utcnow():
     from datetime import UTC, datetime
 
@@ -244,6 +265,10 @@ def main() -> None:  # pragma: no cover - process entrypoint (needs live Redis)
     ensure_restore_tests_registered(
         scheduler, interval=settings.restore_test_tick_seconds
     )
+    if settings.updates_advisor_enabled:
+        ensure_updates_poll_registered(
+            scheduler, interval=settings.updates_poll_interval_seconds
+        )
     logger.info(
         "scheduler starting (queue=%s, tick=%ds, compliance=%ds, alerts=%ds, "
         "restore_test=%ds)",

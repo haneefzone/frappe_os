@@ -38,6 +38,7 @@ from app.api.routes.sites import router as sites_router
 from app.api.routes.storage_targets import router as storage_targets_router
 from app.api.routes.terminal import router as terminal_router
 from app.api.routes.tools import router as tools_router
+from app.api.routes.update_advisor import router as update_advisor_router
 from app.api.routes.updates import router as updates_router
 from app.config import get_settings
 from app.core.logging import configure_logging
@@ -186,6 +187,7 @@ def create_app() -> FastAPI:
     app.include_router(platform_backups_router)
     app.include_router(search_router)
     app.include_router(updates_router)
+    app.include_router(update_advisor_router)
     app.include_router(tools_router)
 
     @app.get("/api/health")

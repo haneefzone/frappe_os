@@ -112,10 +112,23 @@ class InstalledAppOut(BaseModel):
     branch: str | None
     version: str | None
     installed_at: datetime | None
+    # Update advisor (session 3.2): "behind by N" chip data. NULL behind_by =
+    # not yet checked or not trackable; 0 = up to date. Populated from the
+    # AppVersionStatus row when present.
+    behind_by: int | None = None
+    latest_ref: str | None = None
+    security_update: bool = False
+    update_checked_at: datetime | None = None
 
     @classmethod
     def from_model(
-        cls, ia: InstalledApp, *, site_name: str, bench_name: str, server_id: int
+        cls,
+        ia: InstalledApp,
+        *,
+        site_name: str,
+        bench_name: str,
+        server_id: int,
+        update_status: object | None = None,
     ) -> "InstalledAppOut":
         return cls(
             id=ia.id,
@@ -129,4 +142,8 @@ class InstalledAppOut(BaseModel):
             branch=ia.branch,
             version=ia.version,
             installed_at=ia.installed_at,
+            behind_by=getattr(update_status, "behind_by", None),
+            latest_ref=getattr(update_status, "latest_ref", None),
+            security_update=bool(getattr(update_status, "security_update", False)),
+            update_checked_at=getattr(update_status, "checked_at", None),
         )

@@ -18,11 +18,13 @@ Two components are **real** today:
                    (session 2.3 — the compliance evaluator; replaces the 1.12
                    "backed up in last 24h" placeholder). 1.0 when no site has a
                    policy yet — nothing under policy is vacuously compliant.
-The other two are **placeholders awarded in full** until their engines exist:
+  - updates (10) → 10 × (fraction of tracked apps that are up to date; 1.0 when
+                   nothing is tracked yet — an empty fleet is not penalised).
+                   Became real in session 3.2 (was a placeholder).
+One component is still a **placeholder awarded in full** until its engine exists:
   - alerts (20)  → real "no critical alerts" lands with the AlertRule engine
-  - updates (10) → real "everything up to date" lands with the update advisor
-So health is driven by real uptime + backup compliance today; each remaining
-placeholder becomes a live signal in a later phase without changing this shape.
+So health is driven by real uptime + backup + update signals today; the remaining
+alerts placeholder becomes a live signal in Phase 3 without changing this shape.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.compliance import compliance_counts
+from app.core.updates import updates_summary
 from app.core.uptime import fleet_uptime_fraction
 from app.models import (
     Backup,
@@ -48,7 +51,7 @@ from app.models import (
 HEALTH_W_UPTIME = 40  # real (session 2.7 — external HTTP checks)
 HEALTH_W_BACKUP = 30  # real (session 2.3 — backup compliance)
 HEALTH_W_ALERTS = 20  # placeholder (Phase 2)
-HEALTH_W_UPDATES = 10  # placeholder (Phase 3)
+HEALTH_W_UPDATES = 10  # real (session 3.2 — update advisor)
 
 RUNNING_STATUSES = ("pending", "running")
 BACKUP_GRID_DAYS = 7
@@ -184,11 +187,12 @@ def build_dashboard(db: Session) -> dict:
     compliant_sites, policied_sites = compliance_counts(db)
     backup_fraction = 1.0 if policied_sites == 0 else compliant_sites / policied_sites
     uptime_fraction, _ = fleet_uptime_fraction(db)  # real 30-day uptime (2.7)
+    updates = updates_summary(db)  # real update advisor rollup (3.2)
     fleet_health = round(
         HEALTH_W_UPTIME * uptime_fraction
         + HEALTH_W_BACKUP * backup_fraction
         + HEALTH_W_ALERTS
-        + HEALTH_W_UPDATES
+        + HEALTH_W_UPDATES * updates["up_to_date_fraction"]
     )
 
     running = list(
@@ -252,6 +256,13 @@ def build_dashboard(db: Session) -> dict:
             "uptime_30d_pct": round(uptime_fraction * 100),
             # SSL certificates expiring within 30 days (session 2.4).
             "ssl_expiring_30d": int(ssl_expiring_30d),
+        },
+        # Row 4 "Needs attention" — updates available (real, session 3.2); failed
+        # restore tests + drift flags land with their engines (3.4+).
+        "needs_attention": {
+            "updates_available": updates["apps_behind"],
+            "sites_behind": updates["sites_behind"],
+            "security_updates": updates["security_updates"],
         },
         "morning_brief": _morning_brief(
             servers_total=len(servers),
