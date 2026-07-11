@@ -20,6 +20,8 @@ export interface DashboardKpis {
   backup_compliance_pct: number
   /** Real 30-day fleet uptime from external HTTP checks (session 2.7). */
   uptime_30d_pct: number
+  /** Count of SSL certs expiring within 30 days (session 2.4). */
+  ssl_expiring_30d: number
 }
 
 export interface DashboardServer {

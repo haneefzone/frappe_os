@@ -14,8 +14,8 @@
       <p v-if="loadError" class="mb-3 text-label text-err" role="alert">{{ loadError }}</p>
 
       <!-- Loading skeleton -->
-      <div v-if="loading && !data" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div v-for="i in 4" :key="i" class="rounded-lg border border-line bg-surface p-4">
+      <div v-if="loading && !data" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+        <div v-for="i in 5" :key="i" class="rounded-lg border border-line bg-surface p-4">
           <div class="h-3 w-24 animate-pulse rounded bg-raised" />
           <div class="mt-3 h-7 w-16 animate-pulse rounded bg-raised" />
           <div class="mt-2 h-3 w-32 animate-pulse rounded bg-raised" />
@@ -56,7 +56,7 @@
         <p v-if="data.morning_brief" class="text-body text-ink-1">{{ data.morning_brief }}</p>
 
         <!-- Row 1: KPIs -->
-        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
           <KPICard
             label="Fleet health"
             :value="`${Math.round(data.kpis.fleet_health_pct)}%`"
@@ -80,6 +80,12 @@
             :value="String(data.kpis.failed_jobs_24h)"
             :status="data.kpis.failed_jobs_24h > 0 ? 'err' : 'ok'"
             sublabel="Last 24 hours"
+          />
+          <KPICard
+            label="SSL expiring ≤30d"
+            :value="String(data.kpis.ssl_expiring_30d ?? 0)"
+            :status="(data.kpis.ssl_expiring_30d ?? 0) > 0 ? 'warn' : 'ok'"
+            sublabel="Certs expiring soon"
           />
         </div>
 

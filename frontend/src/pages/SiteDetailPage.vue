@@ -19,7 +19,26 @@
       />
     </header>
 
-    <div class="min-h-0 flex-1 overflow-y-auto p-8">
+    <!-- Tab navigation -->
+    <nav class="flex shrink-0 border-b border-line px-8" aria-label="Site sections">
+      <button
+        v-for="tab in TABS"
+        :key="tab.key"
+        type="button"
+        class="fdm-focus -mb-px border-b-2 px-4 py-3 text-label font-medium transition"
+        :class="
+          activeTab === tab.key
+            ? 'border-ink-1 text-ink-1'
+            : 'border-transparent text-ink-3 hover:text-ink-2'
+        "
+        @click="switchTab(tab.key)"
+      >
+        {{ tab.label }}
+      </button>
+    </nav>
+
+    <!-- Overview tab -->
+    <div v-if="activeTab === 'overview'" class="min-h-0 flex-1 overflow-y-auto p-8">
       <p v-if="loadError" class="text-label text-err" role="alert">{{ loadError }}</p>
 
       <div v-else-if="loading" class="max-w-3xl rounded-lg border border-line bg-surface">
@@ -300,6 +319,297 @@
       </div>
     </div>
 
+    <!-- Domains & SSL tab -->
+    <div v-else-if="activeTab === 'domains'" class="min-h-0 flex-1 overflow-y-auto p-8">
+      <div class="max-w-5xl">
+        <!-- Header row: title + add domain button -->
+        <div class="mb-4 flex items-center justify-between">
+          <div>
+            <h2 class="text-section font-semibold text-ink-1">Domains & SSL</h2>
+            <p class="text-label text-ink-3">Custom hostnames with nginx vhost and Let's Encrypt certificates.</p>
+          </div>
+          <Button
+            v-if="canSslManage"
+            variant="subtle"
+            theme="gray"
+            label="Add domain"
+            @click="openAddDomain"
+          >
+            <template #prefix><LucidePlus class="h-3.5 w-3.5" /></template>
+          </Button>
+        </div>
+
+        <p v-if="domainsError" class="mb-3 text-label text-err" role="alert">{{ domainsError }}</p>
+
+        <!-- Loading skeleton -->
+        <div v-if="domainsLoading" class="rounded-lg border border-line bg-surface">
+          <div class="border-b border-line px-4 py-2.5">
+            <div class="h-3.5 w-24 animate-pulse rounded bg-raised" />
+          </div>
+          <div class="divide-y divide-line">
+            <div v-for="i in 3" :key="i" class="flex items-center gap-6 px-4 py-3">
+              <div class="h-3 w-40 animate-pulse rounded bg-raised" />
+              <div class="h-3 w-16 animate-pulse rounded bg-raised" />
+              <div class="h-3 w-24 animate-pulse rounded bg-raised" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Empty state -->
+        <EmptyState
+          v-else-if="domains.length === 0"
+          :icon="LucideGlobe"
+          title="No domains"
+          message="Add a hostname to generate a nginx vhost and issue an SSL certificate."
+        />
+
+        <!-- Domains table -->
+        <div v-else class="rounded-lg border border-line bg-surface">
+          <table class="w-full text-left">
+            <thead>
+              <tr class="border-b border-line text-meta uppercase tracking-wide text-ink-3">
+                <th class="px-4 py-2 font-medium">Domain</th>
+                <th class="px-4 py-2 font-medium">DNS</th>
+                <th class="px-4 py-2 font-medium">SSL</th>
+                <th class="px-4 py-2 font-medium">Last checked</th>
+                <th class="px-4 py-2 font-medium">Error</th>
+                <th v-if="canSslManage" class="px-4 py-2 text-right font-medium">Actions</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-line text-label">
+              <tr v-for="d in domains" :key="d.id">
+                <!-- Domain name + primary badge -->
+                <td class="px-4 py-2.5">
+                  <span class="font-mono text-ink-1">{{ d.domain }}</span>
+                  <span
+                    v-if="d.is_primary"
+                    class="ml-2 inline-block rounded-full border border-line bg-raised px-1.5 py-0.5 text-meta text-ink-3"
+                  >
+                    primary
+                  </span>
+                </td>
+
+                <!-- DNS status -->
+                <td class="px-4 py-2.5">
+                  <span class="flex items-center gap-1.5">
+                    <StatusDot :status="dnsDot(d.dns_ok)" size="sm" />
+                    <span class="text-ink-2">{{ dnsLabel(d.dns_ok) }}</span>
+                  </span>
+                </td>
+
+                <!-- SSL status badge -->
+                <td class="px-4 py-2.5">
+                  <StatusBadge :status="sslStatus(d)" :label="sslLabel(d)" />
+                </td>
+
+                <!-- Last checked timestamp -->
+                <td
+                  class="px-4 py-2.5 text-ink-3"
+                  :title="d.last_checked ? absoluteTime(d.last_checked) : undefined"
+                >
+                  {{ d.last_checked ? relativeTime(d.last_checked) : '—' }}
+                </td>
+
+                <!-- Last error (truncated) -->
+                <td
+                  class="max-w-xs truncate px-4 py-2.5 text-ink-3"
+                  :title="d.last_error ?? undefined"
+                >
+                  {{ d.last_error ?? '—' }}
+                </td>
+
+                <!-- Action buttons (ssl:manage only) -->
+                <td v-if="canSslManage" class="px-4 py-2.5">
+                  <div class="flex justify-end gap-1.5">
+                    <Button
+                      variant="subtle"
+                      theme="gray"
+                      size="sm"
+                      label="Test DNS"
+                      :disabled="domainLaunching === d.id"
+                      @click="launchTestDns(d)"
+                    />
+                    <Button
+                      variant="subtle"
+                      theme="gray"
+                      size="sm"
+                      label="Render vhost"
+                      :disabled="domainLaunching === d.id"
+                      @click="launchRenderVhost(d)"
+                    />
+                    <Button
+                      variant="subtle"
+                      theme="gray"
+                      size="sm"
+                      label="Issue certificate"
+                      :disabled="domainLaunching === d.id"
+                      @click="openIssueCert(d)"
+                    />
+                    <Button
+                      variant="subtle"
+                      theme="red"
+                      size="sm"
+                      label="Remove"
+                      :disabled="domainLaunching === d.id"
+                      @click="askRemoveDomain(d)"
+                    />
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add domain modal -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-150 ease-out"
+        enter-from-class="opacity-0"
+        leave-active-class="transition duration-150 ease-out"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="addDomainOpen"
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          @click.self="closeAddDomain"
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Add domain"
+            class="w-full max-w-md rounded-lg border border-line bg-raised"
+          >
+            <div class="border-b border-line px-5 py-4">
+              <h2 class="text-section font-semibold text-ink-1">Add domain</h2>
+              <p class="mt-0.5 text-label text-ink-2">Bind a hostname to {{ site?.name }}.</p>
+            </div>
+
+            <div class="space-y-4 px-5 py-4">
+              <div>
+                <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2" for="add-domain-hostname">
+                  Hostname
+                </label>
+                <input
+                  id="add-domain-hostname"
+                  v-model.trim="addDomainForm.domain"
+                  v-bind="modalInput"
+                  placeholder="erp.example.com"
+                  autocomplete="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  @input="addDomainForm.domainError = ''"
+                />
+                <p v-if="addDomainForm.domainError" class="mt-1 text-label text-err" role="alert">
+                  {{ addDomainForm.domainError }}
+                </p>
+                <p v-else-if="addDomainForm.domain && !isValidHostname" class="mt-1 text-label text-warn">
+                  Must be a valid lowercase hostname, e.g. erp.example.com.
+                </p>
+              </div>
+
+              <label class="flex cursor-pointer items-center gap-2.5">
+                <input v-model="addDomainForm.isPrimary" type="checkbox" class="h-4 w-4 rounded border-line accent-white" />
+                <span class="text-label text-ink-1">Make primary</span>
+                <span class="text-meta text-ink-3">(replaces current primary)</span>
+              </label>
+            </div>
+
+            <div class="flex justify-end gap-2 border-t border-line px-5 py-3.5">
+              <Button variant="subtle" theme="gray" label="Cancel" :disabled="addDomainLoading" @click="closeAddDomain" />
+              <Button
+                variant="solid"
+                theme="gray"
+                label="Add domain"
+                :loading="addDomainLoading"
+                :disabled="!isValidHostname || addDomainLoading"
+                @click="submitAddDomain"
+              />
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Issue certificate modal -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-150 ease-out"
+        enter-from-class="opacity-0"
+        leave-active-class="transition duration-150 ease-out"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="issueCertOpen"
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          @click.self="issueCertOpen = false"
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Issue certificate"
+            class="w-full max-w-md rounded-lg border border-line bg-raised"
+          >
+            <div class="border-b border-line px-5 py-4">
+              <h2 class="text-section font-semibold text-ink-1">Issue certificate</h2>
+              <p class="mt-0.5 text-label text-ink-2">
+                Request a Let's Encrypt certificate for
+                <span class="font-mono text-ink-1">{{ issueCertTarget?.domain }}</span>.
+              </p>
+            </div>
+
+            <div class="space-y-4 px-5 py-4">
+              <div>
+                <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2" for="issue-cert-email">
+                  Contact email
+                </label>
+                <input
+                  id="issue-cert-email"
+                  v-model.trim="issueCertEmail"
+                  v-bind="modalInput"
+                  type="email"
+                  placeholder="admin@example.com"
+                  autocomplete="email"
+                />
+              </div>
+              <p class="text-label text-ink-3">
+                DNS must already point at this server. The certbot
+                <span class="font-mono">--webroot</span> flow runs against the Frappe site's
+                document root.
+              </p>
+            </div>
+
+            <div class="flex justify-end gap-2 border-t border-line px-5 py-3.5">
+              <Button variant="subtle" theme="gray" label="Cancel" :disabled="issueCertLoading" @click="issueCertOpen = false" />
+              <Button
+                variant="solid"
+                theme="gray"
+                label="Issue certificate"
+                :loading="issueCertLoading"
+                :disabled="!issueCertEmail || issueCertLoading"
+                @click="submitIssueCert"
+              />
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Remove domain confirm -->
+    <ConfirmModal
+      v-model="removeDomainOpen"
+      title="Remove domain"
+      :message="removeDomainTarget ? `Remove ${removeDomainTarget.domain} from ${site?.name}.` : ''"
+      verb="Remove domain"
+      :loading="removeDomainLoading"
+      :consequences="[
+        'Deletes the domain record from FDM Platform.',
+        'The nginx vhost and any Let\'s Encrypt certificate remain on the server until removed out of band.',
+      ]"
+      @confirm="confirmRemoveDomain"
+    />
+
     <!-- Install picker modal -->
     <Teleport to="body">
       <Transition
@@ -459,11 +769,14 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import LucideArrowLeft from '~icons/lucide/arrow-left'
 import LucideExternalLink from '~icons/lucide/external-link'
+import LucideGlobe from '~icons/lucide/globe'
 import LucidePackage from '~icons/lucide/package'
 import LucidePackagePlus from '~icons/lucide/package-plus'
+import LucidePlus from '~icons/lucide/plus'
 import { appsApi, parseBranchesLine, type AppSource, type InstalledApp } from '../api/apps'
 import { backupsApi } from '../api/backups'
 import { ApiError } from '../api/client'
+import { domainsApi, HOSTNAME_RE, type DomainOut } from '../api/domains'
 import { jobsApi, streamJobLogs } from '../api/jobs'
 import { sitesApi, type Site, type UptimeSeries } from '../api/sites'
 import ConfirmModal from '../components/ConfirmModal.vue'
@@ -473,6 +786,7 @@ import Sparkline from '../components/Sparkline.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { toast } from '../components/toast'
+import type { Status } from '../components/types'
 import {
   healthDot,
   HEALTH_LABEL as healthLabel,
@@ -491,7 +805,23 @@ const canOperate = auth.hasPermission('site:operate')
 const canManage = auth.hasPermission('app:manage')
 const canRemove = auth.hasPermission('danger')
 const canBackup = auth.hasPermission('backup:create')
+const canSslManage = auth.hasPermission('ssl:manage')
 const backingUp = ref(false)
+
+// -- Tabs --------------------------------------------------------------------
+type TabKey = 'overview' | 'domains'
+const TABS: { key: TabKey; label: string }[] = [
+  { key: 'overview', label: 'Overview' },
+  { key: 'domains', label: 'Domains & SSL' },
+]
+const activeTab = ref<TabKey>('overview')
+
+function switchTab(key: TabKey) {
+  activeTab.value = key
+  if (key === 'domains' && domains.value.length === 0 && !domainsLoading.value) {
+    void loadDomains()
+  }
+}
 
 const site = ref<Site | null>(null)
 const loading = ref(true)
@@ -873,6 +1203,188 @@ async function confirmMaint() {
     toast.error(message)
   } finally {
     maintLaunching.value = false
+  }
+}
+
+// -- Domains & SSL -----------------------------------------------------------
+const domains = ref<DomainOut[]>([])
+const domainsLoading = ref(false)
+const domainsError = ref('')
+const domainLaunching = ref<number | null>(null)
+
+async function loadDomains() {
+  domainsLoading.value = true
+  domainsError.value = ''
+  try {
+    domains.value = await domainsApi.list(siteId)
+  } catch (error) {
+    domainsError.value = error instanceof Error ? error.message : 'Could not load domains.'
+  } finally {
+    domainsLoading.value = false
+  }
+}
+
+function dnsDot(dnsOk: boolean | null): Status {
+  if (dnsOk === null) return 'muted'
+  return dnsOk ? 'ok' : 'err'
+}
+
+function dnsLabel(dnsOk: boolean | null): string {
+  if (dnsOk === null) return 'Unknown'
+  return dnsOk ? 'OK' : 'Error'
+}
+
+function sslStatus(d: DomainOut): Status {
+  if (d.cert_status === 'error') return 'err'
+  if (d.cert_status === 'issued') {
+    if (d.days_left == null || d.days_left > 30) return 'ok'
+    if (d.days_left > 7) return 'warn'
+    return 'err'
+  }
+  return 'muted'
+}
+
+function sslLabel(d: DomainOut): string {
+  if (d.cert_status === 'error') return 'Error'
+  if (d.cert_status === 'issued') {
+    if (d.days_left == null) return 'Issued'
+    if (d.days_left > 30) return 'Issued'
+    return `Expires in ${d.days_left}d`
+  }
+  return 'No cert'
+}
+
+async function launchTestDns(d: DomainOut) {
+  if (domainLaunching.value === d.id) return
+  domainLaunching.value = d.id
+  try {
+    const job = await domainsApi.testDns(siteId, d.id)
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not start DNS check.')
+    domainLaunching.value = null
+  }
+}
+
+async function launchRenderVhost(d: DomainOut) {
+  if (domainLaunching.value === d.id) return
+  domainLaunching.value = d.id
+  try {
+    const job = await domainsApi.renderVhost(siteId, d.id)
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'An nginx/SSL job is already running on this server.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not start vhost render.'
+    toast.error(message)
+    domainLaunching.value = null
+  }
+}
+
+// Add domain modal
+const addDomainOpen = ref(false)
+const addDomainLoading = ref(false)
+const addDomainForm = reactive({ domain: '', isPrimary: false, domainError: '' })
+
+const isValidHostname = computed(() => HOSTNAME_RE.test(addDomainForm.domain))
+
+function openAddDomain() {
+  addDomainForm.domain = ''
+  addDomainForm.isPrimary = false
+  addDomainForm.domainError = ''
+  addDomainOpen.value = true
+}
+
+function closeAddDomain() {
+  if (!addDomainLoading.value) addDomainOpen.value = false
+}
+
+async function submitAddDomain() {
+  if (!isValidHostname.value || addDomainLoading.value) return
+  addDomainLoading.value = true
+  addDomainForm.domainError = ''
+  try {
+    await domainsApi.add(siteId, {
+      domain: addDomainForm.domain,
+      is_primary: addDomainForm.isPrimary,
+    })
+    addDomainOpen.value = false
+    toast.success(`Domain ${addDomainForm.domain} added.`)
+    await loadDomains()
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'That hostname is already registered.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not add domain.'
+    addDomainForm.domainError = message
+  } finally {
+    addDomainLoading.value = false
+  }
+}
+
+// Issue certificate modal
+const issueCertOpen = ref(false)
+const issueCertLoading = ref(false)
+const issueCertTarget = ref<DomainOut | null>(null)
+const issueCertEmail = ref('')
+
+function openIssueCert(d: DomainOut) {
+  issueCertTarget.value = d
+  issueCertEmail.value = ''
+  domainLaunching.value = null
+  issueCertOpen.value = true
+}
+
+async function submitIssueCert() {
+  if (!issueCertEmail.value || !issueCertTarget.value || issueCertLoading.value) return
+  issueCertLoading.value = true
+  try {
+    const job = await domainsApi.issueCert(siteId, issueCertTarget.value.id, {
+      email: issueCertEmail.value,
+    })
+    issueCertOpen.value = false
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'An nginx/SSL job is already running on this server.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not issue certificate.'
+    toast.error(message)
+  } finally {
+    issueCertLoading.value = false
+  }
+}
+
+// Remove domain modal
+const removeDomainOpen = ref(false)
+const removeDomainLoading = ref(false)
+const removeDomainTarget = ref<DomainOut | null>(null)
+
+function askRemoveDomain(d: DomainOut) {
+  removeDomainTarget.value = d
+  removeDomainOpen.value = true
+}
+
+async function confirmRemoveDomain() {
+  const target = removeDomainTarget.value
+  if (!target || removeDomainLoading.value) return
+  removeDomainLoading.value = true
+  try {
+    await domainsApi.remove(siteId, target.id)
+    removeDomainOpen.value = false
+    toast.success(`Domain ${target.domain} removed.`)
+    domains.value = domains.value.filter((d) => d.id !== target.id)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not remove domain.')
+  } finally {
+    removeDomainLoading.value = false
   }
 }
 
