@@ -127,8 +127,7 @@
                     {{ shortArtifact(art) }}
                   </a>
                   <button
-                    v-for="art in b.offsite_artifacts"
-                    v-show="canDownload && b.storage_state === 'offsite'"
+                    v-for="art in (canDownload && b.storage_state === 'offsite' ? b.offsite_artifacts : [])"
                     :key="`s3-${art}`"
                     type="button"
                     class="fdm-focus inline-flex items-center gap-0.5 rounded px-1.5 py-1 text-meta text-ok transition hover:bg-raised disabled:opacity-50"
@@ -176,7 +175,16 @@
           class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
           @click.self="closeBackup"
         >
-          <div role="dialog" aria-modal="true" aria-label="Backup now" class="w-full max-w-md rounded-lg border border-line bg-raised">
+          <div
+            ref="backupPanel"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Backup now"
+            tabindex="-1"
+            class="fdm-focus w-full max-w-md rounded-lg border border-line bg-raised"
+            @keydown.esc="closeBackup"
+            @keydown.tab="trapBackupFocus"
+          >
             <div class="border-b border-line px-5 py-4">
               <h2 class="text-section font-semibold text-ink-1">Backup now</h2>
               <p class="mt-0.5 text-label text-ink-2">Capture a backup of one site or every site.</p>
@@ -225,7 +233,7 @@
 
 <script setup lang="ts">
 import { Button } from 'frappe-ui'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import LucideArchive from '~icons/lucide/archive'
 import LucideCheck from '~icons/lucide/check'
@@ -337,6 +345,7 @@ async function loadStorageTargets() {
 
 // -- Backup now --------------------------------------------------------------
 const backupOpen = ref(false)
+const backupPanel = ref<HTMLElement | null>(null)
 const backupForm = reactive({
   siteId: 'all' as number | 'all',
   withFiles: true,
@@ -349,6 +358,35 @@ function openBackup() {
   backupForm.withFiles = true
   backupForm.storageTargetId = 'auto'
   backupOpen.value = true
+}
+
+// Move focus into the dialog when it opens so keyboard users start inside it
+// and Esc works immediately (mirrors ConfirmModal).
+watch(backupOpen, (open) => {
+  if (open) nextTick(() => backupPanel.value?.focus())
+})
+
+// Keep Tab/Shift-Tab cycling within the dialog while it is open (a11y, F3).
+function trapBackupFocus(event: KeyboardEvent) {
+  const panel = backupPanel.value
+  if (!panel) return
+  const focusable = Array.from(
+    panel.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  )
+  if (focusable.length === 0) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey) {
+    if (document.activeElement === first || document.activeElement === panel) {
+      event.preventDefault()
+      last.focus()
+    }
+  } else if (document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 
 // Map the modal selection to the API's storage_target_id contract:

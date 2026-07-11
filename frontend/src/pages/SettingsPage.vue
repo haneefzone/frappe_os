@@ -192,8 +192,9 @@
                 <div class="min-w-0 flex-1">
                   <div class="flex items-center gap-2">
                     <span class="truncate font-medium text-ink-1">{{ t.name }}</span>
-                    <StatusBadge :status="t.enabled ? 'ok' : 'muted'" :label="providerLabel(t.provider)" />
-                    <StatusBadge v-if="!t.enabled" status="muted" label="Disabled" />
+                    <!-- Provider is a neutral label; enabled/disabled is a separate state badge (F1/F2). -->
+                    <StatusBadge status="muted" :label="providerLabel(t.provider)" />
+                    <StatusBadge :status="t.enabled ? 'ok' : 'muted'" :label="t.enabled ? 'Enabled' : 'Disabled'" />
                     <StatusBadge v-if="!t.keys_set" status="warn" label="No keys" />
                   </div>
                   <p class="mt-0.5 truncate font-mono text-meta text-ink-3">
