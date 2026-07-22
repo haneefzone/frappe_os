@@ -35,11 +35,11 @@
 
         <!-- General: white-label branding -->
         <section v-show="tab === 'general'" class="max-w-2xl space-y-6">
+          <!-- Brand identity -->
           <div class="rounded-lg border border-line bg-surface p-5">
-            <h2 class="text-section font-semibold text-ink-1">Branding</h2>
+            <h2 class="text-section font-semibold text-ink-1">Brand identity</h2>
             <p class="mt-0.5 text-label text-ink-2">
-              This is the white-label layer — the product name and logo shown in the sidebar and
-              on the sign-in page.
+              Product name, logos, and favicon — shown in the sidebar, login page, browser tab, and notification emails.
             </p>
 
             <div class="mt-4 space-y-4">
@@ -56,33 +56,74 @@
                 />
               </div>
 
+              <!-- Light logo -->
               <div>
-                <span class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Logo</span>
+                <span class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Logo (light theme)</span>
                 <div class="flex items-center gap-4">
-                  <div
-                    class="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-md border border-line-strong bg-base"
-                  >
-                    <img v-if="logoPreview" :src="logoPreview" alt="Logo preview" class="h-full w-full object-contain" />
+                  <div class="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-md border border-line-strong bg-base">
+                    <img
+                      v-if="logoPreview"
+                      :src="logoPreview"
+                      alt="Logo preview"
+                      class="h-full w-full object-contain"
+                    />
                     <span v-else class="text-lg font-bold text-ink-1">{{ (general.productName || 'F').charAt(0).toUpperCase() }}</span>
                   </div>
                   <div class="space-y-1">
-                    <input
-                      ref="fileInput"
-                      type="file"
-                      accept="image/png,image/jpeg,image/svg+xml,image/webp"
-                      class="hidden"
-                      @change="onLogoPicked"
-                    />
-                    <Button
-                      v-if="canManage"
-                      variant="subtle"
-                      theme="gray"
-                      size="sm"
+                    <input ref="fileInputLogo" type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" class="hidden" @change="e => onImagePicked(e, 'logo')" />
+                    <Button v-if="canManage" variant="subtle" theme="gray" size="sm"
                       :label="uploadingLogo ? 'Uploading…' : 'Upload logo'"
                       :loading="uploadingLogo"
-                      @click="fileInput?.click()"
+                      @click="fileInputLogo?.click()" />
+                    <p class="text-meta text-ink-3">PNG, JPEG, SVG, or WebP · max 512 KB</p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Dark logo -->
+              <div>
+                <span class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Logo (dark theme)</span>
+                <div class="flex items-center gap-4">
+                  <div class="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-md border border-line-strong bg-base">
+                    <img
+                      v-if="logoDarkPreview"
+                      :src="logoDarkPreview"
+                      alt="Dark logo preview"
+                      class="h-full w-full object-contain"
                     />
-                    <p class="text-meta text-ink-3">PNG, JPEG, SVG, or WebP. Max 512&nbsp;KB.</p>
+                    <span v-else class="text-lg font-bold text-ink-1">{{ (general.productName || 'F').charAt(0).toUpperCase() }}</span>
+                  </div>
+                  <div class="space-y-1">
+                    <input ref="fileInputLogoDark" type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" class="hidden" @change="e => onImagePicked(e, 'logo-dark')" />
+                    <Button v-if="canManage" variant="subtle" theme="gray" size="sm"
+                      :label="uploadingLogoDark ? 'Uploading…' : 'Upload dark logo'"
+                      :loading="uploadingLogoDark"
+                      @click="fileInputLogoDark?.click()" />
+                    <p class="text-meta text-ink-3">Used in dark mode · falls back to light logo · max 512 KB</p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Favicon -->
+              <div>
+                <span class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Favicon</span>
+                <div class="flex items-center gap-4">
+                  <div class="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md border border-line-strong bg-base">
+                    <img
+                      v-if="faviconPreview"
+                      :src="faviconPreview"
+                      alt="Favicon preview"
+                      class="h-8 w-8 object-contain"
+                    />
+                    <span v-else class="text-xs text-ink-3">ico</span>
+                  </div>
+                  <div class="space-y-1">
+                    <input ref="fileInputFavicon" type="file" accept="image/png,image/x-icon" class="hidden" @change="e => onImagePicked(e, 'favicon')" />
+                    <Button v-if="canManage" variant="subtle" theme="gray" size="sm"
+                      :label="uploadingFavicon ? 'Uploading…' : 'Upload favicon'"
+                      :loading="uploadingFavicon"
+                      @click="fileInputFavicon?.click()" />
+                    <p class="text-meta text-ink-3">PNG or ICO · max 64 KB · shown in the browser tab</p>
                   </div>
                 </div>
               </div>
@@ -95,6 +136,82 @@
                 :label="savingGeneral ? 'Saving…' : 'Save settings'"
                 :loading="savingGeneral"
                 @click="saveGeneral"
+              />
+            </div>
+          </div>
+
+          <!-- Brand accent & contact -->
+          <div class="rounded-lg border border-line bg-surface p-5">
+            <h2 class="text-section font-semibold text-ink-1">Brand accent & contact</h2>
+            <p class="mt-0.5 text-label text-ink-2">
+              Optional brand accent colour and operator contact details. Status colours (green/amber/red/blue) are always fixed and cannot be overridden.
+            </p>
+
+            <div class="mt-4 space-y-4">
+              <div>
+                <label for="accent-hex" class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">
+                  Accent colour
+                </label>
+                <div class="flex items-center gap-2">
+                  <input
+                    id="accent-hex"
+                    v-model="general.accentHex"
+                    type="color"
+                    :disabled="!canManage"
+                    class="h-9 w-14 cursor-pointer rounded border border-line bg-base p-1 disabled:cursor-not-allowed disabled:opacity-60"
+                    title="Brand accent colour"
+                  />
+                  <input
+                    v-model="general.accentHex"
+                    type="text"
+                    placeholder="#ffffff (leave blank for default)"
+                    :disabled="!canManage"
+                    v-bind="inputAttrs"
+                    class="font-mono"
+                  />
+                </div>
+                <p class="mt-1 text-meta text-ink-3">Hex colour (#RRGGBB). Leave blank to use the design-system default.</p>
+              </div>
+
+              <div>
+                <label for="support-link" class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">
+                  Support / contact link
+                </label>
+                <input
+                  id="support-link"
+                  v-model="general.supportLink"
+                  type="url"
+                  placeholder="https://support.example.com"
+                  :disabled="!canManage"
+                  v-bind="inputAttrs"
+                />
+                <p class="mt-1 text-meta text-ink-3">Shown on the login page as "Contact support".</p>
+              </div>
+
+              <div>
+                <label for="footer-line" class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">
+                  Sidebar footer text
+                </label>
+                <input
+                  id="footer-line"
+                  v-model="general.footerLine"
+                  type="text"
+                  placeholder="Powered by Acme Corp"
+                  maxlength="200"
+                  :disabled="!canManage"
+                  v-bind="inputAttrs"
+                />
+                <p class="mt-1 text-meta text-ink-3">Optional one-liner shown at the bottom of the sidebar.</p>
+              </div>
+            </div>
+
+            <div v-if="canManage" class="mt-5">
+              <Button
+                variant="solid"
+                theme="gray"
+                :label="savingBrand ? 'Saving…' : 'Save brand settings'"
+                :loading="savingBrand"
+                @click="saveBrand"
               />
             </div>
           </div>
@@ -228,7 +345,7 @@
         </section>
 
         <!-- Environment (read-only) -->
-        <section v-show="tab === 'environment'" class="max-w-2xl">
+        <section v-show="tab === 'environment'" class="max-w-2xl space-y-6">
           <div class="rounded-lg border border-line bg-surface">
             <h2 class="border-b border-line px-5 py-3 text-section font-semibold text-ink-1">Environment</h2>
             <div v-if="!environment" class="p-5">
@@ -240,6 +357,18 @@
                 <dd class="max-w-[60%] truncate text-label text-ink-1" :title="row.value">{{ row.value }}</dd>
               </div>
             </dl>
+          </div>
+
+          <!-- About panel -->
+          <div class="rounded-lg border border-line bg-surface p-5">
+            <h2 class="text-section font-semibold text-ink-1">About {{ settings.product_name }}</h2>
+            <p class="mt-1 text-label text-ink-2">
+              {{ settings.product_name }} is a self-hosted control panel for managing Frappe/ERPNext
+              deployments on bare-metal servers.
+            </p>
+            <p class="mt-2 text-meta text-ink-3">
+              Platform version: <span class="font-mono">{{ environment?.app_version ?? '—' }}</span>
+            </p>
           </div>
         </section>
       </template>
@@ -278,6 +407,7 @@ import { ApiError } from '../api/client'
 import {
   type Environment,
   type LogoContentType,
+  type FaviconContentType,
   type Settings,
   settingsApi,
 } from '../api/settings'
@@ -320,22 +450,46 @@ const environment = ref<Environment | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 
-const general = reactive({ productName: '' })
+const general = reactive({
+  productName: '',
+  accentHex: '',
+  supportLink: '',
+  footerLine: '',
+})
 const defaults = reactive({ defaultTz: '', benchBasePath: '', portStart: 0, portEnd: 0 })
 
 const savingGeneral = ref(false)
+const savingBrand = ref(false)
 const savingDefaults = ref(false)
 const defaultsError = ref('')
 
-// Logo preview: a freshly picked data URL, else the persisted logo, else none.
-const pickedPreview = ref<string | null>(null)
+// Logo preview refs
+const pickedPreviewLogo = ref<string | null>(null)
+const pickedPreviewLogoDark = ref<string | null>(null)
+const pickedPreviewFavicon = ref<string | null>(null)
 const uploadingLogo = ref(false)
-const fileInput = ref<HTMLInputElement | null>(null)
+const uploadingLogoDark = ref(false)
+const uploadingFavicon = ref(false)
+const fileInputLogo = ref<HTMLInputElement | null>(null)
+const fileInputLogoDark = ref<HTMLInputElement | null>(null)
+const fileInputFavicon = ref<HTMLInputElement | null>(null)
 
 const logoPreview = computed(() => {
-  if (pickedPreview.value) return pickedPreview.value
+  if (pickedPreviewLogo.value) return pickedPreviewLogo.value
   const s = settings.value
   return s?.logo_path ? settingsApi.logoUrl(s.updated_at) : null
+})
+
+const logoDarkPreview = computed(() => {
+  if (pickedPreviewLogoDark.value) return pickedPreviewLogoDark.value
+  const s = settings.value
+  return s?.logo_dark_path ? settingsApi.logoDarkUrl(s.updated_at) : null
+})
+
+const faviconPreview = computed(() => {
+  if (pickedPreviewFavicon.value) return pickedPreviewFavicon.value
+  const s = settings.value
+  return s?.favicon_path ? settingsApi.faviconUrl(s.updated_at) : null
 })
 
 const environmentRows = computed(() => {
@@ -359,6 +513,9 @@ const environmentRows = computed(() => {
 function apply(s: Settings) {
   settings.value = s
   general.productName = s.product_name
+  general.accentHex = s.accent_hex ?? ''
+  general.supportLink = s.support_link ?? ''
+  general.footerLine = s.footer_line ?? ''
   defaults.defaultTz = s.default_tz
   defaults.benchBasePath = s.bench_base_path
   defaults.portStart = s.port_range_start
@@ -394,6 +551,30 @@ async function saveGeneral() {
   }
 }
 
+async function saveBrand() {
+  if (savingBrand.value) return
+  savingBrand.value = true
+  try {
+    const accentHex = general.accentHex.trim() || null
+    const updated = await settingsApi.update({
+      accent_hex: accentHex,
+      support_link: general.supportLink.trim() || null,
+      footer_line: general.footerLine.trim() || null,
+    })
+    apply(updated)
+    settingsStore.set(updated)
+    toast.success('Brand settings saved.')
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 422) {
+      toast.error(error.message)
+    } else {
+      toast.error(error instanceof Error ? error.message : 'Could not save brand settings.')
+    }
+  } finally {
+    savingBrand.value = false
+  }
+}
+
 async function saveDefaults() {
   if (savingDefaults.value) return
   defaultsError.value = ''
@@ -402,7 +583,7 @@ async function saveDefaults() {
     return
   }
   if (!defaults.benchBasePath.startsWith('/')) {
-    defaultsError.value = 'Bench base path must be absolute (start with “/”).'
+    defaultsError.value = 'Bench base path must be absolute (start with "/").'
     return
   }
   savingDefaults.value = true
@@ -427,58 +608,98 @@ async function saveDefaults() {
   }
 }
 
+// -------------------------------------------------------------------------
+// Image upload helpers
+// -------------------------------------------------------------------------
+
 const LOGO_TYPES: Record<string, LogoContentType> = {
   'image/png': 'image/png',
   'image/jpeg': 'image/jpeg',
   'image/svg+xml': 'image/svg+xml',
   'image/webp': 'image/webp',
 }
+const FAVICON_TYPES: Record<string, FaviconContentType> = {
+  'image/png': 'image/png',
+  'image/x-icon': 'image/x-icon',
+  'image/vnd.microsoft.icon': 'image/vnd.microsoft.icon',
+}
 
-function onLogoPicked(event: Event) {
+type UploadTarget = 'logo' | 'logo-dark' | 'favicon'
+
+function onImagePicked(event: Event, target: UploadTarget) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
-  input.value = '' // allow re-picking the same file
+  input.value = ''
   if (!file) return
-  const contentType = LOGO_TYPES[file.type]
+
+  const isFavicon = target === 'favicon'
+  const maxBytes = isFavicon ? 64 * 1024 : 512 * 1024
+  const validTypes = isFavicon ? FAVICON_TYPES : LOGO_TYPES
+
+  const contentType = validTypes[file.type]
   if (!contentType) {
-    toast.error('Logo must be a PNG, JPEG, SVG, or WebP image.')
+    toast.error(isFavicon ? 'Favicon must be PNG or ICO.' : 'Logo must be PNG, JPEG, SVG, or WebP.')
     return
   }
-  if (file.size > 512 * 1024) {
-    toast.error('Logo must be 512 KB or smaller.')
+  if (file.size > maxBytes) {
+    toast.error(`File must be ${maxBytes / 1024} KB or smaller.`)
     return
   }
+
   const reader = new FileReader()
   reader.onload = () => {
     const dataUrl = reader.result as string
-    pickedPreview.value = dataUrl
-    void uploadLogo(contentType, dataUrl)
+    if (target === 'logo') pickedPreviewLogo.value = dataUrl
+    else if (target === 'logo-dark') pickedPreviewLogoDark.value = dataUrl
+    else pickedPreviewFavicon.value = dataUrl
+    void doUpload(target, contentType as LogoContentType & FaviconContentType, dataUrl)
   }
   reader.onerror = () => toast.error('Could not read the selected file.')
   reader.readAsDataURL(file)
 }
 
-async function uploadLogo(contentType: LogoContentType, dataUrl: string) {
-  uploadingLogo.value = true
+async function doUpload(
+  target: UploadTarget,
+  contentType: string,
+  dataUrl: string,
+) {
+  const base64 = dataUrl.includes(',') ? dataUrl.slice(dataUrl.indexOf(',') + 1) : dataUrl
+  const setUploading = (v: boolean) => {
+    if (target === 'logo') uploadingLogo.value = v
+    else if (target === 'logo-dark') uploadingLogoDark.value = v
+    else uploadingFavicon.value = v
+  }
+  const clearPreview = () => {
+    if (target === 'logo') pickedPreviewLogo.value = null
+    else if (target === 'logo-dark') pickedPreviewLogoDark.value = null
+    else pickedPreviewFavicon.value = null
+  }
+
+  setUploading(true)
   try {
-    // Backend tolerates the data: prefix, but strip it for a clean base64 payload.
-    const base64 = dataUrl.includes(',') ? dataUrl.slice(dataUrl.indexOf(',') + 1) : dataUrl
-    const updated = await settingsApi.uploadLogo({ content_type: contentType, content_base64: base64 })
+    let updated: Settings
+    if (target === 'logo') {
+      updated = await settingsApi.uploadLogo({ content_type: contentType as LogoContentType, content_base64: base64 })
+    } else if (target === 'logo-dark') {
+      updated = await settingsApi.uploadLogoDark({ content_type: contentType as LogoContentType, content_base64: base64 })
+    } else {
+      updated = await settingsApi.uploadFavicon({ content_type: contentType as FaviconContentType, content_base64: base64 })
+    }
     apply(updated)
     settingsStore.set(updated)
-    pickedPreview.value = null // fall back to the freshly-served logo
-    toast.success('Logo updated.')
+    clearPreview()
+    toast.success(`${target === 'favicon' ? 'Favicon' : 'Logo'} updated.`)
   } catch (error) {
-    pickedPreview.value = null
+    clearPreview()
     const message =
       error instanceof ApiError && error.status === 413
-        ? 'Logo is too large (max 512 KB).'
+        ? 'File is too large.'
         : error instanceof Error
           ? error.message
-          : 'Could not upload the logo.'
+          : `Could not upload the ${target === 'favicon' ? 'favicon' : 'logo'}.`
     toast.error(message)
   } finally {
-    uploadingLogo.value = false
+    setUploading(false)
   }
 }
 

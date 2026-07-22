@@ -9,7 +9,13 @@
         class="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-md border text-xs font-bold"
         :style="{ borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }"
       >
-        <img v-if="logoUrl" :src="logoUrl" :alt="productName" class="h-full w-full object-contain" />
+        <img
+          v-if="effectiveLogoUrl"
+          :src="effectiveLogoUrl"
+          :alt="productName"
+          class="h-full w-full object-contain"
+          @error="logoError = true"
+        />
         <template v-else>{{ productName.charAt(0).toUpperCase() }}</template>
       </div>
       <span
@@ -49,21 +55,43 @@
       >
         v{{ version }}
       </div>
+      <!-- Optional footer line from brand settings -->
+      <div
+        v-if="!collapsed && footerLine"
+        class="truncate px-2 pb-0.5 text-[10px]"
+        :style="{ color: 'var(--text-muted)' }"
+        :title="footerLine"
+      >
+        {{ footerLine }}
+      </div>
     </div>
   </aside>
 </template>
 
 <script setup lang="ts">
+import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { navGroups, settingsItem } from '../../navigation'
 import { useSettingsStore } from '../../stores/settings'
+import { useTheme } from '../../composables/useTheme'
 import SidebarLink from './SidebarLink.vue'
 
 defineProps<{ collapsed: boolean }>()
 
-// White-label branding: product name + logo from the settings store, with
-// sensible fallbacks (first letter in the bordered box when no logo is set).
-const { productName, logoUrl } = storeToRefs(useSettingsStore())
+const settingsStore = useSettingsStore()
+const { productName, logoUrl, logoDarkUrl, footerLine } = storeToRefs(settingsStore)
+const { theme } = useTheme()
+
+// Track per-session load errors so a broken image falls back to the wordmark.
+const logoError = ref(false)
+
+// Use dark logo in dark theme (falls back to light logo, then wordmark).
+// Reset error flag whenever the URL changes so a fresh upload recovers.
+const effectiveLogoUrl = computed(() => {
+  if (logoError.value) return null
+  if (theme.value === 'dark' && logoDarkUrl.value) return logoDarkUrl.value
+  return logoUrl.value || null
+})
 
 const version = __APP_VERSION__
 </script>

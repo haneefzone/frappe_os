@@ -156,7 +156,7 @@ def _dispatch_to_user(
 
     if pref.channel_email and user.email:
         try:
-            _send_email(user.email, title, body)
+            _send_email(user.email, title, body, db=db)
         except Exception:
             logger.exception("email notification failed for user %s", user.id)
 
@@ -227,16 +227,71 @@ def _platform_webhook_url() -> str | None:
         return None
 
 
-def _send_email(to_address: str, subject: str, body: str) -> None:
+def _get_product_name(db: Session) -> str:
+    """Return the configured product name (falls back to default if not set)."""
+    try:
+        from app.models.settings import PlatformSettings
+        row = PlatformSettings.get_or_create(db)
+        return row.product_name or "FDM Platform"
+    except Exception:
+        return "FDM Platform"
+
+
+def _email_html(product_name: str, subject: str, body: str) -> str:
+    """Minimal branded HTML email template (no external resources)."""
+    import html as _html
+
+    n = _html.escape(product_name)
+    s = _html.escape(subject)
+    b = _html.escape(body).replace("\n", "<br>")
+    # fmt: off — HTML template; line lengths intentional.
+    bg = "background:#0a0a0b"
+    card_style = "background:#111113;border:1px solid #232326;border-radius:8px"  # noqa: E501
+    body_font = (
+        "margin:0;padding:0;"
+        f"{bg};"
+        "color:#f4f4f5;"
+        "font-family:ui-sans-serif,system-ui,sans-serif"
+    )
+    return (
+        "<!DOCTYPE html>"
+        '<html lang="en">'
+        f"<head><meta charset=\"UTF-8\"><title>{s}</title></head>"
+        f'<body style="{body_font}">'
+        f'<table width="100%" cellpadding="0" cellspacing="0" style="{bg}">'
+        '<tr><td align="center" style="padding:32px 16px">'
+        f'<table width="480" cellpadding="0" cellspacing="0" style="{card_style}">'
+        '<tr><td style="padding:20px 24px;border-bottom:1px solid #232326">'
+        f'<span style="font-size:14px;font-weight:600;color:#f4f4f5">{n}</span>'
+        "</td></tr>"
+        '<tr><td style="padding:24px">'
+        f'<p style="margin:0 0 8px;font-size:15px;font-weight:600;color:#f4f4f5">{s}</p>'
+        f'<p style="margin:0;font-size:14px;color:#a1a1aa;line-height:1.5">{b}</p>'
+        "</td></tr>"
+        '<tr><td style="padding:16px 24px;border-top:1px solid #232326">'
+        f'<span style="font-size:12px;color:#6b6b74">Sent by {n}</span>'
+        "</td></tr>"
+        "</table>"
+        "</td></tr>"
+        "</table>"
+        "</body>"
+        "</html>"
+    )
+
+
+def _send_email(to_address: str, subject: str, body: str, db: Session | None = None) -> None:
     from app.config import get_settings
     cfg = get_settings()
     if not cfg.smtp_host:
         return
+    product_name = _get_product_name(db) if db is not None else "FDM Platform"
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = cfg.smtp_from or "noreply@fdm.local"
     msg["To"] = to_address
+    # Plain-text fallback first, then attach HTML alternative.
     msg.set_content(body)
+    msg.add_alternative(_email_html(product_name, subject, body), subtype="html")
 
     context = ssl.create_default_context()
     with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port or 587) as smtp:
