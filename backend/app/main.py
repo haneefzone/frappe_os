@@ -16,6 +16,7 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.backups import router as backups_router
 from app.api.routes.benches import router as benches_router
 from app.api.routes.compliance import router as compliance_router
+from app.api.routes.copilot import router as copilot_router
 from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.domains import router as domains_router
 from app.api.routes.job_logs import router as job_logs_router
@@ -156,6 +157,7 @@ def create_app() -> FastAPI:
     app.include_router(backups_router)
     app.include_router(jobs_router)
     app.include_router(job_logs_router)
+    app.include_router(copilot_router)
     app.include_router(terminal_router)
     app.include_router(monitoring_router)
     app.include_router(schedules_router)

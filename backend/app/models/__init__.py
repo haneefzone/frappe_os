@@ -11,6 +11,7 @@ from app.models.compliance import (
 )
 from app.models.domain import Domain
 from app.models.job import CommandJob, CommandStep, LogEntry
+from app.models.job_analysis import JobAnalysis
 from app.models.monitoring import MonitoringSample
 from app.models.notification import Notification, NotificationPreference
 from app.models.schedule import Schedule
@@ -35,6 +36,7 @@ __all__ = [
     "ComplianceStatus",
     "Domain",
     "InstalledApp",
+    "JobAnalysis",
     "LogEntry",
     "MonitoringSample",
     "Notification",
