@@ -17,7 +17,7 @@ on first read so the app works before anyone visits Settings.
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Integer, String, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -82,6 +82,20 @@ class PlatformSettings(Base):
     # it is an escape hatch for a fleet that moved ahead of the matrix.
     version_matrix_overrides: Mapped[dict] = mapped_column(
         MatrixOverridesJSON, default=dict, server_default="{}"
+    )
+
+    # Master-key escrow acknowledgement (session 6.3, Platform self-backup panel).
+    # A persistent, non-dismissable warning banner reminds admins that losing
+    # FDM_SECRET_KEY makes every stored secret permanently unrecoverable; the
+    # banner clears only once an admin explicitly confirms the key has been
+    # escrowed per docs/master-key-escrow.md. Stored with who + when so the
+    # acknowledgement is auditable (a matching AuditLog row is written too). NULL
+    # = never acknowledged (banner shown).
+    master_key_escrow_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    master_key_escrow_confirmed_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
     )
 
     updated_at: Mapped[datetime] = mapped_column(

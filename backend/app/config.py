@@ -32,6 +32,21 @@ class Settings(BaseSettings):
     fdm_secret_key: str = FDM_SECRET_KEY_PLACEHOLDER
     jwt_secret: str = JWT_SECRET_PLACEHOLDER
 
+    # Platform self-backup passphrase (session 6.3). A SEPARATE operator-held
+    # secret used to encrypt the platform self-backup archive at rest. It is
+    # deliberately NOT the master key and is never written to the DB, a log, a
+    # job param, the archive, or an error message — the platform self-backup job
+    # refuses to run until it is set (the loud circular-dependency break: a
+    # backup encrypted only with a key stored inside itself is worthless the day
+    # FDM_SECRET_KEY is lost). Escrow it separately from FDM_SECRET_KEY — see
+    # docs/master-key-escrow.md. Set via FDM_BACKUP_PASSPHRASE.
+    backup_passphrase: str = ""
+
+    # Platform root that holds the config set the self-backup captures (`deploy/`
+    # units + nginx conf, and `.env`). Empty = derive the repo root from the
+    # backend package location. Set via PLATFORM_ROOT to override.
+    platform_root: str = ""
+
     # Session lifetimes (CLAUDE.md: access 15m, refresh 7d).
     access_token_ttl_seconds: int = 15 * 60
     refresh_token_ttl_seconds: int = 7 * 24 * 3600

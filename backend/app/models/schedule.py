@@ -58,13 +58,19 @@ SCHEDULE_ACTIONS = (
     # Reports (session 6.2): render a registry report and email the artifact.
     # Platform-local — it targets no server, so it carries target_type "report".
     "report.generate",
+    # Platform self-backup (session 6.3): the platform backing up ITSELF on a
+    # cadence, target_type='platform'. Runs locally on the control plane.
+    "platform.self_backup",
+    "platform.self_backup_retention_sweep",
 )
 
 # What a schedule points at. "site" (backups + sweeps + SSL), "server" (the 6.7
-# drift check, which sweeps a whole server's tracked config), and "report" (6.2)
+# drift check, which sweeps a whole server's tracked config), "report" (6.2)
 # for a report delivery, which has no row target at all — its report id, format,
-# range and recipients live in `params`.
-SCHEDULE_TARGET_TYPES = ("site", "server", "report")
+# range and recipients live in `params` — and "platform" (6.3), the platform
+# self-backup targeting the control plane itself (no site/bench row; target_id
+# is a sentinel).
+SCHEDULE_TARGET_TYPES = ("site", "server", "report", "platform")
 
 
 class Schedule(Base):

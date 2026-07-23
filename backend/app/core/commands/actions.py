@@ -3445,3 +3445,282 @@ class InstallToolAction(Action):
                 f"{tool.display_name} {detected} "
                 f"(recommended {row.recommended_version}) -> {row.status}"
             )
+
+
+# --------------------------------------------------------------------------- #
+# Platform self-backup (session 6.3)
+#
+# These are `local` actions: they run on the platform host itself (no SSH, no
+# managed Server), driven by a LocalRemoteExecutor. The heavy lifting lives in
+# app/core/platform_backup.py (pure/injectable) so the flow is unit-testable
+# without a live Postgres, MinIO or master key. CLAUDE.md rule 6: the master key
+# and the backup passphrase never touch the DB, a log line, a job param, the
+# archive, or an error message.
+# --------------------------------------------------------------------------- #
+
+
+def _platform_config_root():
+    """The platform root that holds the config set to back up (`deploy/` units +
+    nginx conf, and `.env`). Overridable via PLATFORM_ROOT; defaults to the repo
+    root (the backend package's grandparent)."""
+    import os
+    from pathlib import Path
+
+    from app.config import get_settings
+
+    override = getattr(get_settings(), "platform_root", "") or os.environ.get("PLATFORM_ROOT", "")
+    if override:
+        return Path(override)
+    # app/core/commands/actions.py -> parents: commands, core, app, backend, root
+    return Path(__file__).resolve().parents[4]
+
+
+class PlatformSelfBackupAction(Action):
+    """`platform.self_backup` — dump the platform Postgres + config set, encrypt
+    the archive with the operator-held backup passphrase, and upload it offsite
+    with the sha256 re-verified end to end (session 6.3). The API pre-creates a
+    `pending` PlatformBackup row and threads its id, so a failed run still leaves
+    a visible failed record."""
+
+    async def run(self, ctx: JobContext) -> None:
+        import os
+        import tempfile
+
+        from app.config import get_settings
+        from app.core import platform_backup as pb
+        from app.core import storage as st
+        from app.models.platform_backup import PlatformBackup
+        from app.models.storage import StorageTarget
+
+        params = ctx.rendered.params_sanitized
+        backup_id = int(params["backup_id"]) if params.get("backup_id") else None
+        raw_target = params.get("storage_target_id")
+        storage_target_id = int(raw_target) if raw_target else None
+        settings = get_settings()
+        row = ctx.session.get(PlatformBackup, backup_id) if backup_id else None
+
+        try:
+            with ctx.step("Check backup passphrase + storage target"):
+                if not settings.backup_passphrase:
+                    raise pb.SelfBackupError(
+                        "no backup passphrase configured — set FDM_BACKUP_PASSPHRASE "
+                        "(escrowed separately from FDM_SECRET_KEY; see "
+                        "docs/master-key-escrow.md). Refusing to run."
+                    )
+                target = (
+                    ctx.session.get(StorageTarget, storage_target_id)
+                    if storage_target_id
+                    else None
+                )
+                if target is None or not target.enabled:
+                    raise pb.SelfBackupError(
+                        "no enabled storage target — configure one in "
+                        "Settings → Storage and select it."
+                    )
+                cfg = st.S3Config.from_target(target)  # decrypts keys in memory only
+                client = st.build_client(cfg)
+                await ctx.emit(
+                    f"Passphrase present; target {target.name!r} "
+                    f"(s3://{cfg.bucket}) selected."
+                )
+
+            with ctx.step("Dump platform DB + config, encrypt, upload offsite"):
+                config_root = _platform_config_root()
+                await ctx.emit(
+                    "Dumping platform Postgres (pg_dump --format=custom) and "
+                    f"capturing the config set from {config_root} "
+                    "(.env has FDM_SECRET_KEY excluded)…"
+                )
+                with tempfile.TemporaryDirectory(prefix="fdm-selfbackup-") as work:
+                    def _upload(local_path: str, expected_sha: str) -> str:
+                        key = st.platform_object_key(
+                            cfg, row.id, os.path.basename(local_path)
+                        )
+                        result = st.upload_local_file(
+                            client,
+                            cfg,
+                            local_path=local_path,
+                            key=key,
+                            expected_sha256=expected_sha,
+                        )
+                        if not result.ok:
+                            raise pb.SelfBackupError(
+                                f"offsite upload failed: {result.error}"
+                            )
+                        return result.key
+
+                    res = pb.create_self_backup(
+                        database_url=settings.database_url,
+                        passphrase=settings.backup_passphrase,
+                        config_root=config_root,
+                        work_dir=work,
+                        backup_id=row.id,
+                        upload_fn=_upload,
+                    )
+                mb = res.archive_size / (1024 * 1024)
+                await ctx.emit(
+                    f"Encrypted archive uploaded ({mb:.2f} MB), sha256 "
+                    f"{res.sha256[:12]}… re-verified end to end → {res.object_key}"
+                )
+
+            with ctx.step("Record platform backup"):
+                row.status = "success"
+                row.size_bytes = res.archive_size
+                row.sha256 = res.sha256
+                row.plaintext_sha256 = res.plaintext_sha256
+                row.kdf_salt = res.kdf_salt
+                row.encrypted = True
+                row.storage_target_id = target.id
+                row.object_key = res.object_key
+                row.verify_status = "unverified"
+                row.taken_by_job_id = ctx.job_id
+                row.error = None
+                ctx.session.commit()
+                await ctx.emit(
+                    "Self-backup recorded. Run the verify job to prove it is "
+                    "restorable (download → checksum → pg_restore --list)."
+                )
+        except Exception as exc:
+            if row is not None:
+                row.status = "failed"
+                row.error = str(exc)[:500]
+                ctx.session.commit()
+            raise
+
+
+class PlatformSelfBackupVerifyAction(Action):
+    """`platform.self_backup_verify` — the only real proof the self-backup works:
+    download the encrypted archive, re-checksum it, decrypt with the passphrase +
+    stored salt, and `pg_restore --list` the dump (structure readable). Marks the
+    row verified/failed (session 6.3)."""
+
+    async def run(self, ctx: JobContext) -> None:
+        import tempfile
+        from datetime import UTC, datetime
+
+        from app.config import get_settings
+        from app.core import platform_backup as pb
+        from app.core import storage as st
+        from app.models.platform_backup import PlatformBackup
+        from app.models.storage import StorageTarget
+
+        params = ctx.rendered.params_sanitized
+        backup_id = int(params["backup_id"])
+        settings = get_settings()
+        row = ctx.session.get(PlatformBackup, backup_id)
+
+        with ctx.step("Load backup + storage target"):
+            if row is None:
+                raise pb.SelfBackupError(f"platform backup #{backup_id} not found")
+            if not row.object_key or not row.storage_target_id or not row.sha256:
+                raise pb.SelfBackupError(
+                    "this backup has no uploaded archive to verify"
+                )
+            if not settings.backup_passphrase:
+                raise pb.SelfBackupError(
+                    "no backup passphrase configured — set FDM_BACKUP_PASSPHRASE"
+                )
+            target = ctx.session.get(StorageTarget, row.storage_target_id)
+            if target is None:
+                raise pb.SelfBackupError(
+                    "the storage target for this backup was deleted"
+                )
+
+        try:
+            with ctx.step("Download → checksum → decrypt → pg_restore --list"):
+                with tempfile.TemporaryDirectory(prefix="fdm-verify-") as work:
+                    def _download(key: str, dest: str) -> None:
+                        st.download_object_to_file(target, key, dest)
+
+                    verdict = pb.verify_self_backup(
+                        passphrase=settings.backup_passphrase,
+                        kdf_salt=row.kdf_salt,
+                        expected_sha256=row.sha256,
+                        object_key=row.object_key,
+                        work_dir=work,
+                        download_fn=_download,
+                    )
+                await ctx.emit(verdict.detail)
+                if not verdict.ok:
+                    raise pb.SelfBackupError(f"verify failed: {verdict.detail}")
+
+            with ctx.step("Mark verified"):
+                row.verify_status = "verified"
+                row.verified_at = datetime.now(UTC)
+                row.verified_by_job_id = ctx.job_id
+                ctx.session.commit()
+                await ctx.emit("Verified: this self-backup is restorable.")
+        except Exception as exc:
+            row.verify_status = "failed"
+            ctx.session.commit()
+            _ = exc
+            raise
+
+
+class PlatformBackupRetentionSweepAction(Action):
+    """`platform.self_backup_retention_sweep` — prune platform self-backups down
+    to a retention policy (session 6.3, reusing the 2.1 pattern). Never removes
+    the newest/only backup; logs a dry-run summary before deleting the S3 object
+    AND the row."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from datetime import UTC, datetime
+
+        from sqlalchemy import select
+
+        from app.core import backups as bk
+        from app.core import storage as st
+        from app.models.platform_backup import PlatformBackup
+        from app.models.storage import StorageTarget
+
+        params = ctx.rendered.params_sanitized
+        keep_last = int(params["keep_last"]) if params.get("keep_last") else None
+        keep_days = int(params["keep_days"]) if params.get("keep_days") else None
+        now = datetime.now(UTC)
+
+        with ctx.step("Evaluate platform-backup retention policy"):
+            rows = list(ctx.session.scalars(select(PlatformBackup)).all())
+            keep, remove = bk.plan_retention(
+                rows, keep_last=keep_last, keep_days=keep_days, now=now
+            )
+            policy = (
+                ", ".join(
+                    p
+                    for p in (
+                        f"keep last {keep_last}" if keep_last is not None else None,
+                        f"keep {keep_days} day(s)" if keep_days is not None else None,
+                    )
+                    if p
+                )
+                or "keep all"
+            )
+            await ctx.emit(
+                f"Retention policy [{policy}]: {len(keep) + len(remove)} "
+                f"successful backup(s), {len(keep)} to keep, "
+                f"{len(remove)} to remove (dry-run). The newest is always kept."
+            )
+
+        if not remove:
+            with ctx.step("No platform backups beyond retention"):
+                await ctx.emit("Nothing to prune.")
+            return
+
+        with ctx.step(f"Remove {len(remove)} expired platform backup(s)"):
+            for b in remove:
+                if b.object_key and b.storage_target_id:
+                    target = ctx.session.get(StorageTarget, b.storage_target_id)
+                    if target is not None:
+                        try:
+                            st.delete_object(target, b.object_key)
+                            await ctx.emit(f"  removed offsite object {b.object_key}")
+                        except Exception as exc:  # noqa: BLE001
+                            await ctx.emit(
+                                f"  WARN could not delete offsite object "
+                                f"{b.object_key}: {exc}"
+                            )
+                ctx.session.delete(b)
+            ctx.session.commit()
+            kept_ids = ", ".join(str(k.id) for k in keep) or "none"
+            await ctx.emit(
+                f"Pruned {len(remove)} backup(s); {len(keep)} kept (ids {kept_ids})."
+            )

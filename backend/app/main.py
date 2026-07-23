@@ -25,6 +25,7 @@ from app.api.routes.job_logs import router as job_logs_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.monitoring import router as monitoring_router
 from app.api.routes.notifications import router as notifications_router
+from app.api.routes.platform_backups import router as platform_backups_router
 from app.api.routes.reports import router as reports_router
 from app.api.routes.restic import router as restic_router
 from app.api.routes.schedules import router as schedules_router
@@ -178,6 +179,7 @@ def create_app() -> FastAPI:
     app.include_router(audit_router)
     app.include_router(reports_router)
     app.include_router(notifications_router)
+    app.include_router(platform_backups_router)
     app.include_router(search_router)
     app.include_router(updates_router)
     app.include_router(tools_router)

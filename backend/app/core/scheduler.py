@@ -182,6 +182,12 @@ def _build_fire(
     if schedule.action_name == "report.generate":
         return _build_report_fire(schedule)
 
+    # Platform self-backup (session 6.3): no site/bench — it targets the control
+    # plane itself. A pending PlatformBackup row is created up front (like the
+    # manual endpoint) so a failed scheduled self-backup still leaves a record.
+    if schedule.target_type == "platform":
+        return _build_platform_fire(db, schedule)
+
     site, bench, server_id = _resolve_site_target(db, schedule)
     target_id = f"{bench.path}::{site.name}"
 
@@ -217,6 +223,57 @@ def _build_fire(
         return server_id, target_id, params, None
 
     raise ScheduleError(f"unschedulable action {schedule.action_name!r}")
+
+
+# Sentinel server_id for a `local` platform action (no managed Server row).
+PLATFORM_SERVER_ID = 0
+
+
+def _build_platform_fire(
+    db: Session, schedule: Schedule
+) -> tuple[int, str, dict, object | None]:
+    """Build the fire for a platform-targeted schedule (session 6.3). No site or
+    server is involved (a `local` action); `server_id` is the sentinel 0 and
+    `target_id` is the literal 'platform'.
+
+    For `platform.self_backup` a `pending` PlatformBackup row is created up front
+    (so a failed scheduled run leaves a visible failed record) and the default
+    enabled StorageTarget is selected — a scheduled self-backup with no enabled
+    target fails its fire cleanly (the schedule is paused) rather than silently
+    never producing an offsite copy."""
+    from sqlalchemy import select
+
+    from app.models.platform_backup import PlatformBackup
+    from app.models.storage import StorageTarget
+
+    if schedule.action_name == "platform.self_backup":
+        target = db.scalars(
+            select(StorageTarget)
+            .where(StorageTarget.enabled.is_(True))
+            .order_by(StorageTarget.id)
+        ).first()
+        if target is None:
+            raise ScheduleError(
+                "no enabled storage target for the platform self-backup"
+            )
+        row = PlatformBackup(status="pending")
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        params = {"backup_id": str(row.id), "storage_target_id": str(target.id)}
+        return PLATFORM_SERVER_ID, "platform", params, row
+
+    if schedule.action_name == "platform.self_backup_retention_sweep":
+        params = {}
+        if schedule.retention_keep_last is not None:
+            params["keep_last"] = str(schedule.retention_keep_last)
+        if schedule.retention_keep_days is not None:
+            params["keep_days"] = str(schedule.retention_keep_days)
+        return PLATFORM_SERVER_ID, "platform", params, None
+
+    raise ScheduleError(
+        f"unschedulable platform action {schedule.action_name!r}"
+    )
 
 
 # --------------------------------------------------------------------------- #

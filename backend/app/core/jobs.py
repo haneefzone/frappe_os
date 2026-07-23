@@ -488,6 +488,82 @@ class SSHRemoteExecutor:
         return await self._ssh.write_file(self._conn, path, chunks)
 
 
+class LocalRemoteExecutor:
+    """Executor for a `local` action (session 6.3): runs on the platform host
+    itself via local subprocesses, no SSH and no Server row. Satisfies the same
+    RemoteExecutor interface so a local action uses `ctx.stream`/`ctx.capture`/
+    `ctx.read_file` exactly like an SSH one. `run_as` is ignored (a local action
+    runs as the platform service user). Constructed with an ignored `server`
+    argument so it drops into the same executor-factory slot."""
+
+    def __init__(self, server: Server | None = None) -> None:
+        self._server = server
+
+    async def __aenter__(self) -> LocalRemoteExecutor:
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        return None
+
+    async def run(
+        self,
+        argv: list[str],
+        *,
+        cwd: str | None,
+        run_as: str | None,
+        on_line: Callable[[str, str], Awaitable[None] | None],
+        cancel_check: Callable[[], bool] | None,
+    ) -> int:
+        import asyncio
+
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        async def _pump(stream, name: str) -> None:
+            while True:
+                raw = await stream.readline()
+                if not raw:
+                    break
+                if cancel_check is not None and cancel_check():
+                    break
+                res = on_line(name, raw.decode(errors="replace").rstrip("\n"))
+                if res is not None:
+                    await res
+
+        await asyncio.gather(_pump(proc.stdout, "stdout"), _pump(proc.stderr, "stderr"))
+        return await proc.wait()
+
+    async def capture(
+        self, argv: list[str], *, cwd: str | None = None, timeout: float = 120.0
+    ) -> CaptureResult:
+        import asyncio
+
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return CaptureResult(
+            exit_code=proc.returncode or 0,
+            stdout=out.decode(errors="replace"),
+            stderr=err.decode(errors="replace"),
+        )
+
+    async def read_file(self, path: str, *, chunk_size: int = 65536):
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+
+
 @dataclass
 class CreateResult:
     job: CommandJob
@@ -726,7 +802,6 @@ class JobRunner:
     def run_job(self, job_id: int, *, executor_factory=None) -> None:
         """RQ entrypoint body. Loads the job, runs its action with retries, and
         drives it to a terminal state. Always releases the lock."""
-        factory = executor_factory or self._executor_factory or self._ssh_executor_factory
         db = self._sf()
         try:
             job = db.get(CommandJob, job_id)
@@ -742,6 +817,17 @@ class JobRunner:
                 return
 
             template = get_template(job.action_name)
+            # A `local` action runs on the platform host itself (no Server / SSH);
+            # everything else runs over SSH against the job's Server. An explicit
+            # executor_factory (tests) or a runner-wide one still wins.
+            if executor_factory is not None:
+                factory = executor_factory
+            elif self._executor_factory is not None:
+                factory = self._executor_factory
+            elif getattr(template, "local", False):
+                factory = self._local_executor_factory
+            else:
+                factory = self._ssh_executor_factory
             server = db.scalars(
                 select(Server)
                 .options(joinedload(Server.credential))
@@ -861,6 +947,11 @@ class JobRunner:
         if self._ssh is None:
             raise RuntimeError("JobRunner has no SSHService configured for execution")
         return SSHRemoteExecutor(self._ssh, server)
+
+    def _local_executor_factory(self, server: Server | None):
+        """A local action (session 6.3 platform self-backup) runs on the platform
+        host itself — no SSH, `server` ignored."""
+        return LocalRemoteExecutor(server)
 
     def _to_terminal(
         self, db: Session, job: CommandJob, status: str, *, exit_code: int | None = None

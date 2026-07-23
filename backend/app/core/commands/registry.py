@@ -1674,3 +1674,78 @@ register(
         run_as=None,
     )
 )
+
+
+# --- Platform self-backup (session 6.3) --------------------------------- #
+#
+# `local=True`: these run on the platform host itself (no SSH, no managed
+# Server) — the JobRunner gives them a LocalRemoteExecutor. They pg_dump the
+# platform Postgres, archive the config set (.env with FDM_SECRET_KEY excluded +
+# deploy/ + nginx conf), encrypt with the operator-held backup passphrase, and
+# push offsite through the 2.2 storage service. server_id is a sentinel (0) at
+# the API. SETTINGS_MANAGE-gated so only Admin (wildcard) can launch them; the
+# platform-backups API additionally restricts every route to Admin.
+# Imported locally to keep concurrent-session edits to this file collision-free.
+from app.core.commands.actions import (  # noqa: E402
+    PlatformBackupRetentionSweepAction as _PlatformBackupRetentionSweepAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    PlatformSelfBackupAction as _PlatformSelfBackupAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    PlatformSelfBackupVerifyAction as _PlatformSelfBackupVerifyAction,
+)
+from app.core.permissions import SETTINGS_MANAGE as _SETTINGS_MANAGE  # noqa: E402
+
+register(
+    CommandTemplate(
+        action_name="platform.self_backup",
+        argv=("true",),  # nominal; PlatformSelfBackupAction drives the real steps.
+        cwd=None,
+        params=(
+            # The pending PlatformBackup row created by the API before the job.
+            ParamSpec("backup_id", regex=BACKUP_ID),
+            # The S3 target the encrypted archive is pushed to (keys server-side).
+            ParamSpec("storage_target_id", regex=BACKUP_ID),
+        ),
+        action_class=_PlatformSelfBackupAction,
+        idempotent=False,  # one PlatformBackup row per run.
+        requires_lock=True,  # two self-backups must never race.
+        required_permission=_SETTINGS_MANAGE,
+        run_as=None,
+        local=True,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="platform.self_backup_verify",
+        argv=("true",),  # nominal; PlatformSelfBackupVerifyAction drives the steps.
+        cwd=None,
+        params=(ParamSpec("backup_id", regex=BACKUP_ID),),
+        action_class=_PlatformSelfBackupVerifyAction,
+        idempotent=True,  # read-only proof; safely repeatable.
+        requires_lock=False,
+        required_permission=_SETTINGS_MANAGE,
+        run_as=None,
+        local=True,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="platform.self_backup_retention_sweep",
+        argv=("true",),  # nominal; PlatformBackupRetentionSweepAction drives it.
+        cwd=None,
+        params=(
+            ParamSpec("keep_last", regex=_POSITIVE_INT, required=False),
+            ParamSpec("keep_days", regex=_POSITIVE_INT, required=False),
+        ),
+        action_class=_PlatformBackupRetentionSweepAction,
+        idempotent=False,  # destructive (deletes); never auto-retried.
+        requires_lock=True,
+        required_permission=_SETTINGS_MANAGE,
+        run_as=None,
+        local=True,
+    )
+)

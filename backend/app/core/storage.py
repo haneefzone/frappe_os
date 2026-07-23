@@ -291,6 +291,107 @@ async def download_object(client, cfg: S3Config, key: str, *, chunk_size: int = 
 
 
 # --------------------------------------------------------------------------- #
+# Platform self-backup: upload a LOCAL file + download an object (session 6.3)
+# --------------------------------------------------------------------------- #
+
+
+def platform_object_key(cfg: S3Config, backup_id: int, filename: str) -> str:
+    """Deterministic object key for a platform self-backup archive:
+    `<prefix>/platform-backup-<id>/<filename>`. Distinct prefix from site
+    backups so a self-backup can never collide with a managed-site backup."""
+    name = posixpath.basename(filename)
+    parts = [p for p in (cfg.path_prefix, f"platform-backup-{backup_id}", name) if p]
+    return "/".join(parts)
+
+
+def upload_local_file(
+    client,
+    cfg: S3Config,
+    *,
+    local_path: str,
+    key: str,
+    expected_sha256: str,
+) -> UploadResult:
+    """Stream a LOCAL file to the S3 target, recomputing its sha256 while reading
+    and refusing to upload on a mismatch — the same verify-after-upload contract
+    `upload_artifact` gives site backups, for the platform self-backup archive
+    (which lives on the platform host, not a managed server, so there is no SSH
+    read_chunks provider)."""
+    digest = hashlib.sha256()
+    size = 0
+    with open(local_path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    actual = digest.hexdigest()
+    if actual != expected_sha256:
+        return UploadResult(
+            kind="platform",
+            key=key,
+            size_bytes=size,
+            checksum_ok=False,
+            expected_sha256=expected_sha256,
+            actual_sha256=actual,
+            error="checksum mismatch — offsite upload refused",
+        )
+    try:
+        with open(local_path, "rb") as fh:
+            client.upload_fileobj(fh, cfg.bucket, key)
+    except Exception as exc:  # noqa: BLE001
+        return UploadResult(
+            kind="platform",
+            key=key,
+            size_bytes=size,
+            checksum_ok=True,
+            expected_sha256=expected_sha256,
+            actual_sha256=actual,
+            error=_safe_error("Upload failed", exc),
+        )
+    return UploadResult(
+        kind="platform",
+        key=key,
+        size_bytes=size,
+        checksum_ok=True,
+        expected_sha256=expected_sha256,
+        actual_sha256=actual,
+    )
+
+
+def delete_object(
+    target: StorageTarget,
+    key: str,
+    *,
+    secrets: SecretsService | None = None,
+    client_factory: ClientFactory | None = None,
+) -> None:
+    """Delete one object from the target (platform-backup retention sweep)."""
+    cfg = S3Config.from_target(target, secrets)
+    client = build_client(cfg, client_factory)
+    try:
+        client.delete_object(Bucket=cfg.bucket, Key=key)
+    except Exception as exc:  # noqa: BLE001
+        raise StorageError(_safe_error("Delete failed", exc)) from exc
+
+
+def download_object_to_file(
+    target: StorageTarget,
+    key: str,
+    dest_path: str,
+    *,
+    secrets: SecretsService | None = None,
+    client_factory: ClientFactory | None = None,
+) -> None:
+    """Download one object from the target to a local file (for the platform
+    self-backup verify job's download -> checksum -> pg_restore --list proof)."""
+    cfg = S3Config.from_target(target, secrets)
+    client = build_client(cfg, client_factory)
+    try:
+        client.download_file(cfg.bucket, key, dest_path)
+    except Exception as exc:  # noqa: BLE001
+        raise StorageError(_safe_error("Download failed", exc)) from exc
+
+
+# --------------------------------------------------------------------------- #
 # Presigned download
 # --------------------------------------------------------------------------- #
 

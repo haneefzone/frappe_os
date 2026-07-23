@@ -162,3 +162,18 @@ def require(permission: str):
         return user
 
     return dependency
+
+
+def require_admin(user: CurrentUser) -> User:
+    """Admin-only gate. Some surfaces (the platform self-backup + master-key
+    escrow, session 6.3) are restricted to the Admin role specifically, not just
+    any role that happens to hold a broad permission — losing the master key is
+    an organisation-ending event, so the routes that back it up and the escrow
+    acknowledgement are Admin-only. Checks the role name, so a custom role cannot
+    be handed this by adding a permission string."""
+    if (user.role.name if user.role else None) != "Admin":
+        raise HTTPException(
+            status_code=403,
+            detail="This action is restricted to the Admin role.",
+        )
+    return user

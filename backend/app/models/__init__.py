@@ -22,6 +22,7 @@ from app.models.mfa import (
 )
 from app.models.monitoring import MonitoringSample
 from app.models.notification import Notification, NotificationPreference
+from app.models.platform_backup import PlatformBackup
 from app.models.report_run import ReportRun
 from app.models.restic import ResticRepo
 from app.models.schedule import Schedule
@@ -57,6 +58,7 @@ __all__ = [
     "MonitoringSample",
     "Notification",
     "NotificationPreference",
+    "PlatformBackup",
     "PlatformSettings",
     "RecoveryCode",
     "ReportRun",
