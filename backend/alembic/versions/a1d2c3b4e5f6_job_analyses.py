@@ -1,7 +1,7 @@
 """job analyses — AI root-cause of failed jobs (session 5.2 panel copilot)
 
 Revision ID: a1d2c3b4e5f6
-Revises: f7a2c9e1b3d4
+Revises: f8b3d1c6a2e9
 Create Date: 2026-07-11 15:00:00.000000
 
 """
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a1d2c3b4e5f6"
-down_revision: str | Sequence[str] | None = "f7a2c9e1b3d4"
+down_revision: str | Sequence[str] | None = "f8b3d1c6a2e9"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
