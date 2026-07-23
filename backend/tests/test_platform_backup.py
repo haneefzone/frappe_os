@@ -219,7 +219,7 @@ class _FakeS3:
 
 @pytest.fixture
 def platform_env(sf, tmp_path, monkeypatch):
-    """Wire settings.backup_passphrase, a PLATFORM_ROOT config set, an enabled
+    """Wire settings.fdm_backup_passphrase, a PLATFORM_ROOT config set, an enabled
     storage target, and fakes for pg_dump/pg_restore/boto3."""
     _FakeS3.store = {}
     root = _make_config_root(tmp_path)
@@ -228,7 +228,10 @@ def platform_env(sf, tmp_path, monkeypatch):
     from app.config import get_settings
 
     get_settings.cache_clear()
-    monkeypatch.setattr(pb, "pg_dump_to_file", lambda db, out: open(out, "wb").write(b"PGDMP" + os.urandom(1024)))
+    def _fake_dump(db, out):
+        open(out, "wb").write(b"PGDMP" + os.urandom(1024))
+
+    monkeypatch.setattr(pb, "pg_dump_to_file", _fake_dump)
     monkeypatch.setattr(pb, "pg_restore_list", lambda p, timeout=300: "; toc\n1; TABLE users\n")
     monkeypatch.setattr(st, "_boto3_client", lambda cfg: _FakeS3())
     with sf() as db:
@@ -246,7 +249,9 @@ def platform_env(sf, tmp_path, monkeypatch):
 
 
 def _runner(sf):
-    return JobRunner(sf, InMemoryJobBackend(), enqueue=lambda job: None, secrets=get_secrets_service())
+    return JobRunner(
+        sf, InMemoryJobBackend(), enqueue=lambda job: None, secrets=get_secrets_service()
+    )
 
 
 def test_self_backup_job_success_and_no_secret_leak(sf, platform_env):
@@ -259,7 +264,10 @@ def test_self_backup_job_success_and_no_secret_leak(sf, platform_env):
         job = runner.create(
             db, action_name="platform.self_backup", server_id=0,
             target_type="platform", target_id="platform",
-            params={"backup_id": str(backup_id), "storage_target_id": str(platform_env["target_id"])},
+            params={
+                "backup_id": str(backup_id),
+                "storage_target_id": str(platform_env["target_id"]),
+            },
             priority="default", created_by=None,
         )
         job_id = job.id
@@ -291,7 +299,10 @@ def test_verify_job_marks_verified(sf, platform_env):
         job = runner.create(
             db, action_name="platform.self_backup", server_id=0,
             target_type="platform", target_id="platform",
-            params={"backup_id": str(backup_id), "storage_target_id": str(platform_env["target_id"])},
+            params={
+                "backup_id": str(backup_id),
+                "storage_target_id": str(platform_env["target_id"]),
+            },
             priority="default", created_by=None,
         )
         jid = job.id
@@ -326,7 +337,10 @@ def test_self_backup_fails_without_passphrase(sf, platform_env, monkeypatch):
         job = runner.create(
             db, action_name="platform.self_backup", server_id=0,
             target_type="platform", target_id="platform",
-            params={"backup_id": str(backup_id), "storage_target_id": str(platform_env["target_id"])},
+            params={
+                "backup_id": str(backup_id),
+                "storage_target_id": str(platform_env["target_id"]),
+            },
             priority="default", created_by=None,
         )
         jid = job.id
@@ -366,7 +380,11 @@ def test_scheduler_fires_platform_self_backup(sf, platform_env):
         assert rows[0].taken_by_job_id is not None
         sched = db.get(Schedule, sched_id)
         assert sched.last_run_job_id is not None
-        assert sched.next_run_at == compute_next_run(sched, after=now)
+        # SQLite reads DateTime columns back tz-naive, so normalise before
+        # comparing to the tz-aware computed value (same pattern as test_scheduler).
+        expected = compute_next_run(sched, after=now)
+        stored = sched.next_run_at
+        assert stored.replace(tzinfo=None) == expected.replace(tzinfo=None)
 
 
 # --------------------------------------------------------------------------- #

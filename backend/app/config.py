@@ -39,8 +39,10 @@ class Settings(BaseSettings):
     # refuses to run until it is set (the loud circular-dependency break: a
     # backup encrypted only with a key stored inside itself is worthless the day
     # FDM_SECRET_KEY is lost). Escrow it separately from FDM_SECRET_KEY — see
-    # docs/master-key-escrow.md. Set via FDM_BACKUP_PASSPHRASE.
-    backup_passphrase: str = ""
+    # docs/master-key-escrow.md. Set via FDM_BACKUP_PASSPHRASE (the field is
+    # `fdm_backup_passphrase` so it binds that env var, matching fdm_secret_key
+    # <- FDM_SECRET_KEY; a plain `backup_passphrase` would bind BACKUP_PASSPHRASE).
+    fdm_backup_passphrase: str = ""
 
     # Platform root that holds the config set the self-backup captures (`deploy/`
     # units + nginx conf, and `.env`). Empty = derive the repo root from the

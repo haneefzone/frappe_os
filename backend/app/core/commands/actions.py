@@ -3501,7 +3501,7 @@ class PlatformSelfBackupAction(Action):
 
         try:
             with ctx.step("Check backup passphrase + storage target"):
-                if not settings.backup_passphrase:
+                if not settings.fdm_backup_passphrase:
                     raise pb.SelfBackupError(
                         "no backup passphrase configured — set FDM_BACKUP_PASSPHRASE "
                         "(escrowed separately from FDM_SECRET_KEY; see "
@@ -3551,7 +3551,7 @@ class PlatformSelfBackupAction(Action):
 
                     res = pb.create_self_backup(
                         database_url=settings.database_url,
-                        passphrase=settings.backup_passphrase,
+                        passphrase=settings.fdm_backup_passphrase,
                         config_root=config_root,
                         work_dir=work,
                         backup_id=row.id,
@@ -3616,7 +3616,7 @@ class PlatformSelfBackupVerifyAction(Action):
                 raise pb.SelfBackupError(
                     "this backup has no uploaded archive to verify"
                 )
-            if not settings.backup_passphrase:
+            if not settings.fdm_backup_passphrase:
                 raise pb.SelfBackupError(
                     "no backup passphrase configured — set FDM_BACKUP_PASSPHRASE"
                 )
@@ -3633,7 +3633,7 @@ class PlatformSelfBackupVerifyAction(Action):
                         st.download_object_to_file(target, key, dest)
 
                     verdict = pb.verify_self_backup(
-                        passphrase=settings.backup_passphrase,
+                        passphrase=settings.fdm_backup_passphrase,
                         kdf_salt=row.kdf_salt,
                         expected_sha256=row.sha256,
                         object_key=row.object_key,
