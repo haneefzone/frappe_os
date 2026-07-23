@@ -2317,3 +2317,259 @@ class SslExpiryScanAction(Action):
             for row in rows:
                 when = row.cert_expires_at.isoformat() if row.cert_expires_at else "no cert"
                 await ctx.emit(f"  {row.domain}: {when}")
+
+
+# --------------------------------------------------------------------------- #
+# AI Agents module (session 5.1): jailed git snapshot / diff / apply / rollback.
+#
+# Every git operation below is a registered command template (fixed argv, cwd =
+# the validated working dir, `..`-rejected), rendered as a sub-step here — never
+# a shell string (golden rule 1). The orchestrators write the snapshot/diff and
+# the apply/rollback disposition onto the AIAgentSession row so the review screen
+# and the audit trail stay in sync.
+# --------------------------------------------------------------------------- #
+
+
+def _load_ai_session(ctx: JobContext, session_id: int):
+    """Load the AIAgentSession row this job acts on, or None if it's gone."""
+    from app.models.ai_agent import AIAgentSession
+
+    return ctx.session.get(AIAgentSession, int(session_id))
+
+
+async def _git(ctx: JobContext, action_name: str, params: dict, *, label: str):
+    """Render + stream one AI git sub-template as its own step; return exit code."""
+    from app.core.commands import get_template, render
+
+    cmd = render(get_template(action_name), params)
+    with ctx.step(label):
+        await ctx.emit(f"$ {cmd.display}")
+        code = await ctx.stream(cmd.argv, cwd=cmd.cwd)
+    return code
+
+
+async def _git_capture(ctx: JobContext, action_name: str, params: dict, *, label: str):
+    """Render + capture one AI git sub-template as its own step; return the result."""
+    from app.core.commands import get_template, render
+
+    cmd = render(get_template(action_name), params)
+    with ctx.step(label):
+        await ctx.emit(f"$ {cmd.display}")
+        res = await ctx.capture(cmd.argv, cwd=cmd.cwd)
+    return res
+
+
+class AIPreChangeSnapshotAction(Action):
+    """`ai.pre_change_snapshot` — verify the jail is a git repo and record a
+    pre-change snapshot (base commit + `git stash create` of any pre-existing
+    dirty state) onto the session, so a later rollback restores it exactly.
+
+    Runs for every session at launch: for a read-write session it is the gated
+    pre-change backup; for a read-only session it is the safety baseline the
+    end-of-session violation check reverts against. Idempotent (all reads)."""
+
+    async def run(self, ctx: JobContext) -> None:
+        import json
+
+        params = ctx.rendered.params_sanitized
+        working_dir = params["working_dir"]
+        session = _load_ai_session(ctx, params["session_id"])
+
+        with ctx.step("Verify git working directory"):
+            res = await ctx.capture(
+                ["git", "rev-parse", "--is-inside-work-tree"], cwd=working_dir
+            )
+            if res.exit_code != 0 or res.stdout.strip() != "true":
+                if session is not None:
+                    session.status = "error"
+                    session.close_reason = "not_a_git_repo"
+                    ctx.session.commit()
+                raise RuntimeError(
+                    f"{working_dir!r} is not a git working tree — a scoped AI "
+                    "session needs a git repo to snapshot and diff."
+                )
+
+        base = ""
+        snap = ""
+        with ctx.step("Record pre-change snapshot"):
+            head = await ctx.capture(["git", "rev-parse", "HEAD"], cwd=working_dir)
+            if head.exit_code != 0:
+                if session is not None:
+                    session.status = "error"
+                    session.close_reason = "no_commits"
+                    ctx.session.commit()
+                raise RuntimeError(
+                    "the working tree has no commits yet; commit an initial state "
+                    "before starting a scoped session so rollback has a base."
+                )
+            base = head.stdout.strip()
+            # `git stash create` snapshots tracked+staged changes into a commit
+            # object WITHOUT touching the working tree (empty output = clean tree).
+            stash = await ctx.capture(["git", "stash", "create"], cwd=working_dir)
+            snap = stash.stdout.strip()
+            if session is not None:
+                session.base_commit = base
+                session.snapshot_ref = snap or None
+                session.status = "ready"
+                ctx.session.commit()
+            await ctx.emit(
+                f"Pre-change snapshot recorded: base {base[:12]}…"
+                + (f", dirty-snapshot {snap[:12]}…" if snap else " (clean tree).")
+            )
+            await ctx.emit(
+                "SNAPSHOT_RESULT "
+                + json.dumps({"base_commit": base, "snapshot_ref": snap}),
+                stream="result",
+            )
+
+
+class AICaptureDiffAction(Action):
+    """`ai.capture_diff` — on session end, stage the whole jail and capture the
+    `git diff` against the pre-change base for the review screen.
+
+    For a read-only session any non-empty diff is a violation: this action
+    reverts it in the same job (reset --hard base, clean untracked, re-apply the
+    pre-existing dirty snapshot) and records a `read_only_violation`, so a
+    read-only session can never leave a kept write behind (server-side)."""
+
+    async def run(self, ctx: JobContext) -> None:
+        import json
+
+        params = ctx.rendered.params_sanitized
+        working_dir = params["working_dir"]
+        session = _load_ai_session(ctx, params["session_id"])
+        if session is None:
+            raise RuntimeError(f"AI session {params['session_id']} not found")
+        base = session.base_commit
+        if not base:
+            raise RuntimeError("session has no pre-change base commit to diff against")
+
+        await _git(
+            ctx, "ai.git_add_all", {"working_dir": working_dir}, label="Stage working tree"
+        )
+        diff_res = await _git_capture(
+            ctx,
+            "ai.git_diff_cached",
+            {"working_dir": working_dir, "base": base},
+            label="Capture git diff",
+        )
+        diff_text = diff_res.stdout
+        session.diff_text = diff_text
+        changed = bool(diff_text.strip())
+        await ctx.emit(
+            f"Captured diff vs {base[:12]}… — "
+            + ("changes present." if changed else "no changes.")
+        )
+
+        if session.read_only and changed:
+            # A read-only session must not keep any write: revert to the snapshot.
+            await ctx.emit(
+                "READ_ONLY_VIOLATION — the read-only session modified the tree; "
+                "reverting to the pre-change snapshot.",
+                stream="result",
+            )
+            await _rollback_to_snapshot(ctx, working_dir, base, session.snapshot_ref)
+            session.disposition = "rolledback"
+            session.status = "rolledback"
+            session.close_reason = "read_only_violation"
+        else:
+            session.status = "reviewing"
+        ctx.session.commit()
+        await ctx.emit(
+            "DIFF_RESULT "
+            + json.dumps(
+                {
+                    "changed": changed,
+                    "bytes": len(diff_text),
+                    "read_only_violation": bool(session.read_only and changed),
+                }
+            ),
+            stream="result",
+        )
+
+
+async def _rollback_to_snapshot(
+    ctx: JobContext, working_dir: str, base: str, snapshot_ref: str | None
+) -> None:
+    """Restore the jail to its pre-change snapshot exactly: hard-reset to the base
+    commit, remove untracked (non-ignored) files, then re-apply any pre-existing
+    dirty snapshot. Shared by rollback and the read-only violation revert."""
+    code = await _git(
+        ctx, "ai.git_reset_hard", {"working_dir": working_dir, "ref": base},
+        label=f"Reset --hard to {base[:12]}…",
+    )
+    if code != 0:
+        raise RuntimeError(f"git reset --hard exited with status {code}")
+    code = await _git(
+        ctx, "ai.git_clean", {"working_dir": working_dir},
+        label="Remove untracked files",
+    )
+    if code != 0:
+        raise RuntimeError(f"git clean exited with status {code}")
+    if snapshot_ref:
+        code = await _git(
+            ctx, "ai.git_stash_apply", {"working_dir": working_dir, "ref": snapshot_ref},
+            label="Restore pre-existing changes",
+        )
+        if code != 0:
+            raise RuntimeError(f"git stash apply exited with status {code}")
+
+
+class AIApplyAction(Action):
+    """`ai.apply` — keep the agent's changes: stage everything and commit it as a
+    durable, audited commit in the jailed working dir. Refuses on a read-only
+    session (defence in depth; the API also 403s). A clean tree is a no-op."""
+
+    async def run(self, ctx: JobContext) -> None:
+        params = ctx.rendered.params_sanitized
+        working_dir = params["working_dir"]
+        message = params["message"]
+        session = _load_ai_session(ctx, params["session_id"])
+        if session is not None and session.read_only:
+            raise RuntimeError("cannot apply changes for a read-only session")
+
+        await _git(
+            ctx, "ai.git_add_all", {"working_dir": working_dir}, label="Stage changes"
+        )
+        status = await _git_capture(
+            ctx, "ai.git_status", {"working_dir": working_dir},
+            label="Check for staged changes",
+        )
+        if not status.stdout.strip():
+            await ctx.emit("No changes to apply — the working tree is clean.")
+        else:
+            code = await _git(
+                ctx,
+                "ai.git_commit",
+                {"working_dir": working_dir, "message": message},
+                label="Commit changes",
+            )
+            if code != 0:
+                raise RuntimeError(f"git commit exited with status {code}")
+            await ctx.emit("Applied — changes committed in the jailed working dir.")
+        if session is not None:
+            session.disposition = "applied"
+            session.status = "applied"
+            ctx.session.commit()
+
+
+class AIRollbackAction(Action):
+    """`ai.rollback` — discard the agent's changes and restore the pre-change
+    snapshot exactly (reset --hard base, clean untracked, re-apply pre-existing
+    dirty snapshot). Reads base/snapshot from the session row."""
+
+    async def run(self, ctx: JobContext) -> None:
+        params = ctx.rendered.params_sanitized
+        working_dir = params["working_dir"]
+        session = _load_ai_session(ctx, params["session_id"])
+        if session is None:
+            raise RuntimeError(f"AI session {params['session_id']} not found")
+        base = session.base_commit
+        if not base:
+            raise RuntimeError("session has no pre-change base commit to roll back to")
+
+        await _rollback_to_snapshot(ctx, working_dir, base, session.snapshot_ref)
+        session.disposition = "rolledback"
+        session.status = "rolledback"
+        ctx.session.commit()
+        await ctx.emit("Rolled back — working dir restored to the pre-change snapshot.")

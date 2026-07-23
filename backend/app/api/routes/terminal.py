@@ -65,12 +65,25 @@ def _redis() -> aioredis.Redis:
     return aioredis.from_url(get_settings().redis_url, decode_responses=True)
 
 
-async def _store_ticket(ticket: str, session_id: int, server_id: int, user_id: int) -> None:
+async def _store_ticket(
+    ticket: str,
+    session_id: int,
+    server_id: int,
+    user_id: int,
+    *,
+    init_command: str | None = None,
+) -> None:
     r = _redis()
     try:
         ttl = get_settings().terminal_ticket_ttl_seconds
-        value = json.dumps({"session_id": session_id, "server_id": server_id, "user_id": user_id})
-        await r.set(f"{_TICKET_PREFIX}{ticket}", value, ex=ttl)
+        payload = {"session_id": session_id, "server_id": server_id, "user_id": user_id}
+        # A scoped AI-agent session (session 5.1) supplies the jail's launch line
+        # ("cd <working_dir> && <agent command>") which is written to the PTY on
+        # connect. It is server-built from validated fields — never raw browser
+        # input — so it can't inject beyond the operator-registered command.
+        if init_command is not None:
+            payload["init_command"] = init_command
+        await r.set(f"{_TICKET_PREFIX}{ticket}", json.dumps(payload), ex=ttl)
     finally:
         await r.aclose()
 
@@ -314,6 +327,12 @@ async def terminal_ws(websocket: WebSocket, ticket: str | None = None) -> None:
                 request_pty=True,
                 encoding=None,
             )
+
+            # Scoped AI-agent session (5.1): drop into the jailed working dir and
+            # launch the registered agent command. Server-built line only.
+            init_command = payload.get("init_command")
+            if init_command:
+                process.stdin.write((init_command + "\n").encode("utf-8"))
 
             idle_timer = asyncio.get_running_loop().time()
             warned = False

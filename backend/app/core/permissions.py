@@ -21,6 +21,10 @@ USER_MANAGE = "user:manage"
 SETTINGS_MANAGE = "settings:manage"
 SCHEDULE_MANAGE = "schedule:manage"  # create/edit/enable/disable recurring schedules
 SSL_MANAGE = "ssl:manage"  # manage site domains, nginx vhosts, TLS certificates
+# AI-driven shell-adjacent actions are security-sensitive (ISO 27001 review before
+# M5): only Admin + Developer hold them; Operator/Read-only never do.
+AI_MANAGE = "ai:manage"  # register/edit/delete scoped AI agent configs
+AI_OPERATE = "ai:operate"  # start a scoped agent session; apply/rollback its diff
 
 # name -> permissions. Admin gets the wildcard; Read-only can never mutate
 # (CLAUDE.md golden rule 7).
@@ -38,6 +42,8 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         TERMINAL_ACCESS,
         SCHEDULE_MANAGE,
         SSL_MANAGE,
+        AI_MANAGE,
+        AI_OPERATE,
     ],
     "Operator": [
         READ,
