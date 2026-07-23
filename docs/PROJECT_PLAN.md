@@ -69,6 +69,9 @@ Reference: `CLAUDE.md` (rules), `docs/implementation-plan.md` (architecture), `d
 ## Phase 4 — Full-system DR
 4.1 restic per server → S3 (config tier: nginx/supervisor/redis/mariadb configs + `dpkg --get-selections`) · 4.2 Weekly system snapshots + retention + `restic check` · 4.3 DR runbook generator · 4.4 Compliance report exports (audit + backup evidence, ISO-friendly).
 
+- [x] **4.4 Compliance/audit report exports (PDF/CSV, ISO-friendly).** `POST /api/compliance-reports/generate` (new `report:generate` permission — Admin + Developer; Read-only 403). Three report types: `access` (AuditLog date-range slice), `backup_evidence` (per-site BackupPolicy + ComplianceStatus join), `access_review` (users × roles point-in-time). CSV (UTF-8 BOM for Excel) + PDF (reportlab A4/landscape, dark header, alternating rows). SHA-256 content-hash of each export recorded in `AuditLog` via `compliance.export_report` action (tamper-evidence). Migration `a2b6d4f8c3e1` (data-only: adds `report:generate` to Developer role permissions JSON). Frontend: `ComplianceReportGenerator.vue` on the Audit page (date-range picker, report-type select, PDF/CSV toggle, generate → download, hash display). `reportlab>=4.2` added to pyproject.toml. 21 new pytest / ruff clean / vite build clean. Migration chain: `f8b3d1c6a2e9` → `a2b6d4f8c3e1`.
+  *Accept:* Admin generates date-range access report → downloads as CSV + PDF with correct rows + hash in AuditLog; same for backup-evidence + access-review; Read-only gets 403; hash in response header matches SHA-256 of body.
+
 ## Phase 5 — AI
 5.1 AI Agents module (register Claude Code etc.: command template, working-dir scope, read-only mode, pre-change backup, allowed servers; session in terminal; diff review → apply/rollback) · 5.2 Panel copilot ("Ask AI to analyze" on failed jobs; NL actions in palette).
 

@@ -23,6 +23,8 @@ dependencies = [
     # app/core/ai.py so the package is only needed when the platform actually
     # calls out; unit tests run against a mocked client.
     "anthropic>=0.69",
+    # PDF generation for compliance report exports (session 4.4).
+    "reportlab>=4.2",
     "argon2-cffi>=23.1",
     "pyjwt>=2.10",
     "email-validator>=2.2",

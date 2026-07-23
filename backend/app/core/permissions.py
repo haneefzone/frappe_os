@@ -21,6 +21,7 @@ USER_MANAGE = "user:manage"
 SETTINGS_MANAGE = "settings:manage"
 SCHEDULE_MANAGE = "schedule:manage"  # create/edit/enable/disable recurring schedules
 SSL_MANAGE = "ssl:manage"  # manage site domains, nginx vhosts, TLS certificates
+REPORT_GENERATE = "report:generate"  # generate compliance / audit report exports (session 4.4)
 
 # name -> permissions. Admin gets the wildcard; Read-only can never mutate
 # (CLAUDE.md golden rule 7).
@@ -38,6 +39,7 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         TERMINAL_ACCESS,
         SCHEDULE_MANAGE,
         SSL_MANAGE,
+        REPORT_GENERATE,
     ],
     "Operator": [
         READ,
