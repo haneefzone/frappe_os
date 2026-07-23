@@ -19,12 +19,12 @@ passphrase, S3 keys) is ever returned.
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import CurrentUser, require_admin
+from app.api.deps import require_admin
 from app.api.routes.jobs import get_job_runner
 from app.audit import Audit
 from app.core import storage as st
