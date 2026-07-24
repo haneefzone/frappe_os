@@ -214,7 +214,7 @@ def upload_logo(
 
 
 @router.get("/api/settings/logo")
-def get_logo(db: DbSession, _: Annotated[object, Depends(require(READ))]) -> FileResponse:
+def get_logo(db: DbSession) -> FileResponse:
     PlatformSettings.get_or_create(db)
     path = _stored_file("logo", _LOGO_EXT)
     if path is None:
@@ -258,7 +258,7 @@ def upload_logo_dark(
 
 
 @router.get("/api/settings/logo-dark")
-def get_logo_dark(db: DbSession, _: Annotated[object, Depends(require(READ))]) -> FileResponse:
+def get_logo_dark(db: DbSession) -> FileResponse:
     PlatformSettings.get_or_create(db)
     path = _stored_file("logo-dark", _LOGO_EXT)
     if path is None:
@@ -301,7 +301,7 @@ def upload_favicon(
 
 
 @router.get("/api/settings/favicon")
-def get_favicon(db: DbSession, _: Annotated[object, Depends(require(READ))]) -> FileResponse:
+def get_favicon() -> FileResponse:
     path = _stored_file("favicon", _FAVICON_EXT)
     if path is None:
         raise HTTPException(status_code=404, detail="No favicon configured.")

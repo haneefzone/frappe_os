@@ -1,7 +1,7 @@
 """brand token layer (session 6.6)
 
 Revision ID: b3c4d5e6f7a8
-Revises: f4c6e8a0b2d1
+Revises: f8b3d1c6a2e9
 Create Date: 2026-07-19 00:00:00
 
 Adds the extended brand columns to platform_settings:
@@ -19,7 +19,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "b3c4d5e6f7a8"
-down_revision = "a1d2c3b4e5f6"
+down_revision = "f8b3d1c6a2e9"
 branch_labels = None
 depends_on = None
 
