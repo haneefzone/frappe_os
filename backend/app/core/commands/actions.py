@@ -57,6 +57,11 @@ class JobContext(Protocol):
         """Write a synthetic (runner-generated) log line."""
         ...
 
+    def register_secret(self, value: str) -> None:
+        """Register a plaintext secret resolved during the run (e.g. a restic
+        repo password) so the log redactor masks it in every line (4.1)."""
+        ...
+
     def read_file(self, path: str, *, chunk_size: int = ...):
         """Yield a remote file's raw bytes over SSH in chunks — for streaming a
         backup artifact to offsite storage without buffering it whole (2.2)."""
@@ -2538,3 +2543,282 @@ class DriftCheckAction(Action):
                     server_name=server.name if server else str(ctx.server_id),
                     artifact_keys=[r.artifact_key for r in drifted],
                 )
+# --------------------------------------------------------------------------- #
+# restic config-tier DR backups (session 4.1)
+#
+# Each managed server has one `ResticRepo` (its OS/config tier), stored inside an
+# existing 2.2 StorageTarget bucket. restic dedups + encrypts client-side. The
+# repo password + the target's S3 keys are secrets: they reach restic ONLY via
+# its process environment — a 0600 env file staged on the target and sourced for
+# the single command (`set -a; . file; exec restic …`). They are NEVER placed on
+# an argv element, logged, or persisted in the clear (golden rule 6); the action
+# also registers them with the log redactor as belt-and-suspenders.
+# --------------------------------------------------------------------------- #
+
+# Source the staged 0600 env file (RESTIC_PASSWORD, AWS_*) then exec the restic
+# argv passed as positional parameters. $1 is the env-file path (shifted away);
+# $@ afterward is the fixed restic argv — nothing is interpolated into the script.
+_RESTIC_ENV_WRAP = 'set -a; . "$1"; shift; exec "$@"'
+
+# Detect the tier's readable config dirs (only existing paths are backed up so a
+# server without e.g. supervisor doesn't fail the snapshot) and stage the
+# `dpkg --get-selections` manifest inside the same tree. Emits one existing path
+# per line on stdout so the action can parse the real source set.
+_RESTIC_STAGE_SCRIPT = r'''
+set -e
+stage="$HOME/.fdm-restic-stage"
+rm -rf "$stage"
+mkdir -p "$stage"
+dpkg --get-selections > "$stage/dpkg-selections.txt"
+echo "$stage/dpkg-selections.txt"
+shift
+for p in "$@"; do
+  if [ -e "$p" ]; then echo "$p"; fi
+done
+'''
+
+# Install a pinned restic to the SSH user's ~/.local/bin when none is on PATH.
+# $1 is the fixed release URL (a deterministic constant — never user input).
+_RESTIC_INSTALL_SCRIPT = r'''
+set -e
+url="$1"
+dest="$HOME/.local/bin/restic"
+mkdir -p "$HOME/.local/bin"
+tmp="$(mktemp)"
+curl -fsSL "$url" -o "$tmp.bz2"
+bunzip2 -f "$tmp.bz2"
+mv "$tmp" "$dest"
+chmod 755 "$dest"
+"$dest" version
+'''
+
+
+async def _restic_prepare(ctx: JobContext):
+    """Load this server's ResticRepo + its StorageTarget, resolve the restic env
+    (repo URI + decrypted secrets), and register the secrets with the log
+    redactor. Returns (repo_row, ResticEnv). Raises ResticError if unconfigured."""
+    from sqlalchemy import select
+
+    from app.core import restic as rst
+    from app.models.restic import ResticRepo
+    from app.models.storage import StorageTarget
+
+    repo = ctx.session.scalars(
+        select(ResticRepo).where(ResticRepo.server_id == ctx.server_id)
+    ).first()
+    if repo is None:
+        raise rst.ResticError("this server has no restic repo configured")
+    target = (
+        ctx.session.get(StorageTarget, repo.storage_target_id)
+        if repo.storage_target_id
+        else None
+    )
+    env = rst.resolve_env(repo, target)
+    # Redact the decrypted secrets from every subsequent log line (rule 6).
+    for secret in env.secret_values:
+        ctx.register_secret(secret)
+    return repo, env
+
+
+async def _stage_restic_env(ctx: JobContext, env) -> str:
+    """Write the restic env file (RESTIC_PASSWORD, AWS_*) to a 0600 temp file on
+    the target via base64 (never streamed), returning its path. The plaintext is
+    only ever inside this 0600 file; it is removed by the caller's `finally`."""
+    import base64
+    from secrets import token_hex
+
+    env_path = f"/tmp/fdm-restic-env-{token_hex(8)}"
+    b64 = base64.b64encode(env.env_file_content().encode()).decode()
+    res = await ctx.capture(["bash", "-c", _WRITE_KEY_SCRIPT, "_", b64, env_path])
+    if res.exit_code != 0:
+        raise RuntimeError("failed to stage restic env file on the target")
+    return env_path
+
+
+def _restic_wrap(env_path: str, restic_argv: list[str]) -> list[str]:
+    """Wrap a rendered restic argv so it runs with the staged env file sourced."""
+    return ["bash", "-c", _RESTIC_ENV_WRAP, "_", env_path, *restic_argv]
+
+
+class ResticInstallAction(Action):
+    """`restic.install` — ensure a pinned restic is available on the target.
+
+    Detects `restic version`; if restic is already present it just reports the
+    version (idempotent). Otherwise it downloads the pinned release for the
+    server's architecture into `~/.local/bin/restic` (no root / no sudo) and
+    verifies it. Touches no repo and no secret."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import restic as rst
+
+        with ctx.step("Detect restic"):
+            res = await ctx.capture(["bash", "-lc", "restic version || true"])
+            version = rst.parse_installed_version(res.stdout)
+            if version:
+                await ctx.emit(f"restic already installed: {version}")
+                return
+            await ctx.emit("restic not found on PATH — installing the pinned release.")
+
+        with ctx.step("Detect architecture"):
+            arch_res = await ctx.capture(["uname", "-m"])
+            arch = (arch_res.stdout or "").strip()
+            url = rst.install_url(arch)  # ResticError on an unsupported arch
+            await ctx.emit(f"Architecture {arch}; fetching {url}")
+
+        with ctx.step(f"Install restic {rst.RESTIC_VERSION}"):
+            code = await ctx.stream(["bash", "-c", _RESTIC_INSTALL_SCRIPT, "_", url])
+            if code != 0:
+                raise RuntimeError(f"restic install exited with status {code}")
+            await ctx.emit(
+                "restic installed to ~/.local/bin/restic — ensure ~/.local/bin is "
+                "on the PATH for scheduled runs."
+            )
+
+
+class ResticInitAction(Action):
+    """`restic.init` — create the server's restic repository in its S3 bucket.
+
+    Resolves the repo + S3 secrets (in memory), stages the 0600 env file, runs
+    `restic init`, and flips `initialized` true. Re-running against an existing
+    repo is a no-op restic reports as an error ("already initialized"); we treat
+    that specific case as success so init stays idempotent."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import restic as rst
+        from app.core.commands import get_template, render
+
+        repo, env = await _restic_prepare(ctx)
+        cmd = render(get_template("restic.init"), {"repo": env.repository})
+        env_path = await _stage_restic_env(ctx, env)
+        try:
+            with ctx.step("Initialise restic repository"):
+                await ctx.emit(f"$ restic -r {rst.redacted_repository(env.repository)} init")
+                res = await ctx.capture(_restic_wrap(env_path, list(cmd.argv)))
+                combined = f"{res.stdout}\n{res.stderr}"
+                for line in combined.splitlines():
+                    if line.strip():
+                        await ctx.emit(line)
+                already = "already initialized" in combined or "already exists" in combined
+                if res.exit_code != 0 and not already:
+                    raise RuntimeError(f"restic init exited with status {res.exit_code}")
+                repo.initialized = True
+                ctx.session.commit()
+                await ctx.emit(
+                    "Repository ready."
+                    if not already
+                    else "Repository was already initialised — nothing to do."
+                )
+        finally:
+            await ctx.capture(["rm", "-f", env_path])
+
+
+class ResticBackupAction(Action):
+    """`restic.backup` — snapshot the server's OS/config tier to its restic repo.
+
+    Steps: resolve repo + secrets → stage the config set (existing config dirs +
+    the `dpkg --get-selections` manifest) → stage the 0600 env file → run
+    `restic backup` over that set → parse the snapshot id and record the evidence
+    timestamps on the ResticRepo row. The env file + staging dir are always
+    removed in `finally`. Non-idempotent (one snapshot per run)."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import restic as rst
+        from app.core.commands import get_template, render
+
+        repo, env = await _restic_prepare(ctx)
+        if not repo.initialized:
+            raise rst.ResticError(
+                "restic repository is not initialised — run init before a backup"
+            )
+        server = ctx.session.get(_server_model(), ctx.server_id)
+        host = (server.hostname or server.name) if server else "server"
+
+        env_path = await _stage_restic_env(ctx, env)
+        try:
+            with ctx.step("Stage config set + package manifest"):
+                res = await ctx.capture(
+                    ["bash", "-c", _RESTIC_STAGE_SCRIPT, "_", *rst.CONFIG_PATHS]
+                )
+                if res.exit_code != 0:
+                    raise RuntimeError("failed to stage config set on the target")
+                sources = [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]
+                if not sources:
+                    raise RuntimeError("no config sources found to back up")
+                await ctx.emit("Backing up: " + ", ".join(sources))
+
+            cmd = render(
+                get_template("restic.backup"),
+                {"repo": env.repository, "host": host},
+            )
+            restic_argv = [*cmd.argv, *sources]
+            with ctx.step("restic backup (config tier)"):
+                await ctx.emit(
+                    f"$ restic -r {rst.redacted_repository(env.repository)} backup "
+                    f"--tag {rst.CONFIG_TAG} --host {host} [config set]"
+                )
+                res = await ctx.capture(_restic_wrap(env_path, restic_argv), timeout=3600)
+                combined = f"{res.stdout}\n{res.stderr}"
+                for line in combined.splitlines():
+                    if line.strip():
+                        await ctx.emit(line)
+                # restic exit 3 = snapshot created but some files were unreadable
+                # (root-only config as the non-sudo SSH user); still a valid
+                # config snapshot, so 0 and 3 are both success.
+                if res.exit_code not in (0, 3):
+                    raise RuntimeError(f"restic backup exited with status {res.exit_code}")
+                snap = rst.parse_snapshot_id(combined)
+                repo.last_backup_at = _now_utc()
+                if snap:
+                    repo.last_snapshot_id = snap
+                ctx.session.commit()
+                await ctx.emit(
+                    f"Config snapshot saved: {snap or '(id not parsed)'}"
+                    + (" — some root-only files were skipped." if res.exit_code == 3 else "")
+                )
+        finally:
+            await ctx.capture(["rm", "-f", env_path])
+            await ctx.capture(["bash", "-c", 'rm -rf "$HOME/.fdm-restic-stage"'])
+
+
+class ResticSnapshotsAction(Action):
+    """`restic.snapshots` — list the config-tier snapshots in the repo (evidence).
+
+    Read-only; resolves secrets, stages the env file, runs `restic snapshots`
+    filtered to the config tag, and streams the listing. Idempotent."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import restic as rst
+        from app.core.commands import get_template, render
+
+        repo, env = await _restic_prepare(ctx)
+        cmd = render(get_template("restic.snapshots"), {"repo": env.repository})
+        env_path = await _stage_restic_env(ctx, env)
+        try:
+            with ctx.step("List config snapshots"):
+                await ctx.emit(
+                    f"$ restic -r {rst.redacted_repository(env.repository)} "
+                    f"snapshots --tag {rst.CONFIG_TAG}"
+                )
+                res = await ctx.capture(_restic_wrap(env_path, list(cmd.argv)))
+                combined = f"{res.stdout}\n{res.stderr}"
+                for line in combined.splitlines():
+                    if line.strip():
+                        await ctx.emit(line)
+                if res.exit_code != 0:
+                    raise RuntimeError(
+                        f"restic snapshots exited with status {res.exit_code}"
+                    )
+        finally:
+            await ctx.capture(["rm", "-f", env_path])
+
+
+def _server_model():
+    from app.models.server import Server
+
+    return Server
+
+
+def _now_utc():
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC)

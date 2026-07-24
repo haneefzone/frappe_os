@@ -190,6 +190,13 @@ class LogWriter:
         )
         self._seq = int(existing or 0)
 
+    def add_secret(self, value: str) -> None:
+        """Register a plaintext secret resolved at run time (e.g. a restic repo
+        password decrypted by an action) so every subsequent log line redacts it
+        (rule 6). Idempotent; empty values are ignored."""
+        if value and value not in self._secrets:
+            self._secrets.append(value)
+
     def _redact(self, content: str) -> str:
         from app.core.commands import MASK
 
@@ -410,6 +417,12 @@ class JobContextImpl:
 
     async def emit(self, text: str, stream: str = "system") -> None:
         self._log.append(stream, text)
+
+    def register_secret(self, value: str) -> None:
+        """Register a run-time-resolved secret with the log redactor (rule 6).
+        Used by actions that decrypt a credential mid-run (e.g. the restic repo
+        password) so it can never leak into a streamed/captured log line."""
+        self._log.add_secret(value)
 
 
 # --------------------------------------------------------------------------- #

@@ -1165,9 +1165,119 @@ register(
     )
 )
 
+# --------------------------------------------------------------------------- #
+# restic config-tier DR backups (session 4.1)
+#
+# Each managed server has one restic repository (its OS/config tier) inside an
+# existing 2.2 StorageTarget bucket. The repo password + S3 keys are secrets that
+# reach restic ONLY via its process environment (a 0600 env file the action
+# stages + sources), never on an argv element and never logged (golden rule 6) —
+# so these templates declare NO secret params: their argv is entirely non-secret
+# (the repo URI, the fixed config tag, the snapshot host). `restic.install`
+# needs no repo; init/backup/snapshots take a per-server lock so two restic ops
+# on the same server can't race the repo. All gated on server:manage
+# (Admin/Developer manage; Operator/Read-only cannot — golden rule 7).
+# Imported locally to keep concurrent-session edits to this file collision-free.
+# --------------------------------------------------------------------------- #
+from app.core.commands.actions import (  # noqa: E402
+    ResticBackupAction as _ResticBackupAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    ResticInitAction as _ResticInitAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    ResticInstallAction as _ResticInstallAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    ResticSnapshotsAction as _ResticSnapshotsAction,
+)
+from app.core.restic import CONFIG_TAG as _CONFIG_TAG  # noqa: E402
+
+# A restic S3 repository URI: `s3:<endpoint-or-host>/<bucket>[/<prefix>]`. Built
+# server-side from the 2.2 StorageTarget (never fresh user input on this path),
+# but validated as its own argv element anyway: a shell-safe whitelist (no
+# spaces, no ; ` $ ( ) & | < > \ or quotes) so it can never break out of its
+# argv slot even inside the env-file wrapper.
+RESTIC_REPO_URI = r"s3:[A-Za-z0-9._:/-]{1,300}"
+
+# The --host label restic stamps on a snapshot: the managed server's hostname (or
+# name). Shell-safe hostname whitelist; its own argv element.
+RESTIC_HOST = r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}"
+
+# `restic.install` — detect restic; install the pinned release to ~/.local/bin
+# when absent (no root). Read-only-ish (never touches the repo/secrets); no lock.
+register(
+    CommandTemplate(
+        action_name="restic.install",
+        argv=("true",),  # nominal; ResticInstallAction drives detect + install.
+        cwd=None,
+        params=(),
+        action_class=_ResticInstallAction,
+        idempotent=True,  # detect-or-install is safely repeatable.
+        requires_lock=False,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
+# `restic init` — create the repository in the bucket. The action wraps this
+# rendered argv in the env-file sourcing wrapper so RESTIC_PASSWORD/AWS_* reach
+# restic via env, never argv. Non-idempotent at the template level; the action
+# treats "already initialized" as success. Per-server lock.
+register(
+    CommandTemplate(
+        action_name="restic.init",
+        argv=("restic", "-r", "{repo}", "init"),
+        cwd=None,
+        params=(ParamSpec("repo", regex=RESTIC_REPO_URI),),
+        action_class=_ResticInitAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
 # Session 6.2: the platform-local `report.generate` template lives in its own
 # module because it depends on the reports package (nothing else in the registry
 # does) and because a local, non-SSH template deserves to be visibly separate
 # from the remote-command catalogue above. Imported last, for the side effect of
 # registering itself — `register` is already defined by this point.
 from app.core.commands import report_actions as _report_actions  # noqa: E402,F401
+# `restic backup` — snapshot the OS/config tier. The action appends the (constant)
+# config source paths + the staged dpkg manifest to this rendered prefix and wraps
+# it in the env-file wrapper. One snapshot per run, so non-idempotent. Per-server
+# lock so a backup and an init/snapshots can't race the repo.
+register(
+    CommandTemplate(
+        action_name="restic.backup",
+        argv=("restic", "-r", "{repo}", "backup", "--tag", _CONFIG_TAG, "--host", "{host}"),
+        cwd=None,
+        params=(
+            ParamSpec("repo", regex=RESTIC_REPO_URI),
+            ParamSpec("host", regex=RESTIC_HOST),
+        ),
+        action_class=_ResticBackupAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
+# `restic snapshots` — read-only evidence listing of the config-tier snapshots.
+# Idempotent (safe to retry). Per-server lock kept off so it never blocks/510s a
+# concurrent read; the action only reads.
+register(
+    CommandTemplate(
+        action_name="restic.snapshots",
+        argv=("restic", "-r", "{repo}", "snapshots", "--tag", _CONFIG_TAG),
+        cwd=None,
+        params=(ParamSpec("repo", regex=RESTIC_REPO_URI),),
+        action_class=_ResticSnapshotsAction,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
