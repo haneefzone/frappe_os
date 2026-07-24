@@ -200,6 +200,81 @@
       </div>
     </div>
 
+    <!-- Config repos tab (4.1) -->
+    <div v-else-if="activeTab === 'config-repos'" class="min-h-0 flex-1 overflow-y-auto p-8">
+      <div class="mb-4">
+        <h2 class="text-section font-semibold text-ink-1">Config-tier repos</h2>
+        <p class="text-label text-ink-3">
+          Per-server restic repos capturing OS/config snapshots. Read-only evidence view.
+        </p>
+      </div>
+
+      <p v-if="loadError" class="mb-3 text-label text-err" role="alert">{{ loadError }}</p>
+
+      <div v-if="loading" class="rounded-lg border border-line bg-surface">
+        <div v-for="i in 3" :key="i" class="flex items-center gap-6 border-b border-line px-4 py-3 last:border-0">
+          <div class="h-3.5 w-40 animate-pulse rounded bg-raised" />
+          <div class="h-3.5 w-16 animate-pulse rounded bg-raised" />
+          <div class="h-3.5 w-24 animate-pulse rounded bg-raised" />
+        </div>
+      </div>
+
+      <EmptyState
+        v-else-if="resticRepos.length === 0"
+        :icon="LucideShieldCheck"
+        title="No config repos"
+        message="Configure a restic repo on a server to start capturing config-tier snapshots."
+      />
+
+      <div v-else class="overflow-hidden rounded-lg border border-line bg-surface">
+        <table class="w-full text-left">
+          <thead>
+            <tr class="border-b border-line text-meta uppercase tracking-wide text-ink-3">
+              <th class="px-4 py-2 font-medium">Server</th>
+              <th class="px-4 py-2 font-medium">Kind</th>
+              <th class="px-4 py-2 font-medium">Storage</th>
+              <th class="px-4 py-2 font-medium">Initialized</th>
+              <th class="px-4 py-2 font-medium">Last backup</th>
+              <th class="px-4 py-2 font-medium">Snapshot</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-line text-label">
+            <tr v-for="repo in resticRepos" :key="repo.id">
+              <td class="px-4 py-2.5">
+                <span class="font-medium text-ink-1">{{ serverName(repo.server_id) }}</span>
+                <div v-if="repo.prefix" class="truncate font-mono text-meta text-ink-3">{{ repo.prefix }}</div>
+              </td>
+              <td class="px-4 py-2.5">
+                <StatusBadge
+                  :status="kindChip(repo.kind).status"
+                  :label="kindChip(repo.kind).label"
+                />
+              </td>
+              <td class="px-4 py-2.5">
+                <StatusBadge
+                  :status="resticStorageChip(repo.storage_target_name).status"
+                  :label="resticStorageChip(repo.storage_target_name).label"
+                />
+              </td>
+              <td class="px-4 py-2.5">
+                <StatusBadge v-if="repo.initialized" status="ok" label="Yes" />
+                <span v-else class="text-ink-3">No</span>
+              </td>
+              <td
+                class="px-4 py-2.5 text-ink-3"
+                :title="repo.last_backup_at ? absoluteTime(repo.last_backup_at) : undefined"
+              >
+                {{ repo.last_backup_at ? relativeTime(repo.last_backup_at) : '—' }}
+              </td>
+              <td class="px-4 py-2.5 font-mono text-meta text-ink-3" :title="repo.last_snapshot_id ?? undefined">
+                {{ repo.last_snapshot_id ? repo.last_snapshot_id.slice(0, 8) : '—' }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Policies tab (B4.6) -->
     <div v-else-if="activeTab === 'policies'" class="min-h-0 flex-1 overflow-y-auto p-8">
       <div class="mb-4 flex items-center justify-between">
@@ -481,6 +556,7 @@ import {
   type ComplianceStatus,
   type ComplianceSummary,
 } from '../api/compliance'
+import { resticApi, type ResticRepo } from '../api/restic'
 import { serversApi, type Server } from '../api/servers'
 import { sitesApi, type Site } from '../api/sites'
 import { storageApi, type StorageTarget } from '../api/storage'
@@ -496,6 +572,8 @@ import {
   BACKUP_TYPE_LABEL,
   backupStatusDot as statusDot,
   formatBytes,
+  kindChip,
+  resticStorageChip,
   storageChip,
   totalSize,
 } from '../lib/backups'
@@ -517,17 +595,21 @@ const servers = ref<Server[]>([])
 const storageTargets = ref<StorageTarget[]>([])
 const summary = ref<ComplianceSummary | null>(null)
 const policies = ref<Record<number, BackupPolicy>>({})
+const resticRepos = ref<ResticRepo[]>([])
+const servers = ref<Server[]>([])
+const configReposLoaded = ref(false)
 const loading = ref(true)
 const loadError = ref('')
 const busy = ref(false)
 const offsiteBusy = ref('')
 const evaluating = ref(false)
 
-// -- Tabs (B4.6) -------------------------------------------------------------
-type TabKey = 'backups' | 'policies'
+// -- Tabs (B4.6 + 4.1) -------------------------------------------------------
+type TabKey = 'backups' | 'policies' | 'config-repos'
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'backups', label: 'Backups' },
   { key: 'policies', label: 'Policies' },
+  { key: 'config-repos', label: 'Config repos' },
 ]
 const activeTab = ref<TabKey>('backups')
 
@@ -535,6 +617,9 @@ function switchTab(key: TabKey) {
   activeTab.value = key
   if (key === 'policies' && Object.keys(policies.value).length === 0) {
     void loadPolicies()
+  }
+  if (key === 'config-repos' && !configReposLoaded.value) {
+    void loadConfigRepos()
   }
 }
 
@@ -672,6 +757,22 @@ async function loadPolicies() {
   const next: Record<number, BackupPolicy> = {}
   for (const [id, policy] of entries) if (policy) next[id] = policy
   policies.value = next
+}
+
+// Config repos (4.1) — loaded lazily when the Config repos tab is first opened.
+async function loadConfigRepos() {
+  configReposLoaded.value = true
+  try {
+    const [repos, srvs] = await Promise.all([resticApi.list(), serversApi.list()])
+    resticRepos.value = repos
+    servers.value = srvs
+  } catch {
+    // Non-fatal: the tab stays empty with the existing loadError if present.
+  }
+}
+
+function serverName(serverId: number): string {
+  return servers.value.find((s) => s.id === serverId)?.name ?? `Server #${serverId}`
 }
 
 async function evaluateNow() {

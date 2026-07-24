@@ -51,6 +51,24 @@ export const ARTIFACT_LABEL: Record<ArtifactKind | string, string> = {
   config: 'Site config',
 }
 
+/**
+ * Kind chip — distinguishes config-tier restic repos (`config`) from the
+ * 1.11 site backups (`site`) in the §6 backup-evidence view.
+ */
+export function kindChip(kind: string): { label: string; status: Status } {
+  return kind === 'config'
+    ? { label: 'Config', status: 'running' }
+    : { label: 'Site', status: 'muted' }
+}
+
+/**
+ * Storage chip for restic repos: shows the attached S3 target name when set,
+ * or a muted "No target" placeholder while a repo is not yet configured.
+ */
+export function resticStorageChip(targetName: string | null): { label: string; status: Status } {
+  return targetName ? { label: targetName, status: 'ok' } : { label: 'No target', status: 'muted' }
+}
+
 /** Human-readable byte size (binary units). */
 export function formatBytes(bytes: number | null | undefined): string {
   if (bytes == null) return '—'
