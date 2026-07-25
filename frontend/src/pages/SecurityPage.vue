@@ -11,11 +11,13 @@
 
     <div class="min-h-0 flex-1 overflow-y-auto p-8">
       <!-- Tabs -->
-      <div class="mb-6 flex gap-1 border-b border-line">
+      <div role="tablist" class="mb-6 flex gap-1 border-b border-line">
         <button
           v-for="t in tabs"
           :key="t.key"
           type="button"
+          role="tab"
+          :aria-selected="tab === t.key"
           class="fdm-focus -mb-px border-b-2 px-3 py-2 text-label font-medium transition-colors"
           :class="
             tab === t.key
@@ -121,9 +123,8 @@
               variant="subtle"
               theme="red"
               size="sm"
-              :label="disablingMfa ? 'Disabling…' : 'Disable 2FA'"
-              :loading="disablingMfa"
-              @click="disableMfa"
+              label="Disable 2FA"
+              @click="showDisableMfaConfirm = true"
             />
           </div>
           <p v-if="mfaError" class="mt-3 text-label text-err" role="alert">{{ mfaError }}</p>
@@ -344,6 +345,18 @@
         </div>
       </section>
 
+      <!-- ── DISABLE 2FA CONFIRMATION ───────────────────────────────────────── -->
+      <ConfirmModal
+        v-model="showDisableMfaConfirm"
+        title="Disable two-factor authentication?"
+        message="Your account will be protected only by your password."
+        verb="Disable 2FA"
+        variant="destructive"
+        :consequences="['Your authenticator app codes will stop working.', 'Your recovery codes will be invalidated.', 'Anyone with your password can sign in without a second factor.']"
+        :loading="disablingMfa"
+        @confirm="disableMfaConfirmed"
+      />
+
       <!-- ── SECURITY POLICY (all users can read; admins can write) ────────── -->
       <section v-show="tab === 'policy'" class="max-w-2xl space-y-5">
         <p v-if="!canManage" class="rounded-lg border border-line bg-surface px-4 py-2.5 text-label text-ink-2">
@@ -354,7 +367,7 @@
           <div v-for="i in 4" :key="i" class="h-24 animate-pulse rounded-lg border border-line bg-surface" />
         </div>
 
-        <template v-else-if="localPolicy">
+        <template v-else-if="policyLoaded">
           <!-- Password policy -->
           <div class="rounded-lg border border-line bg-surface p-5">
             <h2 class="text-section font-semibold text-ink-1">Password policy</h2>
@@ -503,6 +516,7 @@
               theme="gray"
               :label="savingPolicy ? 'Saving…' : 'Save security policy'"
               :loading="savingPolicy"
+              :disabled="savingPolicy || !!policyError"
               @click="savePolicy"
             />
           </div>
@@ -526,6 +540,7 @@ import LucideShieldCheck from '~icons/lucide/shield-check'
 import { type SessionOut, mfaApi, securityPolicyApi, sessionsApi } from '../api/auth'
 import type { TOTPSetupOut } from '../api/auth'
 import { ApiError } from '../api/client'
+import ConfirmModal from '../components/ConfirmModal.vue'
 import CopyField from '../components/CopyField.vue'
 import EmptyState from '../components/EmptyState.vue'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -606,6 +621,7 @@ const setupCode = ref('')
 const recoveryCodes = ref<string[]>([])
 const settingUpMfa = ref(false)
 const disablingMfa = ref(false)
+const showDisableMfaConfirm = ref(false)
 const mfaError = ref('')
 
 async function startMfaSetup() {
@@ -649,6 +665,11 @@ async function doneMfaSetup() {
   setupCode.value = ''
   recoveryCodes.value = []
   await auth.refreshUser()
+}
+
+function disableMfaConfirmed() {
+  showDisableMfaConfirm.value = false
+  disableMfa()
 }
 
 async function disableMfa() {
@@ -714,6 +735,7 @@ async function loadLoginAttempts() {
 
 // ── Security policy ────────────────────────────────────────────────────────
 const policyLoading = ref(false)
+const policyLoaded = ref(false)
 const policyError = ref('')
 const savingPolicy = ref(false)
 
@@ -739,6 +761,7 @@ async function loadPolicy() {
     localPolicy.session_absolute_timeout_minutes = p.session_absolute_timeout_minutes
     ipAllowlistText.value = p.ip_allowlist.join('\n')
     enforce2faRolesText.value = p.enforce_2fa_roles.join('\n')
+    policyLoaded.value = true
   } catch (e) {
     policyError.value = e instanceof ApiError ? e.message : 'Failed to load security policy.'
   } finally {
@@ -794,7 +817,13 @@ function truncateUA(ua: string): string {
 onMounted(async () => {
   // Support deep-link: /security?tab=2fa (used by the mfa_enrollment_required redirect)
   const queryTab = route.query.tab
-  if (queryTab && ['sessions', '2fa', 'logins', 'policy'].includes(queryTab as string)) {
+  const allowedDeepLinkTabs: TabKey[] = [
+    'sessions',
+    '2fa',
+    'policy',
+    ...(canManage.value ? (['logins'] as TabKey[]) : []),
+  ]
+  if (queryTab && allowedDeepLinkTabs.includes(queryTab as TabKey)) {
     tab.value = queryTab as TabKey
   }
 
