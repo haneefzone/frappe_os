@@ -4,7 +4,7 @@ No schema changes — purely a data migration: adds the new ``report:generate``
 action-class to the Developer role's ``permissions`` JSON array if it was
 seeded from the default. Admin already holds ``*`` and is unaffected.
 
-Revision ID: a2b6d4f8c3e1
+Revision ID: dbaa1a7ed7d6
 Revises: f8b3d1c6a2e9
 Create Date: 2026-07-23 10:00:00.000000
 
@@ -12,9 +12,10 @@ Create Date: 2026-07-23 10:00:00.000000
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
-revision: str = "a2b6d4f8c3e1"
+revision: str = "dbaa1a7ed7d6"
 down_revision: str | None = "f8b3d1c6a2e9"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
