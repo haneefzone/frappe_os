@@ -116,6 +116,49 @@ def test_report_generates_csv_admin(reports_client, report_id):
     assert len(rows) >= 1  # at least the evidence/summary header block
 
 
+def test_csv_neutralises_formula_injection():
+    """Data/value cells that a spreadsheet could execute as a formula (CWE-1236)
+    are quoted; legitimate numbers are left numeric."""
+    from datetime import UTC, datetime
+
+    from app.core.reports import get_report
+    from app.core.reports.registry import ReportResult
+    from app.core.reports.render import render_csv
+
+    report = get_report("job_history")
+    payload = "=cmd|'/c calc'!A1"
+    result = ReportResult(
+        columns=[("val", "Value"), ("num", "Num")],
+        rows=[
+            {"val": payload, "num": "-5"},          # formula payload + legit negative
+            {"val": "@SUM(A1:A9)", "num": "1"},     # @ leader
+            {"val": "+5", "num": "2"},              # + leader that IS a number
+            {"val": "-2+cmd", "num": "3"},          # - leader that is NOT a number
+        ],
+        summary=[("Note", "=1+1")],
+    )
+    text = "".join(
+        render_csv(
+            report,
+            result,
+            generated_at=datetime.now(UTC),
+            generated_by="=HYPERLINK(\"http://evil\")",
+            params={},
+            window=None,
+        )
+    )
+    # Dangerous cells are single-quote–prefixed, never left executable.
+    assert "'" + payload in text
+    assert "'@SUM(A1:A9)" in text
+    assert "'-2+cmd" in text
+    assert "'=1+1" in text            # summary value neutralised
+    assert "'=HYPERLINK" in text      # generated-by header value neutralised
+    assert payload not in text.replace("'" + payload, "")  # no un-prefixed copy
+    # Legitimate numbers stay numeric (not quoted).
+    assert "'-5" not in text          # negative headroom stays a number
+    assert "'+5" not in text          # "+5" parses as a float -> left alone
+
+
 @pytest.mark.parametrize("report_id", sorted(ALL_IDS))
 def test_report_renders_pdf(db_session, report_id):
     """Every report renders a valid PDF (pure reportlab, opens cleanly)."""

@@ -11,7 +11,7 @@
                           job targets no managed server.
 
 Revision ID: a3f1c2b4d5e6
-Revises: f8b3d1c6a2e9
+Revises: dbaa1a7ed7d6
 Create Date: 2026-07-23 05:10:00.000000
 
 """
@@ -24,7 +24,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = 'a3f1c2b4d5e6'
-down_revision: str | Sequence[str] | None = 'f8b3d1c6a2e9'
+down_revision: str | Sequence[str] | None = 'dbaa1a7ed7d6'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

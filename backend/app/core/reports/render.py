@@ -26,6 +26,35 @@ from app.core.reports.registry import ReportDef, ReportResult
 # human-readable instants are in (golden rule 8).
 DISPLAY_TZ_NOTE = "Timestamps are UTC unless a timezone offset is shown."
 
+# Leading characters a spreadsheet (Excel/LibreOffice) may interpret as a
+# formula on open — the CSV-injection vector (CWE-1236). These evidence exports
+# leave the platform by email to auditors, and cells carry user-controlled
+# values (site/domain/server names, sanitized params, user email/full name), so
+# every emitted cell is neutralised before it is written.
+_CSV_FORMULA_LEADERS = ("=", "+", "-", "@")
+
+
+def _csv_safe(value: Any) -> str:
+    """Neutralise a cell that a spreadsheet could execute as a formula.
+
+    Prefixes a single quote when the stringified value begins with a formula
+    leader (`= + - @`) or a leading tab/CR/newline. Legitimate numbers (e.g. a
+    negative headroom `-5`) are left untouched so numeric columns stay numeric —
+    only values that do not parse as a number are quoted.
+    """
+    text = "" if value is None else str(value)
+    if not text:
+        return text
+    first = text[0]
+    if first in ("\t", "\r", "\n"):
+        return "'" + text
+    if first in _CSV_FORMULA_LEADERS:
+        try:
+            float(text)
+        except ValueError:
+            return "'" + text
+    return text
+
 
 def _evidence_lines(
     report: ReportDef,
@@ -94,18 +123,20 @@ def render_csv(
 
     # `# ` prefixes keep the metadata block from being mistaken for data by a
     # spreadsheet import while staying human-readable in a plain text editor.
+    # The label column is already `#`-prefixed; the value column is neutralised
+    # because it carries user-controlled text (generated-by email, parameters).
     for label, value in header:
-        writer.writerow([f"# {label}", value])
+        writer.writerow([f"# {label}", _csv_safe(value)])
     for label, value in result.summary:
-        writer.writerow([f"# {label}", value])
+        writer.writerow([f"# {label}", _csv_safe(value)])
     writer.writerow([])
     yield _drain()
 
-    writer.writerow([head for _, head in result.columns])
+    writer.writerow([_csv_safe(head) for _, head in result.columns])
     yield _drain()
 
     for row in result.rows:
-        writer.writerow([row.get(key, "") for key, _ in result.columns])
+        writer.writerow([_csv_safe(row.get(key, "")) for key, _ in result.columns])
         chunk = _drain()
         if chunk:
             yield chunk
