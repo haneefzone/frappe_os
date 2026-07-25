@@ -371,6 +371,195 @@
             </p>
           </div>
         </section>
+
+        <!-- Platform backup (B4.17 — Admin only) -->
+        <section v-show="tab === 'platform-backup'" class="max-w-3xl space-y-5">
+          <!-- Persistent escrow warning banner -->
+          <div
+            v-if="escrow !== null && !escrow.confirmed"
+            class="flex items-start gap-3 rounded-lg border border-warn/40 bg-warn/8 px-4 py-3.5"
+            role="alert"
+          >
+            <LucideShieldAlert class="mt-0.5 h-4 w-4 shrink-0 text-warn" aria-hidden="true" />
+            <div class="min-w-0 flex-1">
+              <p class="text-label font-medium text-ink-1">Master key not yet escrowed</p>
+              <p class="mt-0.5 text-label text-ink-2">
+                The platform master key and backup passphrase have not been confirmed as escrowed.
+                Loss of these secrets makes all platform backups permanently unrecoverable.
+                Follow the
+                <a href="/docs/master-key-escrow.md" class="underline hover:text-ink-1" target="_blank" rel="noopener">
+                  escrow runbook
+                </a>
+                then tick the box below.
+              </p>
+              <label class="mt-2.5 flex cursor-pointer items-center gap-2 text-label text-ink-1">
+                <input
+                  type="checkbox"
+                  class="h-3.5 w-3.5 rounded border-line accent-ink-1"
+                  :disabled="confirmingEscrow"
+                  @change="onEscrowTick"
+                />
+                I have escrowed the master key and backup passphrase per the runbook
+              </label>
+              <p v-if="escrowError" class="mt-1.5 text-meta text-err" role="alert">{{ escrowError }}</p>
+            </div>
+          </div>
+
+          <!-- Escrow confirmed pill -->
+          <div
+            v-else-if="escrow?.confirmed"
+            class="flex items-center gap-2 rounded-lg border border-ok/40 bg-ok/8 px-4 py-2.5"
+          >
+            <LucideShieldCheck class="h-4 w-4 shrink-0 text-ok" aria-hidden="true" />
+            <span class="text-label text-ink-1">
+              Master key escrowed
+              <span v-if="escrow.confirmed_by_email" class="text-ink-2">
+                · confirmed by {{ escrow.confirmed_by_email }}
+              </span>
+            </span>
+          </div>
+
+          <!-- Latest backup status card -->
+          <div class="rounded-lg border border-line bg-surface">
+            <div class="flex items-center justify-between border-b border-line px-5 py-3.5">
+              <div>
+                <h2 class="text-section font-semibold text-ink-1">Platform self-backup</h2>
+                <p class="mt-0.5 text-label text-ink-2">
+                  Encrypted archive of the platform database + config, stored offsite.
+                </p>
+              </div>
+              <Button
+                v-if="canManage"
+                variant="solid"
+                theme="gray"
+                size="sm"
+                :label="runningBackup ? 'Starting…' : 'Run now'"
+                :loading="runningBackup"
+                @click="runPlatformBackup"
+              >
+                <template #prefix><LucidePlay class="h-3.5 w-3.5" /></template>
+              </Button>
+            </div>
+
+            <!-- Loading skeleton -->
+            <div v-if="pbLoading" class="p-5 space-y-2">
+              <div v-for="i in 4" :key="i" class="h-3.5 w-full animate-pulse rounded bg-raised" />
+            </div>
+
+            <!-- Error -->
+            <p v-else-if="pbError" class="px-5 py-3 text-label text-err" role="alert">{{ pbError }}</p>
+
+            <!-- Empty state -->
+            <EmptyState
+              v-else-if="platformBackups.length === 0"
+              :icon="LucideArchive"
+              title="No platform backups yet"
+              message="Run a backup to create an encrypted, offsite archive of this platform."
+              :cta-label="canManage ? 'Run now' : undefined"
+              @cta="runPlatformBackup"
+            />
+
+            <!-- Latest backup summary card -->
+            <template v-else-if="latestBackup">
+              <div class="grid grid-cols-2 gap-0 divide-x divide-line sm:grid-cols-4">
+                <div class="px-5 py-4">
+                  <span class="block text-meta font-medium uppercase tracking-wide text-ink-2">Status</span>
+                  <StatusBadge :status="pbStatusDot(latestBackup.status)" :label="latestBackup.status" class="mt-1.5" />
+                </div>
+                <div class="px-5 py-4">
+                  <span class="block text-meta font-medium uppercase tracking-wide text-ink-2">Verified</span>
+                  <StatusBadge :status="verifyStatusDot(latestBackup.verify_status)" :label="verifyLabel(latestBackup.verify_status)" class="mt-1.5" />
+                </div>
+                <div class="px-5 py-4">
+                  <span class="block text-meta font-medium uppercase tracking-wide text-ink-2">Size</span>
+                  <span class="mt-1.5 block text-label text-ink-1">{{ formatBytes(latestBackup.size_bytes) }}</span>
+                </div>
+                <div class="px-5 py-4">
+                  <span class="block text-meta font-medium uppercase tracking-wide text-ink-2">Created</span>
+                  <span
+                    class="mt-1.5 block text-label text-ink-1"
+                    :title="absoluteTime(latestBackup.created_at)"
+                  >
+                    {{ relativeTime(latestBackup.created_at) }}
+                  </span>
+                </div>
+              </div>
+              <div class="flex items-center gap-1 border-t border-line px-5 py-3">
+                <span class="text-meta text-ink-3">
+                  Target:&nbsp;{{ latestBackup.storage_target_name ?? '—' }}
+                  <span v-if="latestBackup.error" class="ml-2 text-err">· {{ latestBackup.error }}</span>
+                </span>
+                <div v-if="canManage" class="ml-auto flex items-center gap-1">
+                  <Button
+                    variant="subtle"
+                    theme="gray"
+                    size="sm"
+                    label="Verify"
+                    :disabled="latestBackup.status !== 'success'"
+                    :loading="verifyingId === latestBackup.id"
+                    @click="verifyPlatformBackup(latestBackup)"
+                  />
+                  <Button
+                    variant="subtle"
+                    theme="gray"
+                    size="sm"
+                    label="Download"
+                    :disabled="!latestBackup.object_key"
+                    :loading="downloadingId === latestBackup.id"
+                    @click="downloadPlatformBackup(latestBackup)"
+                  />
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <!-- History table -->
+          <div v-if="platformBackups.length > 0" class="rounded-lg border border-line bg-surface">
+            <h3 class="border-b border-line px-5 py-3 text-section font-semibold text-ink-1">History</h3>
+            <DataTable
+              :columns="pbColumns"
+              :rows="platformBackups"
+              row-key="id"
+              :loading="pbLoading"
+              height="360px"
+              filter-placeholder="Filter backups"
+              empty-title="No backup history"
+              empty-message="Completed backups will appear here."
+            >
+              <template #cell-status="{ row }">
+                <StatusBadge :status="pbStatusDot(row.status)" :label="row.status" />
+              </template>
+              <template #cell-verify_status="{ row }">
+                <StatusBadge :status="verifyStatusDot(row.verify_status)" :label="verifyLabel(row.verify_status)" />
+              </template>
+              <template #cell-created_at="{ row }">
+                <span :title="absoluteTime(row.created_at)">{{ relativeTime(row.created_at) }}</span>
+              </template>
+              <template v-if="canManage" #actions="{ row }">
+                <div class="flex items-center gap-1">
+                  <Button
+                    variant="subtle"
+                    theme="gray"
+                    size="sm"
+                    label="Verify"
+                    :disabled="row.status !== 'success'"
+                    :loading="verifyingId === row.id"
+                    @click="verifyPlatformBackup(row)"
+                  />
+                  <Button
+                    variant="subtle"
+                    theme="gray"
+                    size="sm"
+                    label="Download"
+                    :disabled="!row.object_key"
+                    :loading="downloadingId === row.id"
+                    @click="downloadPlatformBackup(row)"
+                  />
+                </div>
+              </template>
+            </DataTable>
+          </div>
+        </section>
       </template>
     </div>
 
@@ -401,9 +590,15 @@
 <script setup lang="ts">
 import { Button } from 'frappe-ui'
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import LucideArchive from '~icons/lucide/archive'
 import LucideCloud from '~icons/lucide/cloud'
+import LucidePlay from '~icons/lucide/play'
 import LucidePlus from '~icons/lucide/plus'
+import LucideShieldAlert from '~icons/lucide/shield-alert'
+import LucideShieldCheck from '~icons/lucide/shield-check'
 import { ApiError } from '../api/client'
+import { type EscrowStatus, type PlatformBackup, platformApi } from '../api/platform'
 import {
   type Environment,
   type LogoContentType,
@@ -418,18 +613,24 @@ import {
   storageApi,
 } from '../api/storage'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import DataTable from '../components/DataTable.vue'
 import EmptyState from '../components/EmptyState.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import StorageTargetSheet from '../components/StorageTargetSheet.vue'
 import { toast } from '../components/toast'
+import type { DataTableColumn } from '../components/types'
+import type { Status } from '../components/types'
+import { formatBytes } from '../lib/backups'
+import { absoluteTime, relativeTime } from '../lib/servers'
 import { useAuthStore } from '../stores/auth'
 import { useSettingsStore } from '../stores/settings'
 
+const router = useRouter()
 const auth = useAuthStore()
 const settingsStore = useSettingsStore()
 const canManage = auth.hasPermission('settings:manage')
 
-type TabKey = 'general' | 'defaults' | 'storage' | 'environment'
+type TabKey = 'general' | 'defaults' | 'storage' | 'environment' | 'platform-backup'
 const tabs = computed<{ key: TabKey; label: string }[]>(() => [
   { key: 'general', label: 'General' },
   { key: 'defaults', label: 'Defaults' },
@@ -437,6 +638,8 @@ const tabs = computed<{ key: TabKey; label: string }[]>(() => [
   // entirely for read-only users since even listing requires that permission.
   ...(canManage ? ([{ key: 'storage', label: 'Storage' }] as const) : []),
   { key: 'environment', label: 'Environment' },
+  // Platform self-backup is Admin-only (B4.17).
+  ...(canManage ? ([{ key: 'platform-backup', label: 'Platform backup' }] as const) : []),
 ])
 const tab = ref<TabKey>('general')
 
@@ -785,8 +988,137 @@ async function doDelete() {
   }
 }
 
+// -- Platform self-backup (B4.17, session 6.3) ---------------------------------
+const platformBackups = ref<PlatformBackup[]>([])
+const escrow = ref<EscrowStatus | null>(null)
+const pbLoading = ref(false)
+const pbError = ref('')
+const runningBackup = ref(false)
+const verifyingId = ref<number | null>(null)
+const downloadingId = ref<number | null>(null)
+const confirmingEscrow = ref(false)
+const escrowError = ref('')
+
+const latestBackup = computed(() => platformBackups.value[0] ?? null)
+
+const pbColumns: DataTableColumn<PlatformBackup>[] = [
+  { key: 'id', label: '#', sortable: true, width: '56px', align: 'right' },
+  { key: 'status', label: 'Status', sortable: true },
+  { key: 'verify_status', label: 'Verified', sortable: true },
+  { key: 'size_bytes', label: 'Size', sortable: true, format: (r) => formatBytes(r.size_bytes) },
+  { key: 'storage_target_name', label: 'Target', format: (r) => r.storage_target_name ?? '—' },
+  { key: 'created_at', label: 'Created', sortable: true },
+]
+
+function pbStatusDot(status: string): Status {
+  switch (status) {
+    case 'success':
+      return 'ok'
+    case 'failed':
+      return 'err'
+    default:
+      return 'running'
+  }
+}
+
+function verifyStatusDot(vs: string): Status {
+  switch (vs) {
+    case 'verified':
+      return 'ok'
+    case 'failed':
+      return 'err'
+    default:
+      return 'muted'
+  }
+}
+
+function verifyLabel(vs: string): string {
+  switch (vs) {
+    case 'verified':
+      return 'Verified'
+    case 'failed':
+      return 'Failed'
+    default:
+      return 'Unverified'
+  }
+}
+
+async function loadPlatformBackup() {
+  if (!canManage) return
+  pbLoading.value = true
+  pbError.value = ''
+  try {
+    const [backups, esc] = await Promise.all([platformApi.listBackups(), platformApi.getEscrow()])
+    platformBackups.value = backups
+    escrow.value = esc
+  } catch (error) {
+    pbError.value = error instanceof Error ? error.message : 'Could not load platform backups.'
+  } finally {
+    pbLoading.value = false
+  }
+}
+
+async function runPlatformBackup() {
+  if (runningBackup.value) return
+  runningBackup.value = true
+  try {
+    const job = await platformApi.runBackup()
+    toast.success('Platform backup started.')
+    await router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not start platform backup.')
+  } finally {
+    runningBackup.value = false
+  }
+}
+
+async function verifyPlatformBackup(backup: PlatformBackup) {
+  if (verifyingId.value != null) return
+  verifyingId.value = backup.id
+  try {
+    const job = await platformApi.verifyBackup(backup.id)
+    toast.success('Verification job started.')
+    await router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not start verification.')
+  } finally {
+    verifyingId.value = null
+  }
+}
+
+async function downloadPlatformBackup(backup: PlatformBackup) {
+  if (downloadingId.value != null) return
+  downloadingId.value = backup.id
+  try {
+    const { url } = await platformApi.downloadBackup(backup.id)
+    window.open(url, '_blank', 'noopener')
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not generate download link.')
+  } finally {
+    downloadingId.value = null
+  }
+}
+
+async function onEscrowTick(event: Event) {
+  const checkbox = event.target as HTMLInputElement
+  if (!checkbox.checked) return
+  if (confirmingEscrow.value) return
+  confirmingEscrow.value = true
+  escrowError.value = ''
+  try {
+    escrow.value = await platformApi.confirmEscrow()
+    toast.success('Escrow confirmed. The warning banner has been cleared.')
+  } catch (error) {
+    checkbox.checked = false
+    escrowError.value = error instanceof Error ? error.message : 'Could not confirm escrow.'
+  } finally {
+    confirmingEscrow.value = false
+  }
+}
+
 onMounted(() => {
   load()
   loadTargets()
+  loadPlatformBackup()
 })
 </script>
