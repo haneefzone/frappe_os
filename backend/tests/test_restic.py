@@ -108,6 +108,53 @@ def test_parse_installed_version_and_snapshot_id():
     assert rst.parse_snapshot_id("nothing here") is None
 
 
+def test_stage_script_emits_every_existing_config_path(tmp_path):
+    """Run the REAL _RESTIC_STAGE_SCRIPT under bash exactly as the action invokes
+    it (``bash -c SCRIPT "_" <CONFIG_PATHS…>``) and assert every existing path is
+    echoed — including the FIRST one. Regression guard for DOO-377: a spurious
+    ``shift`` before ``for p in "$@"`` silently dropped $1 (=/etc/nginx) from
+    every snapshot. The in-memory executor stubs this script's stdout, so only a
+    real-shell test catches it."""
+    import os
+    import subprocess
+
+    # Fake `dpkg` so the test does not depend on the host having it and stays fast.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "dpkg").write_text("#!/bin/sh\necho 'nginx\\tinstall'\n")
+    (bindir / "dpkg").chmod(0o755)
+
+    home = tmp_path / "home"
+    home.mkdir()
+
+    # Mirror CONFIG_PATHS ordering with real temp dirs; leave the 3rd absent so we
+    # also prove non-existent paths are skipped (and that skipping does not shift
+    # the surviving ones out of alignment).
+    present = [tmp_path / "etc" / name for name in ("nginx", "supervisor", "mysql")]
+    for p in present:
+        p.mkdir(parents=True)
+    absent = tmp_path / "etc" / "redis"  # deliberately not created
+    argv_paths = [str(present[0]), str(present[1]), str(absent), str(present[2])]
+
+    env = {**os.environ, "HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}"}
+    proc = subprocess.run(
+        ["bash", "-c", _RESTIC_STAGE_SCRIPT, "_", *argv_paths],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.splitlines()
+
+    # First line is the staged dpkg manifest path; the rest are the existing configs.
+    assert lines[0].endswith("dpkg-selections.txt")
+    assert str(present[0]) in lines, "first config path (nginx analogue) was dropped"
+    emitted_configs = [ln for ln in lines[1:] if ln in {str(p) for p in present}]
+    assert emitted_configs == [str(p) for p in present]
+    assert str(absent) not in lines
+
+
 def test_resolve_env_requires_target_password_and_keys():
     secrets = get_secrets_service()
     repo = ResticRepo(server_id=1, prefix="p", password_enc=None)

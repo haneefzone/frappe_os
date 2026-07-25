@@ -2571,7 +2571,6 @@ rm -rf "$stage"
 mkdir -p "$stage"
 dpkg --get-selections > "$stage/dpkg-selections.txt"
 echo "$stage/dpkg-selections.txt"
-shift
 for p in "$@"; do
   if [ -e "$p" ]; then echo "$p"; fi
 done
