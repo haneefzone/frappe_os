@@ -6,7 +6,7 @@ AsyncSSH session cap; NULL = platform default) and two provenance columns on
 NULL) and `source_server_id` (FK servers, SET NULL).
 
 Revision ID: a2b6d4f8c3e1
-Revises: f7a2c9e1b3d4
+Revises: a3f1c2b4d5e6
 Create Date: 2026-07-11 16:30:00.000000
 
 """
@@ -18,7 +18,10 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = 'a2b6d4f8c3e1'
-down_revision: str | Sequence[str] | None = 'f7a2c9e1b3d4'
+# Chained after the current main head (a3f1c2b4d5e6, DOO-256 reports suite) so
+# the merge keeps a single alembic head (was f7a2c9e1b3d4 at branch-cut; main
+# advanced through 2.3/branding/drift/compliance/reports since).
+down_revision: str | Sequence[str] | None = 'a3f1c2b4d5e6'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
