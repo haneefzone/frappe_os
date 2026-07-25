@@ -330,7 +330,7 @@ async function submit() {
         cooldown_minutes: form.cooldown_minutes,
         channel_email: form.channel_email,
         channel_webhook: form.channel_webhook,
-        email_to: form.email_to || null,
+        email_to: form.channel_email ? (form.email_to || null) : null,
         webhook_url: form.channel_webhook ? (form.webhook_url || null) : null,
         enabled: form.enabled,
       }
@@ -347,7 +347,7 @@ async function submit() {
         cooldown_minutes: form.cooldown_minutes,
         channel_email: form.channel_email,
         channel_webhook: form.channel_webhook,
-        email_to: form.email_to || null,
+        email_to: form.channel_email ? (form.email_to || null) : null,
         webhook_url: form.channel_webhook ? (form.webhook_url || null) : null,
         webhook_secret: form.webhook_secret || null,
         enabled: form.enabled,

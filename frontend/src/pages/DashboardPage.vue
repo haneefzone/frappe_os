@@ -14,8 +14,8 @@
       <p v-if="loadError" class="mb-3 text-label text-err" role="alert">{{ loadError }}</p>
 
       <!-- Loading skeleton -->
-      <div v-if="loading && !data" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
-        <div v-for="i in 6" :key="i" class="rounded-lg border border-line bg-surface p-4">
+      <div v-if="loading && !data" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-7">
+        <div v-for="i in 7" :key="i" class="rounded-lg border border-line bg-surface p-4">
           <div class="h-3 w-24 animate-pulse rounded bg-raised" />
           <div class="mt-3 h-7 w-16 animate-pulse rounded bg-raised" />
           <div class="mt-2 h-3 w-32 animate-pulse rounded bg-raised" />
@@ -177,7 +177,7 @@
 
         <!-- Open incidents panel (session 3.1) -->
         <section
-          v-if="incidentsData && incidentsData.incidents.length > 0"
+          v-if="incidentsData && incidentsData.open_alerts > 0"
           class="rounded-lg border border-err/40 bg-err/5"
         >
           <div class="flex items-center justify-between border-b border-err/30 px-4 py-2.5">
