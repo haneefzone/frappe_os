@@ -12,11 +12,13 @@ export interface ApiErrorBody {
 export class ApiError extends Error {
   status: number
   code: string
+  retryAfter?: number
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, retryAfter?: number) {
     super(message)
     this.status = status
     this.code = code
+    this.retryAfter = retryAfter
   }
 }
 
@@ -27,6 +29,12 @@ export interface UserInfo {
   role: string
   permissions: string[]
   last_login: string | null
+  mfa_enabled?: boolean
+}
+
+export interface LoginOut {
+  mfa_required: boolean
+  user: UserInfo | null
 }
 
 const CSRF_COOKIE = 'fdm_csrf_token'
@@ -40,16 +48,27 @@ function readCookie(name: string): string {
 /** Registered by the auth store; called when a session is gone for good. */
 let onUnauthorized: (() => void) | null = null
 
+/** Registered by the auth store; called on 403 mfa_enrollment_required. */
+let onMfaEnrollmentRequired: (() => void) | null = null
+
 export function setUnauthorizedHandler(handler: () => void) {
   onUnauthorized = handler
 }
 
+export function setMfaEnrollmentRequiredHandler(handler: () => void) {
+  onMfaEnrollmentRequired = handler
+}
+
 async function parseError(response: Response): Promise<ApiError> {
+  const retryAfter =
+    response.status === 429
+      ? (parseInt(response.headers.get('Retry-After') ?? '0', 10) || undefined)
+      : undefined
   try {
     const body = (await response.json()) as ApiErrorBody
-    return new ApiError(response.status, body.error.code, body.error.message)
+    return new ApiError(response.status, body.error.code, body.error.message, retryAfter)
   } catch {
-    return new ApiError(response.status, 'http_error', response.statusText)
+    return new ApiError(response.status, 'http_error', response.statusText, retryAfter)
   }
 }
 
@@ -80,6 +99,12 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
 
   if (!response.ok) {
+    if (response.status === 403) {
+      const errorCode = response.headers.get('X-Error-Code')
+      if (errorCode === 'mfa_enrollment_required') {
+        onMfaEnrollmentRequired?.()
+      }
+    }
     if (response.status === 401 && !path.startsWith('/api/auth/')) onUnauthorized?.()
     throw await parseError(response)
   }
@@ -92,14 +117,12 @@ export const apiClient = {
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
   patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body),
-  // A body is optional but supported — a destructive DELETE carries the
-  // type-the-target-name confirmation (CLAUDE.md rule 5).
   delete: <T>(path: string, body?: unknown) => request<T>('DELETE', path, body),
 }
 
 export const authApi = {
   login: (email: string, password: string) =>
-    apiClient.post<UserInfo>('/api/auth/login', { email, password }),
+    apiClient.post<LoginOut>('/api/auth/login', { email, password }),
   me: () => apiClient.get<UserInfo>('/api/auth/me'),
   logout: () => apiClient.post<void>('/api/auth/logout'),
 }

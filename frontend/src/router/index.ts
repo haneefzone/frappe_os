@@ -13,6 +13,7 @@ import MonitoringPage from '../pages/MonitoringPage.vue'
 import ReportsPage from '../pages/ReportsPage.vue'
 import SchedulesPage from '../pages/SchedulesPage.vue'
 import ServersPage from '../pages/ServersPage.vue'
+import SecurityPage from '../pages/SecurityPage.vue'
 import SettingsPage from '../pages/SettingsPage.vue'
 import SitesPage from '../pages/SitesPage.vue'
 import TerminalPage from '../pages/TerminalPage.vue'
@@ -32,6 +33,7 @@ const pageOverrides: Record<string, Component> = {
   reports: ReportsPage,
   terminal: TerminalPage,
   'audit-log': AuditPage,
+  security: SecurityPage,
   settings: SettingsPage,
 }
 

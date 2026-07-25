@@ -1,5 +1,12 @@
 import { defineStore } from 'pinia'
-import { authApi, setUnauthorizedHandler, type UserInfo } from '../api/client'
+import { mfaApi } from '../api/auth'
+import {
+  authApi,
+  setMfaEnrollmentRequiredHandler,
+  setUnauthorizedHandler,
+  type UserInfo,
+} from '../api/client'
+import { toast } from '../components/toast'
 import { router } from '../router'
 
 export const useAuthStore = defineStore('auth', {
@@ -20,6 +27,13 @@ export const useAuthStore = defineStore('auth', {
     /** Called once by the router guard before the first navigation resolves. */
     async bootstrap() {
       setUnauthorizedHandler(() => this.handleSessionLost())
+      setMfaEnrollmentRequiredHandler(() => {
+        router.push({ name: 'security', query: { tab: '2fa' } })
+        toast.warning(
+          'Two-factor authentication is required for your role. Enrol to continue.',
+          { title: '2FA required' },
+        )
+      })
       try {
         this.user = await authApi.me()
       } catch {
@@ -28,8 +42,23 @@ export const useAuthStore = defineStore('auth', {
       this.initialized = true
     },
 
-    async login(email: string, password: string) {
-      this.user = await authApi.login(email, password)
+    /**
+     * Step 1 of the login flow. Returns true when a 2FA code is required
+     * (mfa_required=true); the caller should show the MFA step and then call
+     * verifyMfa(). Returns false when the login is complete and user is set.
+     */
+    async login(email: string, password: string): Promise<boolean> {
+      const result = await authApi.login(email, password)
+      if (!result.mfa_required && result.user) {
+        this.user = result.user
+      }
+      return result.mfa_required
+    },
+
+    /** Step 2 of the login flow: exchange mfa_pending cookie for a real session. */
+    async verifyMfa(code: string) {
+      const user = await mfaApi.verify(code)
+      this.user = user
     },
 
     async logout() {
@@ -38,6 +67,15 @@ export const useAuthStore = defineStore('auth', {
       } finally {
         this.user = null
         router.push({ name: 'login' })
+      }
+    },
+
+    /** Re-fetch /me to pick up updated fields (e.g. mfa_enabled after enrol/disable). */
+    async refreshUser() {
+      try {
+        this.user = await authApi.me()
+      } catch {
+        // ignore
       }
     },
 

@@ -25,7 +25,7 @@ export default defineConfig({
     exclude: ['frappe-ui'],
     // With frappe-ui excluded, esbuild never scans its imports, so its CJS
     // deps must be pre-bundled explicitly or dev serving fails on them.
-    include: ['feather-icons', 'dompurify', 'socket.io-client', 'dayjs'],
+    include: ['feather-icons', 'dompurify', 'socket.io-client', 'dayjs', 'qrcode'],
   },
   server: {
     // The operator browses from the Windows host into this Hyper-V VM
