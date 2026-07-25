@@ -5,7 +5,7 @@ action-class to the Developer role's ``permissions`` JSON array if it was
 seeded from the default. Admin already holds ``*`` and is unaffected.
 
 Revision ID: dbaa1a7ed7d6
-Revises: f8b3d1c6a2e9
+Revises: c9d4e7a2f1b8
 Create Date: 2026-07-23 10:00:00.000000
 
 """
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "dbaa1a7ed7d6"
-down_revision: str | None = "f8b3d1c6a2e9"
+down_revision: str | None = "c9d4e7a2f1b8"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
