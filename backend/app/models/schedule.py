@@ -50,11 +50,14 @@ SCHEDULE_ACTIONS = (
     # scoped to a site's domains, wired here so 2.1 fires them on a cadence.
     "ssl.certbot_renew",
     "ssl.expiry_scan",
+    # Config drift detection (session 6.7): re-hash a server's tracked config
+    # artefacts and diff against baseline. Server-targeted (see below).
+    "server.drift_check",
 )
 
-# What a schedule points at. Only "site" today (backups + sweeps operate on a
-# site); "bench"/"server" become valid when their scheduled actions land.
-SCHEDULE_TARGET_TYPES = ("site",)
+# What a schedule points at. "site" (backups + sweeps + SSL) and "server" (the
+# 6.7 drift check, which sweeps a whole server's tracked config).
+SCHEDULE_TARGET_TYPES = ("site", "server")
 
 
 class Schedule(Base):

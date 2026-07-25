@@ -106,6 +106,12 @@ class CommandTemplate:
     # the Server row. A secret param NOT listed here is left unresolved, so the
     # `from_sanitized` tripwire in render() still fails it loud.
     secret_sources: dict[str, str] = field(default_factory=dict)
+    # Drift detection (session 6.7): the tracked config artefacts this action
+    # writes. After such a job succeeds, the JobRunner re-hashes these artefacts
+    # and moves their drift baseline forward (app.core.drift.capture_baselines),
+    # so a managed change never registers as drift. Empty = writes no tracked
+    # config. Values are keys from app.core.drift.ARTIFACTS.
+    writes_config: tuple[str, ...] = ()
 
     @property
     def secret_params(self) -> set[str]:

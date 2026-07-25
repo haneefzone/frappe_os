@@ -133,6 +133,17 @@ def _build_fire(db: Session, schedule: Schedule) -> tuple[int, str, dict, object
     manual backup endpoint) so a failed scheduled backup still leaves a visible
     failed record, and its id is threaded into the job params.
     """
+    # server.drift_check is server-targeted: no site/bench resolution, no params.
+    if schedule.action_name == "server.drift_check":
+        if schedule.target_type != "server":
+            raise ScheduleError("server.drift_check requires target_type 'server'")
+        from app.models.server import Server
+
+        server = db.get(Server, schedule.target_id)
+        if server is None:
+            raise ScheduleError(f"server {schedule.target_id} no longer exists")
+        return server.id, None, {}, None
+
     site, bench, server_id = _resolve_site_target(db, schedule)
     target_id = f"{bench.path}::{site.name}"
 

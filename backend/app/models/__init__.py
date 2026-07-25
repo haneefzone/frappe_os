@@ -10,6 +10,7 @@ from app.models.compliance import (
     ComplianceStatus,
 )
 from app.models.domain import Domain
+from app.models.drift import ConfigBaseline
 from app.models.job import CommandJob, CommandStep, LogEntry
 from app.models.monitoring import MonitoringSample
 from app.models.notification import Notification, NotificationPreference
@@ -33,6 +34,7 @@ __all__ = [
     "CommandStep",
     "ComplianceBreachEvent",
     "ComplianceStatus",
+    "ConfigBaseline",
     "Domain",
     "InstalledApp",
     "LogEntry",

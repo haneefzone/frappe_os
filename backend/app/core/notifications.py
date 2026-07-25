@@ -189,6 +189,26 @@ def dispatch_job_event(db: Session, *, job_id: int, action_name: str, status: st
     )
 
 
+def dispatch_config_drift(
+    db: Session, *, server_id: int, server_name: str, artifact_keys: list[str]
+) -> None:
+    """Emit config.drift when a `server.drift_check` finds out-of-band edits.
+
+    Names only the artefact *keys* that drifted (never their content), so no
+    secret can reach a notification channel (golden rule 6)."""
+    if not artifact_keys:
+        return
+    keys = ", ".join(sorted(set(artifact_keys)))
+    dispatch_event(
+        db,
+        event_type="config.drift",
+        title=f"Config drift on {server_name}",
+        body=f"Out-of-band config changes detected on {server_name}: {keys}.",
+        entity_type="server",
+        entity_id=server_id,
+    )
+
+
 def dispatch_uptime_event(
     db: Session, *, site_id: int, site_name: str, up: bool, was_up: bool | None
 ) -> None:

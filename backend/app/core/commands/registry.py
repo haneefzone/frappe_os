@@ -21,6 +21,7 @@ from app.core.commands.actions import (
     DetectToolsAction,
     DiscoverBenchesAction,
     DnsCheckAction,
+    DriftCheckAction,
     EchoDemoAction,
     GetAppAction,
     InstallAppOnSiteAction,
@@ -311,6 +312,9 @@ register(
         requires_lock=True,
         required_permission=SITE_OPERATE,
         run_as=None,
+        # Creating a site writes its site_config.json and may touch the bench's
+        # common_site_config.json — capture both as the new baseline.
+        writes_config=("site_config", "common_site_config"),
         secret_sources={
             # Pulled from the server settings, server-side, never the browser.
             "db_root_pw": "server:mariadb_root_password_enc",
@@ -338,6 +342,9 @@ register(
         requires_lock=True,
         required_permission=SITE_OPERATE,
         run_as=None,
+        # Writes the scheduler flag into the site's site_config.json (session 6.7
+        # drift baseline moves with this managed change).
+        writes_config=("site_config",),
     )
 )
 
@@ -356,6 +363,7 @@ register(
         requires_lock=True,
         required_permission=SITE_OPERATE,
         run_as=None,
+        writes_config=("site_config",),
     )
 )
 
@@ -950,6 +958,9 @@ register(
         requires_lock=True,
         required_permission=BENCH_OPERATE,
         run_as=None,
+        # Production conversion regenerates the root nginx + supervisor config —
+        # move those (reduced-fidelity) baselines with the managed change.
+        writes_config=("nginx.conf", "supervisor.conf", "supervisor.confd"),
     )
 )
 
@@ -1044,6 +1055,9 @@ register(
         requires_lock=True,
         required_permission=SSL_MANAGE,
         run_as=None,
+        # Regenerates the bench's platform-managed nginx vhost dir — capture it
+        # as the new baseline so a managed vhost change is not flagged as drift.
+        writes_config=("nginx_vhosts",),
     )
 )
 
@@ -1097,6 +1111,26 @@ register(
         idempotent=True,
         requires_lock=False,
         required_permission=SSL_MANAGE,
+        run_as=None,
+    )
+)
+
+
+# Drift detection (session 6.7): re-hash every tracked config artefact on a
+# server and diff against baseline. Read-only (cat/find only), so idempotent and
+# safe to auto-retry. Per-server lock so two checks never race. Server-scoped:
+# no params, target_type "server". Requires server:manage to launch (it may
+# establish first-sight baselines); schedulable via the 2.1 Schedule model.
+register(
+    CommandTemplate(
+        action_name="server.drift_check",
+        argv=("true",),  # nominal; DriftCheckAction reads + hashes the artefacts.
+        cwd=None,
+        params=(),
+        action_class=DriftCheckAction,
+        idempotent=True,
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
         run_as=None,
     )
 )

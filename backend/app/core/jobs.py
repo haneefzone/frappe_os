@@ -763,6 +763,25 @@ class JobRunner:
                     attempt=job.retry_count + 1,
                 )
                 await action.run(ctx)
+                # Drift baseline capture (session 6.7): a managed change to a
+                # tracked config artefact must MOVE the baseline (not register as
+                # drift). Runs inside the still-open SSH session, attributed to
+                # this job. Never fails the job — a capture error is logged and
+                # the job still succeeds.
+                template = get_template(job.action_name)
+                if template.writes_config:
+                    try:
+                        from app.core.drift import capture_baselines
+
+                        moved = await capture_baselines(ctx, template.writes_config)
+                        if moved:
+                            await ctx.emit(f"drift baseline updated: {', '.join(moved)}")
+                    except Exception:  # noqa: BLE001 — capture must not fail the job
+                        import logging
+
+                        logging.getLogger("app.jobs").exception(
+                            "drift baseline capture failed for job %s", job.id
+                        )
 
         asyncio.run(_amain())
 
