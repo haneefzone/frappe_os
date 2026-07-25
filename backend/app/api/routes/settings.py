@@ -1,15 +1,22 @@
-"""Settings API (session 1.12, B4.17): white-label + defaults + environment.
+"""Settings API (sessions 1.12 + 6.6): white-label brand layer + defaults + environment.
 
-- GET  /api/settings              the operator-editable settings (public-read).
-- PUT  /api/settings              update General/Defaults (settings:manage).
-- POST /api/settings/logo         upload the white-label logo (settings:manage).
-- GET  /api/settings/logo         stream the current logo (for the sidebar).
-- GET  /api/settings/environment  read-only environment facts.
+- GET  /api/branding              public brand bundle (unauthenticated-safe, session 6.6)
+- GET  /api/settings              the operator-editable settings (read-role required)
+- PUT  /api/settings              update General/Defaults (settings:manage)
+- POST /api/settings/logo         upload the light-theme logo (settings:manage)
+- GET  /api/settings/logo         stream the light logo (for the sidebar)
+- POST /api/settings/logo-dark    upload the dark-theme logo variant (settings:manage)
+- GET  /api/settings/logo-dark    stream the dark logo
+- POST /api/settings/favicon      upload the favicon (settings:manage)
+- GET  /api/settings/favicon      stream the favicon
+- GET  /api/settings/environment  read-only environment facts
 
-The logo is stored under `uploads_dir/branding/` and referenced by the API URL
-`GET /api/settings/logo` (so the SPA needs no separate static mount). Upload is a
-base64 JSON body to avoid a python-multipart dependency. Only `settings:manage`
-(Admin) may mutate; everyone with `read` can view (rule 7).
+Uploads are base64 JSON bodies (avoids a python-multipart dependency). Content type
+is validated server-side (not by extension). Only `settings:manage` (Admin) may
+mutate; every authenticated user can view.
+
+/api/branding intentionally exposes only the public brand bundle and requires no
+auth so the login page and setup wizard can render branded before auth.
 """
 
 import base64
@@ -31,26 +38,46 @@ from app.core.permissions import READ, SETTINGS_MANAGE
 from app.db import get_db
 from app.models.settings import PlatformSettings
 from app.schemas.settings import (
+    ALLOWED_FAVICON_TYPES,
     ALLOWED_LOGO_TYPES,
+    MAX_FAVICON_BYTES,
     MAX_LOGO_BYTES,
+    BrandingOut,
     EnvironmentInfo,
+    FaviconUpload,
     LogoUpload,
     PlatformSettingsOut,
     PlatformSettingsUpdate,
 )
 
-router = APIRouter(prefix="/api/settings", tags=["settings"])
+router = APIRouter(tags=["settings"])
 
 DbSession = Annotated[Session, Depends(get_db)]
 
-# content_type -> file extension for the stored logo.
+# content_type → file extension for stored logos.
 _LOGO_EXT = {
     "image/png": "png",
     "image/jpeg": "jpg",
     "image/svg+xml": "svg",
     "image/webp": "webp",
 }
+
+# content_type → file extension for stored favicons.
+_FAVICON_EXT = {
+    "image/png": "png",
+    "image/x-icon": "ico",
+    "image/vnd.microsoft.icon": "ico",
+}
+
 LOGO_URL = "/api/settings/logo"
+LOGO_DARK_URL = "/api/settings/logo-dark"
+FAVICON_URL = "/api/settings/favicon"
+
+# Lock-down headers for user-uploaded images so a served SVG can't run script.
+_UPLOAD_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    "X-Content-Type-Options": "nosniff",
+}
 
 
 def _branding_dir() -> Path:
@@ -59,30 +86,69 @@ def _branding_dir() -> Path:
     return d
 
 
-def _stored_logo(row: PlatformSettings) -> Path | None:
-    """The on-disk logo file for the current settings row, if any."""
-    if not row.logo_path:
-        return None
-    ext = row.logo_path.rsplit(".", 1)[-1] if "." in row.logo_path else None
-    if not ext:
-        # Older rows stored the bare API URL; probe the known extensions.
-        for candidate in _LOGO_EXT.values():
-            p = _branding_dir() / f"logo.{candidate}"
-            if p.exists():
-                return p
-        return None
-    p = _branding_dir() / f"logo.{ext}"
-    return p if p.exists() else None
+def _stored_file(stem: str, ext_map: dict[str, str]) -> Path | None:
+    """Return the stored file for `stem` (e.g. "logo", "favicon"), or None."""
+    d = _branding_dir()
+    for ext in ext_map.values():
+        p = d / f"{stem}.{ext}"
+        if p.exists():
+            return p
+    return None
 
 
-@router.get("", response_model=PlatformSettingsOut)
+def _decode_upload(content_base64: str, max_bytes: int, label: str) -> bytes:
+    """Strip data-URL prefix, base64-decode, and enforce size cap."""
+    payload = content_base64.split(",", 1)[-1]
+    try:
+        data = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"{label} is not valid base64.") from exc
+    if not data:
+        raise HTTPException(status_code=422, detail=f"{label} is empty.")
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"{label} exceeds the {max_bytes // 1024} KB limit.",
+        )
+    return data
+
+
+def _save_upload(stem: str, ext: str, data: bytes, ext_map: dict[str, str]) -> None:
+    """Atomically replace the stored file for `stem`, pruning old extensions."""
+    d = _branding_dir()
+    for other_ext in ext_map.values():
+        stale = d / f"{stem}.{other_ext}"
+        if other_ext != ext and stale.exists():
+            stale.unlink()
+    (d / f"{stem}.{ext}").write_bytes(data)
+
+
+# --------------------------------------------------------------------------- #
+# Public branding bundle (unauthenticated)                                    #
+# --------------------------------------------------------------------------- #
+
+@router.get("/api/branding", response_model=BrandingOut)
+def get_branding(db: DbSession) -> BrandingOut:
+    """Public brand bundle — safe to call without auth.
+
+    Returns only the fields the login page and setup wizard need before
+    authentication. No sensitive settings leak here.
+    """
+    return BrandingOut.from_model(PlatformSettings.get_or_create(db))
+
+
+# --------------------------------------------------------------------------- #
+# Authenticated settings CRUD                                                 #
+# --------------------------------------------------------------------------- #
+
+@router.get("/api/settings", response_model=PlatformSettingsOut)
 def get_platform_settings(
     db: DbSession, _: Annotated[object, Depends(require(READ))]
 ) -> PlatformSettingsOut:
     return PlatformSettingsOut.from_model(PlatformSettings.get_or_create(db))
 
 
-@router.put("", response_model=PlatformSettingsOut)
+@router.put("/api/settings", response_model=PlatformSettingsOut)
 def update_platform_settings(
     body: PlatformSettingsUpdate,
     db: DbSession,
@@ -91,10 +157,7 @@ def update_platform_settings(
 ) -> PlatformSettingsOut:
     row = PlatformSettings.get_or_create(db)
     fields = body.model_dump(exclude_unset=True)
-    if (
-        "port_range_start" in fields
-        or "port_range_end" in fields
-    ):
+    if "port_range_start" in fields or "port_range_end" in fields:
         start = fields.get("port_range_start", row.port_range_start)
         end = fields.get("port_range_end", row.port_range_end)
         if start > end:
@@ -115,7 +178,11 @@ def update_platform_settings(
     return PlatformSettingsOut.from_model(row)
 
 
-@router.post("/logo", response_model=PlatformSettingsOut)
+# --------------------------------------------------------------------------- #
+# Logo (light theme)                                                          #
+# --------------------------------------------------------------------------- #
+
+@router.post("/api/settings/logo", response_model=PlatformSettingsOut)
 def upload_logo(
     body: LogoUpload,
     db: DbSession,
@@ -125,33 +192,14 @@ def upload_logo(
     if body.content_type not in ALLOWED_LOGO_TYPES:
         raise HTTPException(
             status_code=422,
-            detail=f"Unsupported image type {body.content_type!r}; expected one of "
-            f"{list(ALLOWED_LOGO_TYPES)}.",
+            detail=f"Unsupported type {body.content_type!r}; "
+            f"expected one of {list(ALLOWED_LOGO_TYPES)}.",
         )
-    payload = body.content_base64.split(",", 1)[-1]  # tolerate a data: URL prefix.
-    try:
-        data = base64.b64decode(payload, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise HTTPException(status_code=422, detail="Logo is not valid base64.") from exc
-    if not data:
-        raise HTTPException(status_code=422, detail="Logo is empty.")
-    if len(data) > MAX_LOGO_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Logo exceeds the {MAX_LOGO_BYTES // 1024} KB limit.",
-        )
-
+    data = _decode_upload(body.content_base64, MAX_LOGO_BYTES, "Logo")
     ext = _LOGO_EXT[body.content_type]
-    # Remove any previously stored logo of a different type so only one remains.
-    for other in _LOGO_EXT.values():
-        stale = _branding_dir() / f"logo.{other}"
-        if other != ext and stale.exists():
-            stale.unlink()
-    (_branding_dir() / f"logo.{ext}").write_bytes(data)
+    _save_upload("logo", ext, data, _LOGO_EXT)
 
     row = PlatformSettings.get_or_create(db)
-    # Store the extensionless API URL; GET /logo probes the stored file. The
-    # frontend cache-busts with the settings' updated_at.
     row.logo_path = LOGO_URL
     db.commit()
     db.refresh(row)
@@ -165,25 +213,107 @@ def upload_logo(
     return PlatformSettingsOut.from_model(row)
 
 
-@router.get("/logo")
-def get_logo(db: DbSession, _: Annotated[object, Depends(require(READ))]) -> FileResponse:
-    row = PlatformSettings.get_or_create(db)
-    path = _stored_logo(row)
+@router.get("/api/settings/logo")
+def get_logo(db: DbSession) -> FileResponse:
+    PlatformSettings.get_or_create(db)
+    path = _stored_file("logo", _LOGO_EXT)
     if path is None:
         raise HTTPException(status_code=404, detail="No logo configured.")
-    # An uploaded SVG can carry inline script. Only an Admin can upload one, but
-    # serve every logo locked down so opening the URL directly can't execute it:
-    # a restrictive CSP + nosniff neutralises script/embed even for image/svg+xml.
-    return FileResponse(
-        path,
-        headers={
-            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-            "X-Content-Type-Options": "nosniff",
-        },
+    return FileResponse(path, headers=_UPLOAD_HEADERS)
+
+
+# --------------------------------------------------------------------------- #
+# Logo dark variant                                                           #
+# --------------------------------------------------------------------------- #
+
+@router.post("/api/settings/logo-dark", response_model=PlatformSettingsOut)
+def upload_logo_dark(
+    body: LogoUpload,
+    db: DbSession,
+    audit: Audit,
+    _: Annotated[object, Depends(require(SETTINGS_MANAGE))],
+) -> PlatformSettingsOut:
+    if body.content_type not in ALLOWED_LOGO_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported type {body.content_type!r}; "
+            f"expected one of {list(ALLOWED_LOGO_TYPES)}.",
+        )
+    data = _decode_upload(body.content_base64, MAX_LOGO_BYTES, "Dark logo")
+    ext = _LOGO_EXT[body.content_type]
+    _save_upload("logo-dark", ext, data, _LOGO_EXT)
+
+    row = PlatformSettings.get_or_create(db)
+    row.logo_dark_path = LOGO_DARK_URL
+    db.commit()
+    db.refresh(row)
+    audit.record(
+        action="settings.logo_dark",
+        summary="Uploaded dark-theme logo variant",
+        entity_type="settings",
+        entity_id=row.id,
+        params={"content_type": body.content_type, "bytes": len(data)},
     )
+    return PlatformSettingsOut.from_model(row)
 
 
-@router.get("/environment", response_model=EnvironmentInfo)
+@router.get("/api/settings/logo-dark")
+def get_logo_dark(db: DbSession) -> FileResponse:
+    PlatformSettings.get_or_create(db)
+    path = _stored_file("logo-dark", _LOGO_EXT)
+    if path is None:
+        raise HTTPException(status_code=404, detail="No dark logo configured.")
+    return FileResponse(path, headers=_UPLOAD_HEADERS)
+
+
+# --------------------------------------------------------------------------- #
+# Favicon                                                                     #
+# --------------------------------------------------------------------------- #
+
+@router.post("/api/settings/favicon", response_model=PlatformSettingsOut)
+def upload_favicon(
+    body: FaviconUpload,
+    db: DbSession,
+    audit: Audit,
+    _: Annotated[object, Depends(require(SETTINGS_MANAGE))],
+) -> PlatformSettingsOut:
+    if body.content_type not in ALLOWED_FAVICON_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported type {body.content_type!r}; expected PNG or ICO.",
+        )
+    data = _decode_upload(body.content_base64, MAX_FAVICON_BYTES, "Favicon")
+    ext = _FAVICON_EXT[body.content_type]
+    _save_upload("favicon", ext, data, _FAVICON_EXT)
+
+    row = PlatformSettings.get_or_create(db)
+    row.favicon_path = FAVICON_URL
+    db.commit()
+    db.refresh(row)
+    audit.record(
+        action="settings.favicon",
+        summary="Uploaded favicon",
+        entity_type="settings",
+        entity_id=row.id,
+        params={"content_type": body.content_type, "bytes": len(data)},
+    )
+    return PlatformSettingsOut.from_model(row)
+
+
+@router.get("/api/settings/favicon")
+def get_favicon() -> FileResponse:
+    path = _stored_file("favicon", _FAVICON_EXT)
+    if path is None:
+        raise HTTPException(status_code=404, detail="No favicon configured.")
+    # Favicons are not SVG so no script risk, but still nosniff for hygiene.
+    return FileResponse(path, headers={"X-Content-Type-Options": "nosniff"})
+
+
+# --------------------------------------------------------------------------- #
+# Environment (read-only)                                                     #
+# --------------------------------------------------------------------------- #
+
+@router.get("/api/settings/environment", response_model=EnvironmentInfo)
 def environment(_: Annotated[object, Depends(require(READ))]) -> EnvironmentInfo:
     settings = get_settings()
     backend = "postgresql" if settings.database_url.startswith("postgres") else (

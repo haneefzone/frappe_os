@@ -131,6 +131,44 @@
           </div>
         </section>
 
+        <!-- Needs attention: config drift (session 6.7) -->
+        <section
+          v-if="data.needs_attention?.config_drift?.count > 0"
+          class="rounded-lg border border-err/40 bg-err/5"
+        >
+          <div class="flex items-center justify-between border-b border-err/30 px-4 py-2.5">
+            <h2 class="flex items-center gap-2 text-label font-semibold text-err">
+              <LucideAlertTriangle class="h-4 w-4" />
+              Needs attention — config drift
+            </h2>
+            <span class="text-meta text-err/80">
+              {{ data.needs_attention.config_drift.count }} artifact{{ data.needs_attention.config_drift.count === 1 ? '' : 's' }} drifted
+              on {{ data.needs_attention.config_drift.server_ids.length }} server{{ data.needs_attention.config_drift.server_ids.length === 1 ? '' : 's' }}
+            </span>
+          </div>
+          <ul class="divide-y divide-err/10">
+            <li
+              v-for="art in data.needs_attention.config_drift.artifacts"
+              :key="art.id"
+              class="flex items-center gap-3 px-4 py-2.5"
+            >
+              <StatusDot status="err" />
+              <span class="font-mono text-label text-ink-1">{{ art.artifact_key }}</span>
+              <span class="truncate text-meta text-ink-3" :title="art.path">{{ art.path }}</span>
+              <span v-if="art.drift_detected_at" class="ml-auto text-meta text-ink-3">
+                {{ relativeTime(art.drift_detected_at) }}
+              </span>
+              <Button
+                variant="subtle"
+                theme="gray"
+                size="sm"
+                label="View diff"
+                @click="activeDriftId = art.id"
+              />
+            </li>
+          </ul>
+        </section>
+
         <div class="grid gap-6 lg:grid-cols-2">
           <!-- 7-day backup grid -->
           <section class="rounded-lg border border-line bg-surface">
@@ -185,17 +223,21 @@
       </div>
     </div>
   </div>
+
+  <DriftDrawer :baseline-id="activeDriftId" @close="activeDriftId = null" @accepted="load" />
 </template>
 
 <script setup lang="ts">
 import { Button } from 'frappe-ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
+import LucideAlertTriangle from '~icons/lucide/alert-triangle'
 import LucideListChecks from '~icons/lucide/list-checks'
 import LucidePlus from '~icons/lucide/plus'
 import LucideRocket from '~icons/lucide/rocket'
 import LucideServer from '~icons/lucide/server'
 import { type BackupGridDay, type Dashboard, dashboardApi } from '../api/dashboard'
+import DriftDrawer from '../components/DriftDrawer.vue'
 import EmptyState from '../components/EmptyState.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
 import KPICard from '../components/KPICard.vue'
@@ -212,6 +254,7 @@ const router = useRouter()
 const data = ref<Dashboard | null>(null)
 const loading = ref(true)
 const loadError = ref('')
+const activeDriftId = ref<number | null>(null)
 let timer: ReturnType<typeof setInterval> | null = null
 
 const onboardingSteps = [

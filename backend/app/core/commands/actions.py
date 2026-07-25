@@ -2317,3 +2317,42 @@ class SslExpiryScanAction(Action):
             for row in rows:
                 when = row.cert_expires_at.isoformat() if row.cert_expires_at else "no cert"
                 await ctx.emit(f"  {row.domain}: {when}")
+
+
+class DriftCheckAction(Action):
+    """`server.drift_check` — re-hash every tracked config artefact on the server
+    and diff each against its stored baseline (session 6.7, uiux-spec A2.16).
+
+    Strictly **read-only** on the managed server: it only `cat`s/`find`s files
+    (root ones via the fixed `sudo -n` allowlist lines). It never writes,
+    reloads, or reverts config. Drifted artefacts flip their baseline row to
+    `drifted`, fire one `config.drift` notification, and surface on the Dashboard
+    "Needs attention" row. No auto-remediation."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import drift
+
+        with ctx.step("Read + hash tracked config artefacts"):
+            results = await drift.run_drift_check(ctx)
+
+        drifted = [r for r in results if r.drifted]
+        with ctx.step("Evaluate drift vs baseline"):
+            await ctx.emit(
+                f"checked {len(results)} artefact(s); {len(drifted)} drifted"
+            )
+            for r in drifted:
+                # Names + reason only — never artefact content (rule 6).
+                await ctx.emit(
+                    f"DRIFT [{r.reason}] {r.artifact_key} at {r.path}", stream="stderr"
+                )
+            if drifted:
+                from app.core.notifications import dispatch_config_drift
+                from app.models.server import Server
+
+                server = ctx.session.get(Server, ctx.server_id)
+                dispatch_config_drift(
+                    ctx.session,
+                    server_id=ctx.server_id,
+                    server_name=server.name if server else str(ctx.server_id),
+                    artifact_keys=[r.artifact_key for r in drifted],
+                )

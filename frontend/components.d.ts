@@ -17,6 +17,8 @@ declare module 'vue' {
     CopyField: typeof import('./src/components/CopyField.vue')['default']
     CreateScheduleSheet: typeof import('./src/components/CreateScheduleSheet.vue')['default']
     DataTable: typeof import('./src/components/DataTable.vue')['default']
+    DriftChip: typeof import('./src/components/DriftChip.vue')['default']
+    DriftDrawer: typeof import('./src/components/DriftDrawer.vue')['default']
     EmptyState: typeof import('./src/components/EmptyState.vue')['default']
     EnvironmentBadge: typeof import('./src/components/EnvironmentBadge.vue')['default']
     JobTimeline: typeof import('./src/components/JobTimeline.vue')['default']

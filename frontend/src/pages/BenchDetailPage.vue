@@ -124,8 +124,38 @@
             Each action runs as a job — you'll land on its live log.
           </p>
         </section>
+
+        <!-- Config drift for this bench (session 6.7) -->
+        <section class="rounded-lg border border-line bg-surface lg:col-span-2">
+          <div class="flex items-center justify-between border-b border-line px-4 py-2.5">
+            <h2 class="text-label font-semibold text-ink-1">Config drift</h2>
+            <span v-if="benchDriftBaselines.length" class="text-meta text-ink-3">
+              {{ benchDriftBaselines.filter(b => b.status === 'drifted').length }} drifted of {{ benchDriftBaselines.length }}
+            </span>
+          </div>
+          <div v-if="driftLoading" class="flex flex-wrap gap-2 p-4">
+            <div v-for="i in 3" :key="i" class="h-6 w-28 animate-pulse rounded-full bg-raised" />
+          </div>
+          <div v-else-if="benchDriftBaselines.length === 0" class="px-4 py-3 text-label text-ink-3">
+            No config baselines tracked for this bench yet.
+          </div>
+          <div v-else class="flex flex-wrap gap-2 p-4">
+            <DriftChip
+              v-for="b in benchDriftBaselines"
+              :key="b.id"
+              :baseline="b"
+              @click="activeDriftId = b.id"
+            />
+          </div>
+        </section>
       </div>
     </div>
+
+  <DriftDrawer
+    :baseline-id="activeDriftId"
+    @close="activeDriftId = null"
+    @accepted="loadBenchDrift"
+  />
 
     <!-- Maintenance confirm (build / restart / migrate-all / update / set up production) -->
     <ConfirmModal
@@ -150,7 +180,10 @@ import { useRoute, useRouter } from 'vue-router'
 import LucideArrowLeft from '~icons/lucide/arrow-left'
 import { benchesApi, type Bench } from '../api/benches'
 import { ApiError } from '../api/client'
+import { driftApi, type DriftBaseline } from '../api/drift'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import DriftChip from '../components/DriftChip.vue'
+import DriftDrawer from '../components/DriftDrawer.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { toast } from '../components/toast'
@@ -169,6 +202,27 @@ const bench = ref<Bench | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 const activeTab = ref('overview')
+
+// -- Config drift (session 6.7) -----------------------------------------------
+const allServerDrift = ref<DriftBaseline[]>([])
+const driftLoading = ref(false)
+const activeDriftId = ref<number | null>(null)
+
+const benchDriftBaselines = computed(() =>
+  allServerDrift.value.filter((b) => b.bench_id === benchId),
+)
+
+async function loadBenchDrift() {
+  if (!bench.value) return
+  driftLoading.value = true
+  try {
+    allServerDrift.value = await driftApi.list({ server_id: bench.value.server_id })
+  } catch {
+    // Non-fatal
+  } finally {
+    driftLoading.value = false
+  }
+}
 
 // Skeleton tab bar — Sites/Apps/Config land in later sessions.
 const tabs = [
@@ -199,6 +253,7 @@ async function load() {
   loadError.value = ''
   try {
     bench.value = await benchesApi.get(benchId)
+    void loadBenchDrift()
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : 'Could not load this bench.'
   } finally {

@@ -191,8 +191,49 @@
           </ul>
           <p v-if="testError" class="px-4 pb-3 text-label text-err" role="alert">{{ testError }}</p>
         </section>
+
+        <!-- Config drift (session 6.7) -->
+        <section class="rounded-lg border border-line bg-surface lg:col-span-2">
+          <div class="flex items-center justify-between border-b border-line px-4 py-2.5">
+            <h2 class="text-label font-semibold text-ink-1">Config drift</h2>
+            <div class="flex items-center gap-2">
+              <span v-if="driftBaselines.length" class="text-meta text-ink-3">
+                {{ driftedCount }} drifted of {{ driftBaselines.length }}
+              </span>
+              <Button
+                v-if="canManage"
+                variant="subtle"
+                theme="gray"
+                size="sm"
+                :label="runningDriftCheck ? 'Starting…' : 'Run check now'"
+                :loading="runningDriftCheck"
+                @click="triggerDriftCheck"
+              />
+            </div>
+          </div>
+          <div v-if="driftLoading" class="flex flex-wrap gap-2 p-4">
+            <div v-for="i in 4" :key="i" class="h-6 w-28 animate-pulse rounded-full bg-raised" />
+          </div>
+          <div v-else-if="driftBaselines.length === 0" class="px-4 py-3 text-label text-ink-3">
+            No config baselines tracked yet. Baselines are captured by managed jobs (install, configure).
+          </div>
+          <div v-else class="flex flex-wrap gap-2 p-4">
+            <DriftChip
+              v-for="b in driftBaselines"
+              :key="b.id"
+              :baseline="b"
+              @click="activeDriftId = b.id"
+            />
+          </div>
+        </section>
       </div>
     </div>
+
+  <DriftDrawer
+    :baseline-id="activeDriftId"
+    @close="activeDriftId = null"
+    @accepted="loadDrift"
+  />
 
     <!-- Restart confirmation: a service restart is disruptive (spec B5). -->
     <ConfirmModal
@@ -229,7 +270,10 @@ import {
   type ServiceState,
 } from '../api/monitoring'
 import { serversApi, streamServerTest, type CheckEvent, type Server } from '../api/servers'
+import { driftApi, type DriftBaseline } from '../api/drift'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import DriftChip from '../components/DriftChip.vue'
+import DriftDrawer from '../components/DriftDrawer.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
 import ResourceGauge from '../components/ResourceGauge.vue'
 import StatusDot from '../components/StatusDot.vue'
@@ -256,6 +300,44 @@ const savingDbPw = ref(false)
 const server = ref<Server | null>(null)
 const loading = ref(true)
 const loadError = ref('')
+
+// -- Config drift (session 6.7) -----------------------------------------------
+const driftBaselines = ref<DriftBaseline[]>([])
+const driftLoading = ref(false)
+const activeDriftId = ref<number | null>(null)
+const runningDriftCheck = ref(false)
+
+const driftedCount = computed(() => driftBaselines.value.filter((b) => b.status === 'drifted').length)
+
+async function loadDrift() {
+  driftLoading.value = true
+  try {
+    driftBaselines.value = await driftApi.list({ server_id: serverId })
+  } catch {
+    // Non-fatal — drift section shows empty state
+  } finally {
+    driftLoading.value = false
+  }
+}
+
+async function triggerDriftCheck() {
+  if (runningDriftCheck.value) return
+  runningDriftCheck.value = true
+  try {
+    const { job_id } = await driftApi.runCheck(serverId)
+    router.push(`/jobs/${job_id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'A drift check is already running on this server.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not start drift check.'
+    toast.error(message)
+  } finally {
+    runningDriftCheck.value = false
+  }
+}
 
 const TOOL_KEYS = ['git', 'python3', 'uv', 'node', 'mariadb', 'redis-server', 'wkhtmltopdf', 'bench']
 const coreRows = reactive<{ key: string; label: string; status: RowStatus; value: string | null }[]>([])
@@ -456,6 +538,7 @@ async function load() {
 onMounted(() => {
   void load()
   void loadMonitoring(true)
+  void loadDrift()
   monTimer = setInterval(() => void loadMonitoring(), MON_POLL_MS)
 })
 

@@ -60,6 +60,19 @@ frappe ALL=(root) NOPASSWD: /usr/sbin/nginx -t
 frappe ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx
 frappe ALL=(root) NOPASSWD: /usr/local/sbin/fdm-certbot
 
+# Config drift detection (Session 6.7). Read-only hashing of root-owned managed
+# config artefacts. Each is a fixed, absolute, single command with NO wildcard
+# and NO shell (`sudo -n` fails loudly rather than prompting). `cat` cannot
+# mutate; `find` here only lists names. These grant READ, never write/reload.
+# The drift checker prefers bench-owner-readable paths (common_site_config.json,
+# site_config.json, config/nginx-vhosts/) which need no sudo; only these four
+# root-owned artefacts require elevation. See app/core/drift.py ARTIFACTS.
+frappe ALL=(root) NOPASSWD: /bin/cat /etc/nginx/nginx.conf
+frappe ALL=(root) NOPASSWD: /bin/cat /etc/supervisor/supervisord.conf
+frappe ALL=(root) NOPASSWD: /bin/cat /etc/sudoers.d/fdm-platform
+frappe ALL=(root) NOPASSWD: /bin/cat /etc/sudoers.d/fdm-prod-elevation
+frappe ALL=(root) NOPASSWD: /usr/bin/find /etc/supervisor/conf.d -maxdepth 1 -type f -printf %f\n
+
 # bench setup production needs broader rights ONCE — run it with a temporary elevation, not a
 # permanent allowlist entry (Phase 2.5 decision point).
 #
