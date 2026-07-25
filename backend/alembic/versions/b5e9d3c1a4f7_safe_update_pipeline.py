@@ -7,7 +7,7 @@ and the mandatory pre-update backup id so the promote gate is enforced
 server-side.
 
 Revision ID: b5e9d3c1a4f7
-Revises: f8b3d1c6a2e9
+Revises: a2b6d4f8c3e1
 Create Date: 2026-07-25 00:00:00.000000
 
 """
@@ -20,7 +20,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = 'b5e9d3c1a4f7'
-down_revision: str | Sequence[str] | None = 'f8b3d1c6a2e9'
+down_revision: str | Sequence[str] | None = 'a2b6d4f8c3e1'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
