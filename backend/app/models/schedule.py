@@ -28,6 +28,7 @@ without losing its configuration or history.
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     ForeignKey,
@@ -35,6 +36,7 @@ from sqlalchemy import (
     String,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import expression
 
@@ -53,11 +55,16 @@ SCHEDULE_ACTIONS = (
     # Config drift detection (session 6.7): re-hash a server's tracked config
     # artefacts and diff against baseline. Server-targeted (see below).
     "server.drift_check",
+    # Reports (session 6.2): render a registry report and email the artifact.
+    # Platform-local — it targets no server, so it carries target_type "report".
+    "report.generate",
 )
 
-# What a schedule points at. "site" (backups + sweeps + SSL) and "server" (the
-# 6.7 drift check, which sweeps a whole server's tracked config).
-SCHEDULE_TARGET_TYPES = ("site", "server")
+# What a schedule points at. "site" (backups + sweeps + SSL), "server" (the 6.7
+# drift check, which sweeps a whole server's tracked config), and "report" (6.2)
+# for a report delivery, which has no row target at all — its report id, format,
+# range and recipients live in `params`.
+SCHEDULE_TARGET_TYPES = ("site", "server", "report")
 
 
 class Schedule(Base):
@@ -76,7 +83,17 @@ class Schedule(Base):
     # marked missing doesn't cascade-delete its schedule history; the dispatcher
     # fails the fire cleanly if the target has vanished.
     target_type: Mapped[str] = mapped_column(String(20), default="site")
-    target_id: Mapped[int] = mapped_column(Integer, index=True)
+    # NULL for a `report` schedule (6.2): a report is generated from a query over
+    # the whole fleet, so there is no single row it points at.
+    target_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+
+    # Action-specific configuration that does not deserve its own column
+    # (session 6.2). For `report.generate`: report_id, format, recipients and the
+    # report's own parameters. Sanitized before it is stored — a schedule row is
+    # readable by anyone who can see the Schedules list (golden rule 6).
+    params: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), default=dict
+    )
 
     # site.backup | backup.retention_sweep (see SCHEDULE_ACTIONS).
     action_name: Mapped[str] = mapped_column(String(60))

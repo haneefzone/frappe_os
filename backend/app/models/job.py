@@ -41,8 +41,11 @@ class CommandJob(Base):
     __tablename__ = "command_jobs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    server_id: Mapped[int] = mapped_column(
-        ForeignKey("servers.id", ondelete="CASCADE"), index=True
+    # NULL for a platform-local job (session 6.2: report generation runs inside
+    # the platform process and targets no managed server). Every SSH-backed
+    # action still carries a real server id.
+    server_id: Mapped[int | None] = mapped_column(
+        ForeignKey("servers.id", ondelete="CASCADE"), index=True, nullable=True
     )
     # What the action operates on: server | bench | site (+ the id/name of it).
     target_type: Mapped[str] = mapped_column(String(20), default="server")

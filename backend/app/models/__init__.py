@@ -14,6 +14,7 @@ from app.models.drift import ConfigBaseline
 from app.models.job import CommandJob, CommandStep, LogEntry
 from app.models.monitoring import MonitoringSample
 from app.models.notification import Notification, NotificationPreference
+from app.models.report_run import ReportRun
 from app.models.schedule import Schedule
 from app.models.server import Server, SSHCredential
 from app.models.settings import PlatformSettings
@@ -42,6 +43,7 @@ __all__ = [
     "Notification",
     "NotificationPreference",
     "PlatformSettings",
+    "ReportRun",
     "Role",
     "Schedule",
     "SSHCredential",

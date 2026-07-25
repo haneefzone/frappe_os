@@ -110,6 +110,17 @@ class Settings(BaseSettings):
     # COMPLIANCE_TICK_SECONDS.
     compliance_tick_seconds: int = 3600
 
+    # Reports (session 6.2). Generated artifacts land here, one file per
+    # ReportRun; the path resolves from the backend working directory like
+    # uploads_dir. Retention prunes artifacts (and their rows' paths) after this
+    # many days — evidence exports are re-generatable, so keeping them forever
+    # only grows disk. Set via REPORTS_DIR / REPORTS_RETENTION_DAYS.
+    reports_dir: str = "reports"
+    reports_retention_days: int = 90
+    # A synchronous CSV run is allowed only when the generator's row count stays
+    # under this; anything larger must go through the job queue (golden rule 3).
+    reports_sync_max_rows: int = 5000
+
     # Notifications (session 2.8): minimal SMTP + signed webhook channels.
     # SMTP: set SMTP_HOST to enable email. TLS defaults on (STARTTLS).
     smtp_host: str = ""

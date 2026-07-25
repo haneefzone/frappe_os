@@ -72,8 +72,12 @@ def _prune_old(db: Session, user_id: int) -> None:
 
     subq = (
         select(Notification.id)
+        # id.desc() breaks created_at ties deterministically: on SQLite
+        # server_default now() has 1-second resolution, so a burst of inserts
+        # shares a timestamp — without the id tie-break the "newest 200" set is
+        # arbitrary and prune can delete a row it just inserted.
         .where(Notification.user_id == user_id)
-        .order_by(Notification.created_at.desc())
+        .order_by(Notification.created_at.desc(), Notification.id.desc())
         .limit(_MAX_PER_USER)
         .subquery()
     )
@@ -299,7 +303,23 @@ def _email_html(product_name: str, subject: str, body: str) -> str:
     )
 
 
-def _send_email(to_address: str, subject: str, body: str, db: Session | None = None) -> None:
+def _send_email(
+    to_address: str,
+    subject: str,
+    body: str,
+    *,
+    db: Session | None = None,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+) -> None:
+    """Send one email — branded HTML alternative + optional attachments.
+
+    `db`, when provided, resolves the white-label product name for the branded
+    HTML alternative (session 6.6). `attachments` is a list of
+    (filename, payload, mime_subtype) — used by the 6.2 report delivery to
+    attach the generated artifact. Kept on this one sender so every outbound
+    email goes through the same SMTP configuration and the same "no SMTP host
+    means silently no-op" contract.
+    """
     from app.config import get_settings
     cfg = get_settings()
     if not cfg.smtp_host:
@@ -312,6 +332,11 @@ def _send_email(to_address: str, subject: str, body: str, db: Session | None = N
     # Plain-text fallback first, then attach HTML alternative.
     msg.set_content(body)
     msg.add_alternative(_email_html(product_name, subject, body), subtype="html")
+    for filename, payload, subtype in attachments or []:
+        maintype, _, sub = subtype.partition("/")
+        if not sub:
+            maintype, sub = "application", subtype
+        msg.add_attachment(payload, maintype=maintype, subtype=sub, filename=filename)
 
     context = ssl.create_default_context()
     with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port or 587) as smtp:
@@ -321,6 +346,20 @@ def _send_email(to_address: str, subject: str, body: str, db: Session | None = N
             smtp.login(cfg.smtp_user, cfg.smtp_password)
         smtp.send_message(msg)
     logger.debug("email notification sent to %s: %s", to_address, subject)
+
+
+def send_email_with_attachment(
+    to_address: str,
+    subject: str,
+    body: str,
+    *,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+) -> None:
+    """Public entry point for a direct (non-notification) email with files —
+    the 6.2 scheduled report delivery. Notification-driven mail still goes
+    through `dispatch_event`, which honours per-user channel preferences; a
+    report schedule addresses an explicit recipient list instead."""
+    _send_email(to_address, subject, body, attachments=attachments)
 
 
 def _send_webhook(

@@ -22,6 +22,12 @@ SETTINGS_MANAGE = "settings:manage"
 SCHEDULE_MANAGE = "schedule:manage"  # create/edit/enable/disable recurring schedules
 SSL_MANAGE = "ssl:manage"  # manage site domains, nginx vhosts, TLS certificates
 REPORT_GENERATE = "report:generate"  # generate compliance / audit report exports (session 4.4)
+# Session 6.2. Non-sensitive reports are gated on plain READ so Read-only can
+# view them; the two ISO-facing exports that expose per-user activity and
+# backup evidence require this separate class, which by design NO role below
+# Admin holds (Admin has it via the wildcard). Deliberately absent from
+# Developer/Operator in DEFAULT_ROLES — those reports are Admin-only.
+REPORT_SENSITIVE = "report:sensitive"
 
 # name -> permissions. Admin gets the wildcard; Read-only can never mutate
 # (CLAUDE.md golden rule 7).

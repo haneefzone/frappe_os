@@ -1134,3 +1134,10 @@ register(
         run_as=None,
     )
 )
+
+# Session 6.2: the platform-local `report.generate` template lives in its own
+# module because it depends on the reports package (nothing else in the registry
+# does) and because a local, non-SSH template deserves to be visibly separate
+# from the remote-command catalogue above. Imported last, for the side effect of
+# registering itself — `register` is already defined by this point.
+from app.core.commands import report_actions as _report_actions  # noqa: E402,F401

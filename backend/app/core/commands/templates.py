@@ -100,6 +100,12 @@ class CommandTemplate:
     required_permission: str
     # OS user to run the command as (via `sudo -u`); None = the SSH login user.
     run_as: str | None = None
+    # Platform-local action (session 6.2): the work runs inside the platform
+    # process itself (report rendering) rather than over SSH against a managed
+    # server. The runner skips SSH executor setup entirely and the job's
+    # `server_id` is NULL. `argv` is nominal for such a template — the Action
+    # class drives all the work and never calls ctx.stream/ctx.capture.
+    local: bool = False
     # Where each secret param's plaintext is resolved at execution time
     # (session 1.8; see app/core/secrets_resolve.py). "job" = the user-supplied
     # value carried encrypted on the job; "server:<column>" = a Fernet token on
