@@ -5,7 +5,7 @@ the secret-stripped hash captured by the last managed change and its drift state
 (baseline | drifted | accepted). See app.models.drift / app.core.drift.
 
 Revision ID: c9d4e7a2f1b8
-Revises: f8b3d1c6a2e9
+Revises: b3c4d5e6f7a8
 Create Date: 2026-07-23 10:30:00.000000
 
 """
@@ -17,7 +17,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = 'c9d4e7a2f1b8'
-down_revision: str | Sequence[str] | None = 'f8b3d1c6a2e9'
+down_revision: str | Sequence[str] | None = 'b3c4d5e6f7a8'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
