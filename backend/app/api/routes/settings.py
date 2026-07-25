@@ -36,7 +36,9 @@ from app.audit import Audit
 from app.config import get_settings
 from app.core.permissions import READ, SETTINGS_MANAGE
 from app.db import get_db
+from app.models.mfa import SecurityPolicy
 from app.models.settings import PlatformSettings
+from app.schemas.auth import SecurityPolicyOut, SecurityPolicyUpdate
 from app.schemas.settings import (
     ALLOWED_FAVICON_TYPES,
     ALLOWED_LOGO_TYPES,
@@ -330,3 +332,33 @@ def environment(_: Annotated[object, Depends(require(READ))]) -> EnvironmentInfo
         monitoring_enabled=settings.monitoring_enabled,
         monitoring_interval_seconds=settings.monitoring_interval_seconds,
     )
+
+
+@router.get("/security", response_model=SecurityPolicyOut)
+def get_security_policy(
+    db: DbSession, _: Annotated[object, Depends(require(READ))]
+) -> SecurityPolicyOut:
+    return SecurityPolicyOut.from_model(SecurityPolicy.get_or_create(db))
+
+
+@router.put("/security", response_model=SecurityPolicyOut)
+def update_security_policy(
+    body: SecurityPolicyUpdate,
+    db: DbSession,
+    audit: Audit,
+    _: Annotated[object, Depends(require(SETTINGS_MANAGE))],
+) -> SecurityPolicyOut:
+    row = SecurityPolicy.get_or_create(db)
+    fields = body.model_dump(exclude_unset=True)
+    for key, value in fields.items():
+        setattr(row, key, value)
+    db.commit()
+    db.refresh(row)
+    audit.record(
+        action="auth.security_policy_update",
+        summary="Updated the security policy",
+        entity_type="security_policy",
+        entity_id=row.id,
+        params={k: v for k, v in fields.items()},
+    )
+    return SecurityPolicyOut.from_model(row)

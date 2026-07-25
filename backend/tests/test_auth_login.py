@@ -17,9 +17,13 @@ def test_login_sets_session_cookies_and_returns_user(client):
     response = login(client, "admin@example.com")
     assert response.status_code == 200
     body = response.json()
-    assert body["email"] == "admin@example.com"
-    assert body["role"] == "Admin"
-    assert body["permissions"] == ["*"]
+    # Session 6.5: login is two-step-aware — no 2FA enrolled here, so
+    # mfa_required is false and `user` carries what used to be the top-level body.
+    assert body["mfa_required"] is False
+    user = body["user"]
+    assert user["email"] == "admin@example.com"
+    assert user["role"] == "Admin"
+    assert user["permissions"] == ["*"]
     for cookie in ("fdm_access_token", "fdm_refresh_token", "fdm_csrf_token"):
         assert client.cookies.get(cookie)
     # Session cookies are httpOnly; the CSRF cookie must be JS-readable.

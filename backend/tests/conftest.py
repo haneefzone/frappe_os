@@ -31,7 +31,7 @@ os.environ.setdefault("FDM_SECRET_KEY", Fernet.generate_key().decode())
 get_settings.cache_clear()
 
 from app.api.deps import require  # noqa: E402
-from app.core.ratelimit import LoginThrottle, get_login_throttle  # noqa: E402
+from app.core.ratelimit import LoginThrottle, get_login_throttle, get_mfa_throttle  # noqa: E402
 from app.core.security import hash_password  # noqa: E402
 from app.db import Base, get_db  # noqa: E402
 from app.main import create_app  # noqa: E402
@@ -67,6 +67,22 @@ def make_throttle(clock):
 @pytest.fixture
 def throttle(fake_clock):
     return make_throttle(fake_clock)
+
+
+def make_mfa_throttle(clock):
+    settings = get_settings()
+    return LoginThrottle(
+        threshold=settings.mfa_lockout_threshold,
+        lockout_seconds=settings.mfa_lockout_seconds,
+        email_failure_limit=settings.mfa_email_failure_limit,
+        email_failure_window_seconds=settings.mfa_email_failure_window_seconds,
+        clock=clock,
+    )
+
+
+@pytest.fixture
+def mfa_throttle(fake_clock):
+    return make_mfa_throttle(fake_clock)
 
 
 @pytest.fixture
@@ -107,7 +123,7 @@ def seeded_users(db_session):
 
 
 @pytest.fixture
-def client(db_session, seeded_users, throttle):
+def client(db_session, seeded_users, throttle, mfa_throttle):
     app = create_app()
 
     # Mutating probe route so RBAC denial is testable before real routers exist.
@@ -121,6 +137,7 @@ def client(db_session, seeded_users, throttle):
 
     app.dependency_overrides[get_db] = lambda: db_session
     app.dependency_overrides[get_login_throttle] = lambda: throttle
+    app.dependency_overrides[get_mfa_throttle] = lambda: mfa_throttle
     with TestClient(app) as test_client:
         yield test_client
 
@@ -156,3 +173,16 @@ def login(client: TestClient, email: str, password: str = PASSWORD):
 
 def csrf_headers(client: TestClient) -> dict:
     return {"X-CSRF-Token": client.cookies.get("fdm_csrf_token", "")}
+
+
+def totp_code_for_step(secret: str, step_offset: int = 0) -> str:
+    """The TOTP code `step_offset` RFC 6238 steps from the current one, computed
+    directly off the step counter (not wall-clock arithmetic, which is ambiguous
+    near a 30s boundary) — no sleeping needed to get a fresh, non-replayed code."""
+    import datetime
+
+    import pyotp
+
+    totp = pyotp.TOTP(secret)
+    current_step = totp.timecode(datetime.datetime.now(datetime.UTC))
+    return totp.generate_otp(current_step + step_offset)

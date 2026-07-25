@@ -29,6 +29,8 @@ dependencies = [
     "pyjwt>=2.10",
     "email-validator>=2.2",
     "reportlab>=5.0.0",
+    # TOTP 2FA (session 6.5), RFC 6238.
+    "pyotp>=2.9",
 ]
 
 [project.optional-dependencies]

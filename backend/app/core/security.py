@@ -16,7 +16,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 _hasher = PasswordHasher()
 
-TokenType = Literal["access", "refresh"]
+# "mfa_pending" is a short-lived, single-purpose token issued after a correct
+# password when 2FA is active: it proves the password step happened but is
+# never accepted by get_current_user, so it cannot satisfy any RBAC dependency
+# (session 6.5). Only /api/auth/2fa/verify accepts it.
+TokenType = Literal["access", "refresh", "mfa_pending"]
 
 
 def hash_password(password: str) -> str:
@@ -42,6 +46,7 @@ def create_session_token(
     ttl_seconds: int,
     secret: str,
     token_version: int,
+    sid: str | None = None,
 ) -> str:
     """JWT bound to a CSRF value (double-submit: cookie is httpOnly, the CSRF
     value travels back in a header and must match this claim).
@@ -49,7 +54,12 @@ def create_session_token(
     `token_version` is baked in as the `tv` claim (SEC-M2, ISO 27001 A.5.17):
     get_current_user and /refresh reject any token whose `tv` no longer matches
     the user's current DB value, so bumping it server-side revokes every
-    outstanding token for that user."""
+    outstanding token for that user.
+
+    `sid` (session 6.5) is the `UserSession.jti` shared by every access/refresh
+    token issued for one login/refresh chain — revoking that row (or its
+    idle/absolute timeout expiring) rejects the very next request on any
+    device, not just the next login. `mfa_pending` tokens pass no `sid`."""
     now = datetime.now(UTC)
     payload = {
         "sub": str(user_id),
@@ -59,6 +69,8 @@ def create_session_token(
         "iat": now,
         "exp": now + timedelta(seconds=ttl_seconds),
     }
+    if sid is not None:
+        payload["sid"] = sid
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
@@ -83,6 +95,49 @@ def decode_session_token(token: str, *, expected_type: TokenType, secret: str) -
 
 def hash_api_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode()).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# Password policy (session 6.5's SecurityPolicy: length/complexity/reuse).
+# Pure function — no active self-service password-change endpoint exists yet
+# to call it from; wire it in when one lands, and it is unit-tested directly.
+# --------------------------------------------------------------------------- #
+
+
+def validate_password_policy(
+    password: str,
+    *,
+    min_length: int,
+    require_complexity: bool,
+    reuse_history: int = 0,
+    previous_hashes: list[str] = (),
+) -> list[str]:
+    """Returns a list of human-readable violations (empty = compliant).
+
+    `require_complexity` demands at least one upper, one lower, one digit, and
+    one symbol. `previous_hashes` (newest first) are checked with the same
+    argon2 verify used at login, so reuse of any of the last `reuse_history`
+    passwords is rejected without ever storing them in plaintext.
+    """
+    problems = []
+    if len(password) < min_length:
+        problems.append(f"Password must be at least {min_length} characters.")
+    if require_complexity:
+        if not any(c.islower() for c in password):
+            problems.append("Password must include a lowercase letter.")
+        if not any(c.isupper() for c in password):
+            problems.append("Password must include an uppercase letter.")
+        if not any(c.isdigit() for c in password):
+            problems.append("Password must include a digit.")
+        if not any(not c.isalnum() for c in password):
+            problems.append("Password must include a symbol.")
+    for old_hash in list(previous_hashes)[:reuse_history]:
+        if verify_password(old_hash, password):
+            problems.append(
+                f"Password must not match any of the last {reuse_history} passwords."
+            )
+            break
+    return problems
 
 
 # --------------------------------------------------------------------------- #

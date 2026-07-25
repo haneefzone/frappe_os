@@ -124,3 +124,17 @@ def get_login_throttle() -> LoginThrottle:
         email_failure_limit=settings.login_email_failure_limit,
         email_failure_window_seconds=settings.login_email_failure_window_seconds,
     )
+
+
+@lru_cache
+def get_mfa_throttle() -> LoginThrottle:
+    """Same mechanism as the login throttle (session 6.5), keyed by the user's
+    id in place of an email: N consecutive wrong 2FA codes locks that user's
+    /2fa/verify attempts out, so brute-forcing a 6-digit code is infeasible."""
+    settings = get_settings()
+    return LoginThrottle(
+        threshold=settings.mfa_lockout_threshold,
+        lockout_seconds=settings.mfa_lockout_seconds,
+        email_failure_limit=settings.mfa_email_failure_limit,
+        email_failure_window_seconds=settings.mfa_email_failure_window_seconds,
+    )

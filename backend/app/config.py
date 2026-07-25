@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # Session lifetimes (CLAUDE.md: access 15m, refresh 7d).
     access_token_ttl_seconds: int = 15 * 60
     refresh_token_ttl_seconds: int = 7 * 24 * 3600
+    # The password-only intermediate step when 2FA is active (session 6.5):
+    # long enough to type a 6-digit code, short enough that an abandoned
+    # mfa_pending cookie is not a lingering foothold.
+    mfa_pending_ttl_seconds: int = 5 * 60
     # Secure cookies require HTTPS; set COOKIE_SECURE=false only for plain-HTTP dev.
     cookie_secure: bool = True
 
@@ -46,6 +50,14 @@ class Settings(BaseSettings):
     # login_lockout_seconds, so rotating IPs cannot spray one account forever.
     login_email_failure_limit: int = 20
     login_email_failure_window_seconds: int = 3600
+
+    # 2FA code throttling (session 6.5): the Nth consecutive wrong code locks
+    # that user's /2fa/verify attempts out, mirroring the password lockout
+    # above so brute-forcing a 6-digit code is infeasible.
+    mfa_lockout_threshold: int = 6
+    mfa_lockout_seconds: int = 10 * 60
+    mfa_email_failure_limit: int = 6
+    mfa_email_failure_window_seconds: int = 10 * 60
 
     # Reverse proxies whose X-Forwarded-For we honour (comma-separated IPs,
     # CIDRs, or literals). Empty (default) = trust no proxy: the throttle keys

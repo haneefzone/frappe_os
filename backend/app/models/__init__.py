@@ -13,6 +13,13 @@ from app.models.compliance import (
 from app.models.domain import Domain
 from app.models.drift import ConfigBaseline
 from app.models.job import CommandJob, CommandStep, LogEntry
+from app.models.mfa import (
+    LoginAttempt,
+    RecoveryCode,
+    SecurityPolicy,
+    UserSession,
+    UserTOTP,
+)
 from app.models.monitoring import MonitoringSample
 from app.models.notification import Notification, NotificationPreference
 from app.models.report_run import ReportRun
@@ -45,14 +52,17 @@ __all__ = [
     "Domain",
     "InstalledApp",
     "LogEntry",
+    "LoginAttempt",
     "MonitoringSample",
     "Notification",
     "NotificationPreference",
     "PlatformSettings",
+    "RecoveryCode",
     "ReportRun",
     "ResticRepo",
     "Role",
     "Schedule",
+    "SecurityPolicy",
     "SSHCredential",
     "Server",
     "Site",
@@ -61,4 +71,6 @@ __all__ = [
     "UpdatePipeline",
     "UptimeSample",
     "User",
+    "UserSession",
+    "UserTOTP",
 ]
