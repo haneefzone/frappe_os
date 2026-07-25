@@ -399,7 +399,7 @@
                   :disabled="confirmingEscrow"
                   @change="onEscrowTick"
                 />
-                I have escrowed the master key and backup passphrase per the runbook
+                {{ confirmingEscrow ? 'Confirming…' : 'I have escrowed the master key and backup passphrase per the runbook' }}
               </label>
               <p v-if="escrowError" class="mt-1.5 text-meta text-err" role="alert">{{ escrowError }}</p>
             </div>
@@ -409,6 +409,7 @@
           <div
             v-else-if="escrow?.confirmed"
             class="flex items-center gap-2 rounded-lg border border-ok/40 bg-ok/8 px-4 py-2.5"
+            role="status"
           >
             <LucideShieldCheck class="h-4 w-4 shrink-0 text-ok" aria-hidden="true" />
             <span class="text-label text-ink-1">
@@ -461,7 +462,7 @@
 
             <!-- Latest backup summary card -->
             <template v-else-if="latestBackup">
-              <div class="grid grid-cols-2 gap-0 divide-x divide-line sm:grid-cols-4">
+              <div class="grid grid-cols-2 gap-0 divide-y divide-line sm:divide-y-0 sm:divide-x sm:grid-cols-4">
                 <div class="px-5 py-4">
                   <span class="block text-meta font-medium uppercase tracking-wide text-ink-2">Status</span>
                   <StatusBadge :status="pbStatusDot(latestBackup.status)" :label="latestBackup.status" class="mt-1.5" />
@@ -531,6 +532,9 @@
               </template>
               <template #cell-verify_status="{ row }">
                 <StatusBadge :status="verifyStatusDot(row.verify_status)" :label="verifyLabel(row.verify_status)" />
+              </template>
+              <template #cell-size_bytes="{ row }">
+                {{ formatBytes(row.size_bytes) }}
               </template>
               <template #cell-created_at="{ row }">
                 <span :title="absoluteTime(row.created_at)">{{ relativeTime(row.created_at) }}</span>
@@ -1005,7 +1009,7 @@ const pbColumns: DataTableColumn<PlatformBackup>[] = [
   { key: 'id', label: '#', sortable: true, width: '56px', align: 'right' },
   { key: 'status', label: 'Status', sortable: true },
   { key: 'verify_status', label: 'Verified', sortable: true },
-  { key: 'size_bytes', label: 'Size', sortable: true, format: (r) => formatBytes(r.size_bytes) },
+  { key: 'size_bytes', label: 'Size', sortable: true },
   { key: 'storage_target_name', label: 'Target', format: (r) => r.storage_target_name ?? '—' },
   { key: 'created_at', label: 'Created', sortable: true },
 ]
