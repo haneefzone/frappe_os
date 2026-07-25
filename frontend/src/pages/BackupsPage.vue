@@ -766,8 +766,8 @@ async function loadConfigRepos() {
     const [repos, srvs] = await Promise.all([resticApi.list(), serversApi.list()])
     resticRepos.value = repos
     servers.value = srvs
-  } catch {
-    // Non-fatal: the tab stays empty with the existing loadError if present.
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : 'Could not load config repos.'
   }
 }
 
