@@ -57,7 +57,7 @@ export const ARTIFACT_LABEL: Record<ArtifactKind | string, string> = {
  */
 export function kindChip(kind: string): { label: string; status: Status } {
   return kind === 'config'
-    ? { label: 'Config', status: 'muted' }
+    ? { label: 'Config', status: 'running' }
     : { label: 'Site', status: 'muted' }
 }
 
