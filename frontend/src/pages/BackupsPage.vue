@@ -106,7 +106,7 @@
                 <StatusBadge
                   v-if="b.moved_from_backup_id"
                   class="ml-1"
-                  status="running"
+                  status="muted"
                   label="Moved"
                   :title="`Moved from backup #${b.moved_from_backup_id} on another server`"
                 />
@@ -181,6 +181,7 @@
                     size="sm"
                     label="Move"
                     title="Move this backup onto another server (via its offsite copy)"
+                    :aria-label="`Move ${b.site_name} backup to another server`"
                     @click="openMove(b)"
                   />
                   <Button

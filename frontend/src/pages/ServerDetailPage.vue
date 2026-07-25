@@ -61,7 +61,7 @@
 
       <div v-else-if="server" class="grid max-w-4xl gap-6 lg:grid-cols-2">
         <!-- Per-server rollup (session 2.6, B4.2): KPIs for this server only -->
-        <section v-if="rollupCards.length" class="grid gap-4 sm:grid-cols-2 lg:col-span-2 lg:grid-cols-4">
+        <section v-if="rollupCards.length" aria-label="Server summary" class="grid gap-4 sm:grid-cols-2 lg:col-span-2 lg:grid-cols-4">
           <KPICard
             v-for="card in rollupCards"
             :key="card.label"
