@@ -15,8 +15,9 @@ Status colours (ok/warn/err/info) are NOT configurable (uiux-spec B1.5).
 All columns are nullable so the row auto-migrates with NULL defaults.
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "b3c4d5e6f7a8"
 down_revision = "f8b3d1c6a2e9"
