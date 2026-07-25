@@ -211,7 +211,11 @@ import {
   alertsApi,
   COMPARATOR_OPTIONS,
   METRIC_OPTIONS,
+  type AlertMetric,
+  type AlertComparator,
+  type AlertScope,
   type AlertRule,
+  type AlertRuleUpdatePayload,
 } from '../api/alerts'
 import { serversApi, type Server } from '../api/servers'
 import Field from './SheetField.vue'
@@ -236,10 +240,10 @@ const submitError = ref('')
 
 const form = reactive({
   name: '',
-  metric: 'cpu_pct' as string,
-  comparator: '>' as string,
+  metric: 'cpu_pct' as AlertMetric,
+  comparator: '>' as AlertComparator,
   threshold: 85,
-  scope: 'global' as string,
+  scope: 'global' as AlertScope,
   scope_server_id: null as number | null,
   cooldown_minutes: 30,
   channel_email: false,
@@ -320,7 +324,7 @@ async function submit() {
   submitError.value = ''
   try {
     if (isEdit.value && props.rule) {
-      const payload: Record<string, unknown> = {
+      const payload: AlertRuleUpdatePayload = {
         name: form.name,
         metric: form.metric,
         comparator: form.comparator,
@@ -335,14 +339,14 @@ async function submit() {
         enabled: form.enabled,
       }
       if (form.webhook_secret) payload.webhook_secret = form.webhook_secret
-      await alertsApi.update(props.rule.id, payload as never)
+      await alertsApi.update(props.rule.id, payload)
     } else {
       await alertsApi.create({
         name: form.name,
-        metric: form.metric as never,
-        comparator: form.comparator as never,
+        metric: form.metric,
+        comparator: form.comparator,
         threshold: form.threshold,
-        scope: form.scope as never,
+        scope: form.scope,
         scope_server_id: form.scope === 'server' ? form.scope_server_id : null,
         cooldown_minutes: form.cooldown_minutes,
         channel_email: form.channel_email,

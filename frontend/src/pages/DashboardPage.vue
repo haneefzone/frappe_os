@@ -191,7 +191,7 @@
           </div>
           <ul class="divide-y divide-err/10">
             <li
-              v-for="f in incidentsData.incidents"
+              v-for="f in incidentsData.incidents.filter(inc => !inc.resolved_at)"
               :key="f.id"
               class="flex items-center gap-3 px-4 py-2.5 text-label"
             >

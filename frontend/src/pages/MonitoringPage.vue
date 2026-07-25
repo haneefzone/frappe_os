@@ -233,6 +233,7 @@
     :message="`Delete '${deletingRule?.name}'? This removes all associated incident history.`"
     verb="Delete rule"
     variant="destructive"
+    :target-name="deletingRule?.name"
     :loading="busyId !== null"
     @confirm="confirmDelete"
   />
