@@ -56,7 +56,7 @@
         <p v-if="data.morning_brief" class="text-body text-ink-1">{{ data.morning_brief }}</p>
 
         <!-- Row 1: KPIs -->
-        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
+        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
           <KPICard
             label="Fleet health"
             :value="`${Math.round(data.kpis.fleet_health_pct)}%`"
@@ -68,6 +68,12 @@
             :value="`${data.kpis.sites_up}/${data.kpis.sites_total}`"
             :status="data.kpis.sites_up >= data.kpis.sites_total ? 'ok' : data.kpis.sites_up === 0 && data.kpis.sites_total > 0 ? 'err' : 'warn'"
             :sublabel="`${pctLabel(data.kpis.uptime_30d_pct)} uptime (30d)`"
+          />
+          <KPICard
+            label="Open alerts"
+            :value="incidentsData ? String(incidentsData.open_alerts) : '—'"
+            :status="incidentsData && incidentsData.open_alerts > 0 ? 'err' : 'ok'"
+            sublabel="Active breaches"
           />
           <KPICard
             label="Backups 24h"
@@ -169,6 +175,47 @@
           </ul>
         </section>
 
+        <!-- Open incidents panel (session 3.1) -->
+        <section
+          v-if="incidentsData && incidentsData.incidents.length > 0"
+          class="rounded-lg border border-err/40 bg-err/5"
+        >
+          <div class="flex items-center justify-between border-b border-err/30 px-4 py-2.5">
+            <h2 class="flex items-center gap-2 text-label font-semibold text-err">
+              <LucideBell class="h-4 w-4" />
+              Incidents
+            </h2>
+            <span class="text-meta text-err/80">
+              {{ incidentsData.open_alerts }} open alert{{ incidentsData.open_alerts === 1 ? '' : 's' }}
+            </span>
+          </div>
+          <ul class="divide-y divide-err/10">
+            <li
+              v-for="f in incidentsData.incidents"
+              :key="f.id"
+              class="flex items-center gap-3 px-4 py-2.5 text-label"
+            >
+              <StatusDot :status="f.resolved_at ? 'ok' : 'err'" />
+              <span class="font-medium text-ink-1">{{ f.rule_name ?? '(deleted rule)' }}</span>
+              <span v-if="f.server_name" class="text-ink-3">{{ f.server_name }}</span>
+              <span class="font-mono text-ink-2">
+                {{ f.metric }} {{ f.comparator }} {{ f.threshold }}
+                <span v-if="f.value != null"> → {{ f.value.toFixed(1) }}</span>
+              </span>
+              <span v-if="f.resolved_at" class="ml-auto text-ok text-meta">Resolved</span>
+              <span v-else class="ml-auto text-meta text-err/80">Open</span>
+              <span class="text-meta text-ink-3" :title="absoluteTime(f.created_at)">
+                {{ relativeTime(f.created_at) }}
+              </span>
+            </li>
+          </ul>
+          <div class="border-t border-err/20 px-4 py-2">
+            <RouterLink to="/monitoring" class="text-meta text-ink-2 hover:text-ink-1 fdm-focus">
+              View all in Monitoring →
+            </RouterLink>
+          </div>
+        </section>
+
         <div class="grid gap-6 lg:grid-cols-2">
           <!-- 7-day backup grid -->
           <section class="rounded-lg border border-line bg-surface">
@@ -232,10 +279,12 @@ import { Button } from 'frappe-ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import LucideAlertTriangle from '~icons/lucide/alert-triangle'
+import LucideBell from '~icons/lucide/bell'
 import LucideListChecks from '~icons/lucide/list-checks'
 import LucidePlus from '~icons/lucide/plus'
 import LucideRocket from '~icons/lucide/rocket'
 import LucideServer from '~icons/lucide/server'
+import { alertsApi, type IncidentsData } from '../api/alerts'
 import { type BackupGridDay, type Dashboard, dashboardApi } from '../api/dashboard'
 import DriftDrawer from '../components/DriftDrawer.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -252,6 +301,7 @@ const POLL_MS = 15000
 const router = useRouter()
 
 const data = ref<Dashboard | null>(null)
+const incidentsData = ref<IncidentsData | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 const activeDriftId = ref<number | null>(null)
@@ -304,9 +354,13 @@ async function load(initial = false) {
   if (initial) loading.value = true
   loadError.value = ''
   try {
-    data.value = await dashboardApi.get()
-  } catch (error) {
-    loadError.value = error instanceof Error ? error.message : 'Could not load the dashboard.'
+    const [dashboard, incidents] = await Promise.allSettled([
+      dashboardApi.get(),
+      alertsApi.incidents(),
+    ])
+    if (dashboard.status === 'fulfilled') data.value = dashboard.value
+    else loadError.value = dashboard.reason instanceof Error ? dashboard.reason.message : 'Could not load the dashboard.'
+    if (incidents.status === 'fulfilled') incidentsData.value = incidents.value
   } finally {
     loading.value = false
   }
