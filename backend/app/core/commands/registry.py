@@ -9,6 +9,7 @@ Starter templates (session 1.3):
 from __future__ import annotations
 
 from app.core.commands.actions import (
+    Action,
     BackupAction,
     BenchBuildAction,
     BenchPreflightAction,
@@ -16,6 +17,7 @@ from app.core.commands.actions import (
     BenchUpdateAction,
     CertbotIssueAction,
     CertbotRenewAction,
+    CloneToStagingAction,
     CreateBenchAction,
     CreateSiteAction,
     DetectToolsAction,
@@ -28,6 +30,7 @@ from app.core.commands.actions import (
     ListBranchesAction,
     MigrateAllSitesAction,
     MoveBackupAction,
+    PromoteUpdateAction,
     RenderVhostAction,
     RestartServiceAction,
     RestoreAction,
@@ -39,6 +42,7 @@ from app.core.commands.actions import (
     SslExpiryScanAction,
     UninstallAppAction,
     ValidateBackupAction,
+    VerifyChecklistAction,
 )
 from app.core.commands.templates import (
     CommandTemplate,
@@ -52,6 +56,7 @@ from app.core.permissions import (
     BACKUP_TRANSFER,
     BENCH_OPERATE,
     DANGER,
+    READ,
     SERVER_MANAGE,
     SITE_OPERATE,
     SSL_MANAGE,
@@ -895,6 +900,184 @@ register(
         },
     )
 )
+
+# --- Safe update pipeline (session 3.3) --------------------------------- #
+
+# A Frappe doctype name for the row-count probe. Letters + spaces only (e.g.
+# "User", "Sales Invoice"); passed as its own argv element inside a fixed
+# `["{doctype}"]` --args token (execve, no shell) — no metacharacters can pass.
+DOCTYPE = r"[A-Za-z][A-Za-z ]{1,60}"
+
+# A dotted Python path for the optional data-scrub hook (uiux §8): the method
+# `bench --site X execute <method>` runs to mask PII on a prod→dev clone. Only
+# word chars and dots — no shell metacharacters, no arguments. The operator
+# configures which shipped method performs the masking; NULL skips the scrub.
+DOTTED_METHOD = r"[a-zA-Z_][a-zA-Z0-9_.]{1,120}"
+
+# A UpdatePipeline row id threaded onto a 3.3 job so the action can persist its
+# progress (clone -> staging_site_id, verify -> checklist, promote -> pre_backup).
+PIPELINE_ID = r"[0-9]{1,12}"
+
+# `bench --site X execute frappe.ping` — the boot probe (read-only). Rendered as
+# a sub-step by the verify/promote actions; runnable standalone.
+register(
+    CommandTemplate(
+        action_name="site.ping",
+        argv=("bench", "--site", "{site}", "execute", "frappe.ping"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=Action,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=READ,
+        run_as=None,
+    )
+)
+
+# `bench --site X scheduler status` — read-only scheduler/workers probe.
+register(
+    CommandTemplate(
+        action_name="site.scheduler_status",
+        argv=("bench", "--site", "{site}", "scheduler", "status"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=Action,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=READ,
+        run_as=None,
+    )
+)
+
+# `bench --site X execute frappe.client.get_count --args '["<Doctype>"]'` — the
+# row-count sanity probe. The doctype is validated (letters/spaces) and inserted
+# into a fixed JSON --args token as its own argv element (execve, no shell).
+register(
+    CommandTemplate(
+        action_name="site.count_doctype",
+        argv=(
+            "bench", "--site", "{site}", "execute", "frappe.client.get_count",
+            "--args", '["{doctype}"]',
+        ),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("doctype", regex=DOCTYPE),
+        ),
+        action_class=Action,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=READ,
+        run_as=None,
+    )
+)
+
+# `bench --site X execute <method>` — the optional PII data-scrub hook. The
+# method is an operator-configured shipped dotted path (no arguments); rendered
+# only as a sub-step of the clone job.
+register(
+    CommandTemplate(
+        action_name="site.scrub",
+        argv=("bench", "--site", "{site}", "execute", "{method}"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("method", regex=DOTTED_METHOD),
+        ),
+        action_class=Action,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SITE_OPERATE,
+        run_as=None,
+    )
+)
+
+# The clone-to-staging orchestrator POST /api/update-pipelines launches: back up
+# the source site (with files), create + restore into a fresh staging site, run
+# the optional PII scrub, and tag the clone `environment=staging`. Locked on the
+# staging target site. Reuses backup:restore machinery -> BACKUP_RESTORE.
+register(
+    CommandTemplate(
+        action_name="site.clone_to_staging",
+        argv=("true",),  # nominal; CloneToStagingAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("source_site", regex=SITE_NAME),
+            ParamSpec("source_bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("site", regex=SITE_NAME),  # the staging site to create
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),  # staging bench
+            ParamSpec("scrub_method", regex=DOTTED_METHOD, required=False),
+            ParamSpec("pipeline_id", regex=PIPELINE_ID, required=False),
+            ParamSpec("admin_pw", regex=SECRET_TEXT, secret=True, required=False),
+            ParamSpec("db_root_pw", regex=SECRET_TEXT, secret=True, required=False),
+        ),
+        action_class=CloneToStagingAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BACKUP_RESTORE,
+        run_as=None,
+        secret_sources={
+            "admin_pw": "job",
+            "db_root_pw": "server:mariadb_root_password_enc",
+        },
+    )
+)
+
+# The verification-checklist job POST /api/update-pipelines/{id}/verify launches:
+# boot / migrations / scheduler / row-count probes on the staging clone, emitting
+# CHECKLIST_RESULT and persisting the verdict onto the pipeline. Runs `bench
+# migrate` (a mutation) -> SITE_OPERATE, locked on the staging site.
+register(
+    CommandTemplate(
+        action_name="site.verify_checklist",
+        argv=("true",),  # nominal; VerifyChecklistAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("source_site", regex=SITE_NAME, required=False),
+            ParamSpec("source_bench_path", regex=ABS_PATH, is_path=True, required=False),
+            ParamSpec("pipeline_id", regex=PIPELINE_ID, required=False),
+        ),
+        action_class=VerifyChecklistAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SITE_OPERATE,
+        run_as=None,
+    )
+)
+
+# The promote job POST /api/update-pipelines/{id}/promote launches: a MANDATORY
+# pre-update backup of prod FIRST (the gate), then `bench update`, then a
+# post-check; a failed update rolls back by restoring the pre-update backup.
+# BACKUP_RESTORE launches it; the destructive prod mutation also requires the
+# `danger` perm + typed-site-name confirm + a green checklist, enforced in the API.
+register(
+    CommandTemplate(
+        action_name="site.promote_update",
+        argv=("true",),  # nominal; PromoteUpdateAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("pipeline_id", regex=PIPELINE_ID, required=False),
+        ),
+        action_class=PromoteUpdateAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BACKUP_RESTORE,
+        run_as=None,
+    )
+)
+
 
 # --- Monitoring: restart a managed service (session 1.12) ---------------- #
 

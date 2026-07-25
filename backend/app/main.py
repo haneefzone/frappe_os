@@ -33,6 +33,7 @@ from app.api.routes.settings import router as settings_router
 from app.api.routes.sites import router as sites_router
 from app.api.routes.storage_targets import router as storage_targets_router
 from app.api.routes.terminal import router as terminal_router
+from app.api.routes.updates import router as updates_router
 from app.config import get_settings
 from app.core.logging import configure_logging
 from app.errors import register_exception_handlers
@@ -175,6 +176,7 @@ def create_app() -> FastAPI:
     app.include_router(reports_router)
     app.include_router(notifications_router)
     app.include_router(search_router)
+    app.include_router(updates_router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

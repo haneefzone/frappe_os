@@ -1753,6 +1753,479 @@ class RestoreAction(Action):
                 await _stop_dev_redis(ctx, queue_port, cache_port)
 
 
+# --------------------------------------------------------------------------- #
+# Safe update pipeline (session 3.3): clone -> staging -> verify -> promote.
+# --------------------------------------------------------------------------- #
+
+
+def _load_pipeline(ctx: JobContext, pipeline_id):
+    """Load the UpdatePipeline row a 3.3 job threads its progress onto, or None
+    when the job runs without one (e.g. a standalone verify)."""
+    if not pipeline_id:
+        return None
+    from app.models.update_pipeline import UpdatePipeline
+
+    return ctx.session.get(UpdatePipeline, int(pipeline_id))
+
+
+async def _restore_artifacts_into_site(
+    ctx: JobContext,
+    *,
+    site: str,
+    bench_path: str,
+    bench,
+    db_path: str,
+    public_files: str | None,
+    private_files: str | None,
+    config_path: str | None,
+    create: bool,
+    admin_pw: str | None = None,
+    db_root_pw: str | None = None,
+) -> None:
+    """Restore a set of backup artifacts into ``site`` on ``bench``, reusing the
+    exact 1.11 restore sequence (gotcha #7): (optionally) create the target site,
+    `bench --force restore` (db [+ files]), copy the source encryption_key into
+    the target site_config, then `bench migrate`. Shared by the clone-to-staging
+    job (create=True) and the promote job's rollback (create=False, restore over
+    the existing prod site). The caller owns the dev-bench Redis dance."""
+    from app.core import backups as bk
+    from app.core.commands import get_template, render
+    from app.models.backup import Backup  # noqa: F401  (kept parallel to RestoreAction)
+
+    if create:
+        if not admin_pw or not db_root_pw:
+            raise RuntimeError(
+                "creating the target site needs an admin password and the "
+                "server's MariaDB root password"
+            )
+        new_site = render(
+            get_template("site.new"),
+            {
+                "site": site,
+                "db_root_pw": db_root_pw,
+                "admin_pw": admin_pw,
+                "bench_path": bench_path,
+            },
+        )
+        with ctx.step("Create target site (bench new-site)"):
+            await ctx.emit(f"$ {new_site.display}")
+            code = await ctx.stream(new_site.argv, cwd=new_site.cwd)
+            if code != 0:
+                raise RuntimeError(f"bench new-site exited with status {code}")
+
+    with_files = bool(public_files and private_files)
+    if with_files:
+        rst = render(
+            get_template("site.restore_files"),
+            {
+                "site": site,
+                "bench_path": bench_path,
+                "db_path": db_path,
+                "public_files": public_files,
+                "private_files": private_files,
+            },
+        )
+        restore_label = "Restore database + files"
+    else:
+        rst = render(
+            get_template("site.restore_db"),
+            {"site": site, "bench_path": bench_path, "db_path": db_path},
+        )
+        restore_label = "Restore database"
+    with ctx.step(restore_label):
+        await ctx.emit(f"$ {rst.display}")
+        code = await ctx.stream(rst.argv, cwd=rst.cwd)
+        if code != 0:
+            raise RuntimeError(f"bench restore exited with status {code}")
+
+    with ctx.step("Copy encryption_key into target site_config (gotcha #7)"):
+        if not config_path:
+            await ctx.emit(
+                "No config artifact in this backup — skipping the encryption_key "
+                "copy (the source site had none)."
+            )
+        else:
+            res = await ctx.capture(["cat", config_path])
+            key = bk.parse_encryption_key(res.stdout)
+            if not key:
+                await ctx.emit("Source config backup carried no encryption_key.")
+            else:
+                setcfg = render(
+                    get_template("site.set_encryption_key"),
+                    {"site": site, "bench_path": bench_path, "key": key},
+                )
+                await ctx.emit(f"$ {setcfg.display}")
+                code = await ctx.stream(setcfg.argv, cwd=setcfg.cwd)
+                if code != 0:
+                    raise RuntimeError(
+                        f"set-config encryption_key exited with status {code}"
+                    )
+
+    mig = render(get_template("site.migrate"), {"site": site, "bench_path": bench_path})
+    with ctx.step("Migrate restored site (bench migrate)"):
+        await ctx.emit(f"$ {mig.display}")
+        code = await ctx.stream(mig.argv, cwd=mig.cwd)
+        if code != 0:
+            raise RuntimeError(f"bench migrate exited with status {code}")
+
+
+class CloneToStagingAction(Action):
+    """`site.clone_to_staging` — clone a (prod) site onto a staging bench (3.3).
+
+    Reuses the 1.11 backup + restore machinery end to end: (1) take a with-files
+    backup of the source site, (2) create a fresh staging site and restore the
+    backup into it (db + files + encryption_key + migrate), (3) run an optional
+    data-scrub hook to mask PII for prod→dev copies (uiux §8), (4) register the
+    staging site tagged `environment="staging"`. One non-idempotent job locked on
+    the staging target — a clone is never auto-retried on top of a half-clone."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import discovery
+        from app.core.commands import get_template, render
+
+        params = ctx.rendered.params_sanitized
+        secrets = ctx.rendered.secret_map
+        source_site = params["source_site"]
+        source_bench_path = params["source_bench_path"]
+        staging_site = params["site"]
+        staging_bench_path = params["bench_path"]
+        scrub_method = params.get("scrub_method")
+        pipeline = _load_pipeline(ctx, params.get("pipeline_id"))
+
+        source_bench = _load_bench(ctx, source_bench_path)
+        staging_bench = _load_bench(ctx, staging_bench_path)
+
+        # 1) Back up the source site (with files) — the artifacts we clone from.
+        s_queue, s_cache = _redis_ports(source_bench)
+        src_is_dev = await _detect_bench_mode(ctx, source_bench_path)
+        started = False
+        try:
+            if src_is_dev:
+                await _start_dev_redis(ctx, source_bench_path)
+                started = True
+            row = await _run_backup(
+                ctx,
+                site=source_site,
+                bench_path=source_bench_path,
+                bench=source_bench,
+                with_files=True,
+                step_label=f"Back up source site {source_site} (with files)",
+            )
+        finally:
+            if started:
+                await _stop_dev_redis(ctx, s_queue, s_cache)
+        if row is None or row.status != "success" or not row.db_path:
+            raise RuntimeError(
+                "source backup did not produce a usable database artifact; "
+                "not cloning"
+            )
+
+        # 2) Restore into a fresh staging site, then (3) optional PII scrub.
+        t_queue, t_cache = _redis_ports(staging_bench)
+        tgt_is_dev = await _detect_bench_mode(ctx, staging_bench_path)
+        started = False
+        try:
+            if tgt_is_dev:
+                await _start_dev_redis(ctx, staging_bench_path)
+                started = True
+            await _restore_artifacts_into_site(
+                ctx,
+                site=staging_site,
+                bench_path=staging_bench_path,
+                bench=staging_bench,
+                db_path=row.db_path,
+                public_files=row.public_files_path,
+                private_files=row.private_files_path,
+                config_path=row.config_path,
+                create=True,
+                admin_pw=secrets.get("admin_pw"),
+                db_root_pw=secrets.get("db_root_pw"),
+            )
+            if scrub_method:
+                scrub = render(
+                    get_template("site.scrub"),
+                    {
+                        "site": staging_site,
+                        "bench_path": staging_bench_path,
+                        "method": scrub_method,
+                    },
+                )
+                with ctx.step(f"Scrub PII on the clone ({scrub_method})"):
+                    await ctx.emit(f"$ {scrub.display}")
+                    code = await ctx.stream(scrub.argv, cwd=scrub.cwd)
+                    if code != 0:
+                        raise RuntimeError(f"data scrub exited with status {code}")
+        finally:
+            if started:
+                await _stop_dev_redis(ctx, t_queue, t_cache)
+
+        # 4) Register the staging site tagged as a staging environment.
+        with ctx.step("Register staging site"):
+            if staging_bench is not None:
+                site_row = discovery.upsert_site_one(
+                    ctx.session, staging_bench.id, staging_site
+                )
+                site_row.environment = "staging"
+                if pipeline is not None:
+                    pipeline.staging_site_id = site_row.id
+                    pipeline.phase = "cloned"
+                ctx.session.commit()
+                await ctx.emit(
+                    f"Staging site #{site_row.id} ({staging_site}) is ready "
+                    "(environment=staging)."
+                )
+            else:
+                await ctx.emit(
+                    "Staging bench not in inventory — run a discovery to track "
+                    "the clone."
+                )
+
+
+class VerifyChecklistAction(Action):
+    """`site.verify_checklist` — the pre-promote verification gate (uiux §5, 3.3).
+
+    Runs four read-mostly probes against the (staging) site and emits a
+    machine-readable `CHECKLIST_RESULT <json>` line the UI renders as the
+    all-green gate: (1) the site boots (`frappe.ping`), (2) migrations are clean
+    (`bench migrate` is a no-op exit 0), (3) the scheduler is enabled, (4) a
+    row-count sanity check vs the source site shows no gross data loss. The
+    verdict + all-green flag are persisted onto the UpdatePipeline row so the
+    promote endpoint can enforce "verified before promote" server-side."""
+
+    async def run(self, ctx: JobContext) -> None:
+        import json
+
+        from app.core.commands import get_template, render
+
+        params = ctx.rendered.params_sanitized
+        site = params["site"]
+        bench_path = params["bench_path"]
+        source_site = params.get("source_site")
+        source_bench_path = params.get("source_bench_path")
+        pipeline = _load_pipeline(ctx, params.get("pipeline_id"))
+
+        bench = _load_bench(ctx, bench_path)
+        queue_port, cache_port = _redis_ports(bench)
+        is_dev = await _detect_bench_mode(ctx, bench_path)
+
+        checks: list[dict] = []
+
+        async def _count(target_site: str, target_bench: str) -> int | None:
+            cmd = render(
+                get_template("site.count_doctype"),
+                {"site": target_site, "bench_path": target_bench, "doctype": "User"},
+            )
+            res = await ctx.capture(cmd.argv, cwd=cmd.cwd)
+            digits = "".join(ch for ch in (res.stdout or "") if ch.isdigit())
+            return int(digits) if digits else None
+
+        started = False
+        try:
+            if is_dev:
+                await _start_dev_redis(ctx, bench_path)
+                started = True
+
+            # (1) Site boots.
+            with ctx.step("Check: site boots (frappe.ping)"):
+                ping = render(
+                    get_template("site.ping"), {"site": site, "bench_path": bench_path}
+                )
+                res = await ctx.capture(ping.argv, cwd=ping.cwd)
+                boots = res.exit_code == 0 and "pong" in (res.stdout or "").lower()
+                checks.append(
+                    {"key": "boots", "label": "Site boots", "ok": boots,
+                     "detail": "frappe.ping returned pong" if boots else "site did not boot"}
+                )
+
+            # (2) Migrations clean (idempotent bench migrate exits 0).
+            with ctx.step("Check: migrations clean (bench migrate)"):
+                mig = render(
+                    get_template("site.migrate"), {"site": site, "bench_path": bench_path}
+                )
+                await ctx.emit(f"$ {mig.display}")
+                code = await ctx.stream(mig.argv, cwd=mig.cwd)
+                clean = code == 0
+                checks.append(
+                    {"key": "migrations", "label": "Migrations clean", "ok": clean,
+                     "detail": "bench migrate exited 0" if clean else f"migrate exited {code}"}
+                )
+
+            # (3) Scheduler / workers up.
+            with ctx.step("Check: scheduler enabled"):
+                sched = render(
+                    get_template("site.scheduler_status"),
+                    {"site": site, "bench_path": bench_path},
+                )
+                res = await ctx.capture(sched.argv, cwd=sched.cwd)
+                up = res.exit_code == 0 and "enabled" in (res.stdout or "").lower()
+                checks.append(
+                    {"key": "scheduler", "label": "Scheduler/workers up", "ok": up,
+                     "detail": "scheduler enabled" if up else "scheduler not enabled"}
+                )
+
+            # (4) Row-count sanity vs the source site (no gross data loss).
+            with ctx.step("Check: row-count sanity vs source"):
+                staging_n = await _count(site, bench_path)
+                source_n = (
+                    await _count(source_site, source_bench_path)
+                    if source_site and source_bench_path
+                    else None
+                )
+                if staging_n is None:
+                    ok = False
+                    detail = "could not read a row count on the clone"
+                elif source_n is None:
+                    ok = staging_n >= 1
+                    detail = f"clone has {staging_n} User rows (no source baseline)"
+                else:
+                    # Clone should carry ~all of source; allow growth from migrate,
+                    # flag a gross loss (more than half the rows gone).
+                    ok = staging_n * 2 >= source_n
+                    detail = f"clone {staging_n} vs source {source_n} User rows"
+                checks.append(
+                    {"key": "row_count", "label": "Row-count sanity", "ok": ok,
+                     "detail": detail}
+                )
+        finally:
+            if started:
+                await _stop_dev_redis(ctx, queue_port, cache_port)
+
+        all_ok = all(c["ok"] for c in checks)
+        result = {"all_ok": all_ok, "checks": checks}
+        await ctx.emit("CHECKLIST_RESULT " + json.dumps(result), stream="result")
+        if pipeline is not None:
+            pipeline.checklist = result
+            pipeline.checklist_ok = all_ok
+            pipeline.phase = "verified" if all_ok else "verify_failed"
+            ctx.session.commit()
+        await ctx.emit(
+            "Verification checklist all-green — safe to promote."
+            if all_ok
+            else "Verification checklist has RED items — promote is blocked."
+        )
+
+
+class PromoteUpdateAction(Action):
+    """`site.promote_update` — apply the update to production, safely (3.3).
+
+    Ordered, non-idempotent, never auto-retried:
+      1. MANDATORY pre-update backup of prod (with files) FIRST — the gate. If it
+         fails the job aborts and prod is never touched.
+      2. `bench update` on the production bench.
+      3. Post-update check (`frappe.ping`).
+    If step 2 or 3 fails, an in-job ROLLBACK restores the pre-update backup over
+    prod (db + files + encryption_key + migrate) and the pipeline is marked
+    `rolled_back`; the job then fails loudly so the operator sees the update did
+    not land. The rollback path is exercised by test_updates.py."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core.commands import get_template, render
+
+        params = ctx.rendered.params_sanitized
+        site = params["site"]
+        bench_path = params["bench_path"]
+        pipeline = _load_pipeline(ctx, params.get("pipeline_id"))
+
+        bench = _load_bench(ctx, bench_path)
+        queue_port, cache_port = _redis_ports(bench)
+        is_dev = await _detect_bench_mode(ctx, bench_path)
+        if pipeline is not None:
+            pipeline.phase = "promoting"
+            ctx.session.commit()
+
+        started = False
+        try:
+            if is_dev:
+                await _start_dev_redis(ctx, bench_path)
+                started = True
+
+            # 1) The pre-update backup GATE — before any prod mutation.
+            try:
+                pre = await _run_backup(
+                    ctx,
+                    site=site,
+                    bench_path=bench_path,
+                    bench=bench,
+                    with_files=True,
+                    step_label="Pre-update backup of production (mandatory gate)",
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"pre-update backup failed ({exc}); production was NOT touched"
+                ) from exc
+            if pre is None or pre.status != "success" or not pre.db_path:
+                raise RuntimeError(
+                    "pre-update backup produced no usable artifact; production "
+                    "was NOT touched"
+                )
+            if pipeline is not None:
+                pipeline.pre_backup_id = pre.id
+                ctx.session.commit()
+            await ctx.emit(
+                f"Pre-update backup #{pre.id} captured — prod is now recoverable; "
+                "proceeding with the update."
+            )
+
+            # 2) Apply the update to production.
+            update_failed: Exception | None = None
+            update = render(get_template("bench.update"), {"bench_path": bench_path})
+            try:
+                with ctx.step("Apply update to production (bench update)"):
+                    await ctx.emit(f"$ {update.display}")
+                    code = await ctx.stream(update.argv, cwd=update.cwd)
+                    if code != 0:
+                        raise RuntimeError(f"bench update exited with status {code}")
+
+                # 3) Post-update check.
+                with ctx.step("Post-update check (frappe.ping)"):
+                    ping = render(
+                        get_template("site.ping"),
+                        {"site": site, "bench_path": bench_path},
+                    )
+                    res = await ctx.capture(ping.argv, cwd=ping.cwd)
+                    if res.exit_code != 0 or "pong" not in (res.stdout or "").lower():
+                        raise RuntimeError(
+                            "post-update check failed: site did not boot after update"
+                        )
+            except Exception as exc:  # noqa: BLE001
+                update_failed = exc
+
+            if update_failed is not None:
+                # ROLLBACK: restore the pre-update backup over prod.
+                await ctx.emit(
+                    f"Update failed ({update_failed}) — rolling back by restoring "
+                    f"pre-update backup #{pre.id}."
+                )
+                await _restore_artifacts_into_site(
+                    ctx,
+                    site=site,
+                    bench_path=bench_path,
+                    bench=bench,
+                    db_path=pre.db_path,
+                    public_files=pre.public_files_path,
+                    private_files=pre.private_files_path,
+                    config_path=pre.config_path,
+                    create=False,
+                )
+                if pipeline is not None:
+                    pipeline.phase = "rolled_back"
+                    pipeline.rollback_job_id = ctx.job_id
+                    pipeline.note = f"promote failed, rolled back: {update_failed}"
+                    ctx.session.commit()
+                raise RuntimeError(
+                    f"update failed and was rolled back to pre-update backup "
+                    f"#{pre.id}: {update_failed}"
+                )
+
+            if pipeline is not None:
+                pipeline.phase = "promoted"
+                ctx.session.commit()
+            await ctx.emit("Production update promoted and verified.")
+        finally:
+            if started:
+                await _stop_dev_redis(ctx, queue_port, cache_port)
+
+
 class RestartServiceAction(Action):
     """`server.restart_service` — restart one managed system service from the
     monitoring services grid (session 1.12).

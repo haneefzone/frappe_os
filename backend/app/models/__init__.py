@@ -22,6 +22,7 @@ from app.models.settings import PlatformSettings
 from app.models.site import Site
 from app.models.storage import StorageTarget
 from app.models.terminal import TerminalSession
+from app.models.update_pipeline import UpdatePipeline
 from app.models.uptime import UptimeSample
 
 __all__ = [
@@ -53,6 +54,7 @@ __all__ = [
     "Site",
     "StorageTarget",
     "TerminalSession",
+    "UpdatePipeline",
     "UptimeSample",
     "User",
 ]
