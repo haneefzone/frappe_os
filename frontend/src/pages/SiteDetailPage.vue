@@ -322,6 +322,30 @@
             </tbody>
           </table>
         </section>
+
+        <!-- Config drift for this site (session 6.7) -->
+        <section class="rounded-lg border border-line bg-surface lg:col-span-2">
+          <div class="flex items-center justify-between border-b border-line px-4 py-2.5">
+            <h2 class="text-label font-semibold text-ink-1">Config drift</h2>
+            <span v-if="siteDriftBaselines.length" class="text-meta text-ink-3">
+              {{ siteDriftBaselines.filter(b => b.status === 'drifted').length }} drifted of {{ siteDriftBaselines.length }}
+            </span>
+          </div>
+          <div v-if="driftLoading" class="flex flex-wrap gap-2 p-4">
+            <div v-for="i in 3" :key="i" class="h-6 w-28 animate-pulse rounded-full bg-raised" />
+          </div>
+          <div v-else-if="siteDriftBaselines.length === 0" class="px-4 py-3 text-label text-ink-3">
+            No config baselines tracked for this site yet.
+          </div>
+          <div v-else class="flex flex-wrap gap-2 p-4">
+            <DriftChip
+              v-for="b in siteDriftBaselines"
+              :key="b.id"
+              :baseline="b"
+              @click="activeDriftId = b.id"
+            />
+          </div>
+        </section>
       </div>
     </div>
 
@@ -766,6 +790,12 @@
       :loading="maintLaunching"
       @confirm="confirmMaint"
     />
+
+    <DriftDrawer
+      :baseline-id="activeDriftId"
+      @close="activeDriftId = null"
+      @accepted="loadSiteDrift"
+    />
   </div>
 </template>
 
@@ -785,7 +815,10 @@ import { ApiError } from '../api/client'
 import { domainsApi, HOSTNAME_RE, type DomainOut } from '../api/domains'
 import { jobsApi, streamJobLogs } from '../api/jobs'
 import { sitesApi, type Site, type UptimeSeries } from '../api/sites'
+import { driftApi, type DriftBaseline } from '../api/drift'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import DriftChip from '../components/DriftChip.vue'
+import DriftDrawer from '../components/DriftDrawer.vue'
 import EmptyState from '../components/EmptyState.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
 import Sparkline from '../components/Sparkline.vue'
@@ -859,6 +892,7 @@ async function load() {
   loadError.value = ''
   try {
     site.value = await sitesApi.get(siteId)
+    void loadSiteDrift()
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : 'Could not load this site.'
   } finally {
@@ -929,6 +963,27 @@ async function loadApps() {
     appsError.value = error instanceof Error ? error.message : 'Could not load installed apps.'
   } finally {
     appsLoading.value = false
+  }
+}
+
+// -- Config drift (session 6.7) -----------------------------------------------
+const allServerDrift = ref<DriftBaseline[]>([])
+const driftLoading = ref(false)
+const activeDriftId = ref<number | null>(null)
+
+const siteDriftBaselines = computed(() =>
+  allServerDrift.value.filter((b) => b.site_id === siteId),
+)
+
+async function loadSiteDrift() {
+  if (!site.value) return
+  driftLoading.value = true
+  try {
+    allServerDrift.value = await driftApi.list({ server_id: site.value.server_id })
+  } catch {
+    // Non-fatal
+  } finally {
+    driftLoading.value = false
   }
 }
 
