@@ -1244,6 +1244,7 @@ register(
 # from the remote-command catalogue above. Imported last, for the side effect of
 # registering itself — `register` is already defined by this point.
 from app.core.commands import report_actions as _report_actions  # noqa: E402,F401
+
 # `restic backup` — snapshot the OS/config tier. The action appends the (constant)
 # config source paths + the staged dpkg manifest to this rendered prefix and wraps
 # it in the env-file wrapper. One snapshot per run, so non-idempotent. Per-server
