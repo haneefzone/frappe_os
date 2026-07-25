@@ -63,7 +63,9 @@ class SelfBackupError(RuntimeError):
 # --------------------------------------------------------------------------- #
 
 
-def derive_backup_key(passphrase: str, salt: bytes, *, iterations: int = PBKDF2_ITERATIONS) -> bytes:
+def derive_backup_key(
+    passphrase: str, salt: bytes, *, iterations: int = PBKDF2_ITERATIONS
+) -> bytes:
     """Derive a urlsafe-base64 Fernet key from the operator passphrase + salt.
 
     Deterministic in (passphrase, salt, iterations): the same three inputs
@@ -203,7 +205,8 @@ def pg_dump_to_file(database_url: str, out_path: str | Path, *, timeout: float =
         timeout=timeout,
     )
     if proc.returncode != 0:
-        raise SelfBackupError(f"pg_dump failed (exit {proc.returncode}): {proc.stderr.strip()[:300]}")
+        stderr = proc.stderr.strip()[:300]
+        raise SelfBackupError(f"pg_dump failed (exit {proc.returncode}): {stderr}")
 
 
 def pg_restore_list(dump_path: str | Path, *, timeout: float = 300) -> str:
