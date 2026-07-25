@@ -22,6 +22,7 @@ USER_MANAGE = "user:manage"
 SETTINGS_MANAGE = "settings:manage"
 SCHEDULE_MANAGE = "schedule:manage"  # create/edit/enable/disable recurring schedules
 SSL_MANAGE = "ssl:manage"  # manage site domains, nginx vhosts, TLS certificates
+ALERT_MANAGE = "alert:manage"  # create/edit/enable/disable metric AlertRules (session 3.1)
 REPORT_GENERATE = "report:generate"  # generate compliance / audit report exports (session 4.4)
 # Session 6.2. Non-sensitive reports are gated on plain READ so Read-only can
 # view them; the two ISO-facing exports that expose per-user activity and
@@ -47,6 +48,7 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         TERMINAL_ACCESS,
         SCHEDULE_MANAGE,
         SSL_MANAGE,
+        ALERT_MANAGE,
         REPORT_GENERATE,
     ],
     "Operator": [
@@ -55,6 +57,7 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         BACKUP_CREATE,
         JOB_MANAGE,
         SSL_MANAGE,
+        ALERT_MANAGE,
     ],
     "Read-only": [READ],
 }

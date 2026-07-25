@@ -1,4 +1,5 @@
 from app.models.ai_settings import AISettings
+from app.models.alert import AlertFiring, AlertRule, AlertRuleState
 from app.models.app import AppSource, InstalledApp
 from app.models.audit import AuditLog
 from app.models.auth import ApiToken, Role, User
@@ -27,6 +28,9 @@ from app.models.uptime import UptimeSample
 
 __all__ = [
     "AISettings",
+    "AlertFiring",
+    "AlertRule",
+    "AlertRuleState",
     "ApiToken",
     "AppSource",
     "AuditLog",

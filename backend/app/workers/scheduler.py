@@ -42,6 +42,9 @@ TICK_FUNC = "app.workers.scheduler.dispatch_due_schedules"
 # Session 2.3: the same scheduler process also registers a recurring
 # backup-compliance sweep (read-only over backup metadata — no CommandJob).
 COMPLIANCE_FUNC = "app.workers.scheduler.evaluate_compliance"
+# Session 3.1: and a recurring AlertRule sweep — evaluate enabled rules against
+# the latest monitoring samples and enqueue any breach dispatch off the sweep.
+ALERTS_FUNC = "app.workers.scheduler.evaluate_alerts_tick"
 
 
 def make_connection() -> Redis:
@@ -80,6 +83,25 @@ def evaluate_compliance() -> dict:
     return summary
 
 
+def evaluate_alerts_tick() -> dict:
+    """Recurring job body (runs on an RQ worker): evaluate every enabled AlertRule
+    against the latest monitoring samples, fire breaches whose cooldown elapsed,
+    and enqueue each delivery off the sweep. Returns the sweep summary for the RQ
+    result."""
+    from datetime import UTC, datetime
+
+    from app.core.alerts import evaluate_alerts
+    from app.db import SessionLocal
+
+    with SessionLocal() as db:
+        summary = evaluate_alerts(db, now=datetime.now(UTC))
+    if summary["fired"] or summary["resolved"]:
+        logger.info(
+            "alert sweep fired %d, resolved %d", summary["fired"], summary["resolved"]
+        )
+    return summary
+
+
 def _register_recurring(scheduler, *, func, func_name: str, interval: int) -> None:
     """Idempotently register one recurring job, cancelling any existing entry for
     the same func first so a restart with a changed interval never leaves two."""
@@ -111,6 +133,14 @@ def ensure_compliance_registered(scheduler, *, interval: int) -> None:
     logger.info("registered compliance sweep every %ds", interval)
 
 
+def ensure_alerts_registered(scheduler, *, interval: int) -> None:
+    """Idempotently register the recurring AlertRule sweep (session 3.1)."""
+    _register_recurring(
+        scheduler, func=evaluate_alerts_tick, func_name=ALERTS_FUNC, interval=interval
+    )
+    logger.info("registered alert sweep every %ds", interval)
+
+
 def _utcnow():
     from datetime import UTC, datetime
 
@@ -136,11 +166,13 @@ def main() -> None:  # pragma: no cover - process entrypoint (needs live Redis)
     ensure_compliance_registered(
         scheduler, interval=settings.compliance_tick_seconds
     )
+    ensure_alerts_registered(scheduler, interval=settings.alerts_tick_seconds)
     logger.info(
-        "scheduler starting (queue=%s, tick=%ds, compliance=%ds)",
+        "scheduler starting (queue=%s, tick=%ds, compliance=%ds, alerts=%ds)",
         settings.scheduler_queue,
         settings.scheduler_tick_seconds,
         settings.compliance_tick_seconds,
+        settings.alerts_tick_seconds,
     )
     # run() installs its own graceful SIGINT/SIGTERM handlers and releases the
     # singleton lock on exit (see module docstring).

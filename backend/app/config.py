@@ -109,6 +109,12 @@ class Settings(BaseSettings):
     # measured in hours, so minute-level precision buys nothing. SET via
     # COMPLIANCE_TICK_SECONDS.
     compliance_tick_seconds: int = 3600
+    # AlertRule evaluation (session 3.1): the scheduler process registers a
+    # recurring sweep that evaluates every enabled AlertRule against the latest
+    # monitoring samples at this cadence and dispatches breaches over email /
+    # signed webhook (dedup by per-rule cooldown). Aligned with the monitoring
+    # poll (~60s) so a breach is caught within a poll. SET via ALERTS_TICK_SECONDS.
+    alerts_tick_seconds: int = 60
 
     # Reports (session 6.2). Generated artifacts land here, one file per
     # ReportRun; the path resolves from the backend working directory like
