@@ -234,6 +234,11 @@ def update_staging(pipeline_id: int, db: DbSession, runner: Runner, user: Curren
         return _conflict(exc, "A job is already running on the staging bench.")
     pipeline.update_job_id = job.id
     pipeline.phase = "updating"
+    # Re-updating invalidates any prior green verify: the clone just changed, so
+    # the promote gate must not stay green against the old checklist result.
+    pipeline.checklist_ok = False
+    pipeline.checklist = None
+    pipeline.verify_job_id = None
     db.commit()
     db.refresh(job)
     return JobDetail.from_model(job)

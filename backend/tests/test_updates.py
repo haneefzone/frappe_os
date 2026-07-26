@@ -70,6 +70,23 @@ def test_count_doctype_rejects_injection():
         )
 
 
+def test_parse_row_count_ignores_stray_digits():
+    """`bench execute get_count` prints the count on its own final line, but log/
+    version noise can precede it. The parser must read the actual return value,
+    not concatenate every digit in stdout (DOO-488 #2)."""
+    from app.core.commands.actions import _parse_row_count
+
+    assert _parse_row_count("100") == 100
+    assert _parse_row_count("") is None
+    assert _parse_row_count(None) is None
+    # Log / version noise before the return value must not corrupt the count.
+    assert _parse_row_count("frappe 16.24.0\nsite booting\n123\n") == 123
+    # Trailing blank lines are skipped down to the value line.
+    assert _parse_row_count("500\n\n") == 500
+    # The old digit-concatenation would have returned 1624123 for this input.
+    assert _parse_row_count("frappe 16.24.0\n123") != 1624123
+
+
 def test_scrub_rejects_shell_metacharacters():
     with pytest.raises(RenderError):
         render(
@@ -332,6 +349,43 @@ def test_verify_red_when_site_does_not_boot(sf):
     with sf() as db:
         p = db.get(UpdatePipeline, pid)
         assert p.checklist_ok is False and p.phase == "verify_failed"
+
+
+def test_update_staging_resets_prior_green_verify(sf):
+    """Re-running update-staging after a green verify must invalidate the promote
+    gate: the clone just changed, so `checklist_ok`/`checklist`/`verify_job_id`
+    are reset and the phase returns to `updating` (DOO-488 #1)."""
+    from types import SimpleNamespace
+
+    from app.api.routes.updates import update_staging
+
+    with sf() as db:
+        server_id, src_bench_id, stg_bench_id, site_id = _world(db)
+        stg = Site(bench_id=stg_bench_id, name="staging.localhost", status="active")
+        db.add(stg)
+        db.commit()
+        p = UpdatePipeline(
+            source_site_id=site_id, source_bench_id=src_bench_id,
+            staging_bench_id=stg_bench_id, staging_site_name="staging.localhost",
+            staging_site_id=stg.id, phase="verified",
+            checklist_ok=True, checklist={"all_ok": True, "checks": []},
+            verify_job_id=999,
+        )
+        db.add(p)
+        db.commit()
+        pid = p.id
+    runner = JobRunner(
+        sf, InMemoryJobBackend(), enqueue=lambda job: None, secrets=get_secrets_service()
+    )
+    user = SimpleNamespace(id=None, role=SimpleNamespace(permissions=["bench:operate"]))
+    with sf() as db:
+        update_staging(pid, db, runner, user)
+    with sf() as db:
+        p = db.get(UpdatePipeline, pid)
+        assert p.phase == "updating"
+        assert p.checklist_ok is False
+        assert p.checklist is None
+        assert p.verify_job_id is None
 
 
 # --------------------------------------------------------------------------- #

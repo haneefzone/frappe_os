@@ -9,6 +9,7 @@ keeps all execution/persistence concerns in `app/core/jobs.py`.
 
 from __future__ import annotations
 
+import re
 from contextlib import AbstractContextManager
 from typing import Protocol
 
@@ -1981,6 +1982,24 @@ class CloneToStagingAction(Action):
                 )
 
 
+_INT_TOKEN = re.compile(r"-?\d+")
+
+
+def _parse_row_count(stdout: str | None) -> int | None:
+    """Extract the doctype row count from `bench execute get_count` stdout.
+
+    `bench execute` prints the return value (an int) on its own line, but log /
+    deprecation lines and version strings can precede it. Scan lines bottom-up
+    and return the integer from the last line that carries one, so stray digits
+    earlier in the stream (e.g. "frappe 16.24") can't be concatenated in.
+    """
+    for line in reversed((stdout or "").splitlines()):
+        tokens = _INT_TOKEN.findall(line)
+        if tokens:
+            return int(tokens[-1])
+    return None
+
+
 class VerifyChecklistAction(Action):
     """`site.verify_checklist` — the pre-promote verification gate (uiux §5, 3.3).
 
@@ -2016,8 +2035,7 @@ class VerifyChecklistAction(Action):
                 {"site": target_site, "bench_path": target_bench, "doctype": "User"},
             )
             res = await ctx.capture(cmd.argv, cwd=cmd.cwd)
-            digits = "".join(ch for ch in (res.stdout or "") if ch.isdigit())
-            return int(digits) if digits else None
+            return _parse_row_count(res.stdout)
 
         started = False
         try:
