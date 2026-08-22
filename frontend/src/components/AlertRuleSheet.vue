@@ -66,7 +66,7 @@
                     </option>
                   </select>
                 </Field>
-                <Field label="Threshold" hint="Numeric value.">
+                <Field label="Threshold" :hint="thresholdHint">
                   <input
                     v-model.number="form.threshold"
                     v-bind="inputAttrs"
@@ -164,13 +164,22 @@
                         v-bind="inputAttrs"
                         type="password"
                         autocomplete="new-password"
+                        :disabled="clearSecret"
                         :placeholder="isEdit && rule?.webhook_secret_set ? '(current secret kept)' : 'Optional'"
                         maxlength="255"
                       />
                     </Field>
-                    <p v-if="isEdit && rule?.webhook_secret_set" class="text-meta text-ink-2">
-                      A signing secret is currently configured.
-                    </p>
+                    <template v-if="isEdit && rule?.webhook_secret_set">
+                      <p class="text-meta text-ink-2">A signing secret is currently configured.</p>
+                      <label class="flex items-center gap-2 text-label text-ink-1 cursor-pointer">
+                        <input
+                          v-model="clearSecret"
+                          type="checkbox"
+                          @change="clearSecret && (form.webhook_secret = '')"
+                        />
+                        Remove the signing secret
+                      </label>
+                    </template>
                   </div>
                 </div>
               </div>
@@ -210,6 +219,7 @@ import { ApiError } from '../api/client'
 import {
   alertsApi,
   COMPARATOR_OPTIONS,
+  METRIC_LABELS,
   METRIC_OPTIONS,
   type AlertMetric,
   type AlertComparator,
@@ -237,6 +247,7 @@ const inputAttrs = {
 const servers = ref<Server[]>([])
 const submitting = ref(false)
 const submitError = ref('')
+const clearSecret = ref(false)
 
 const form = reactive({
   name: '',
@@ -254,6 +265,12 @@ const form = reactive({
   enabled: true,
 })
 
+const thresholdHint = computed(() => {
+  if (form.metric.endsWith('_pct')) return `Percent value, e.g. 85 (${METRIC_LABELS[form.metric]}).`
+  if (form.metric === 'load1') return `Load average value, e.g. 1.5 (${METRIC_LABELS[form.metric]}).`
+  return 'Numeric value.'
+})
+
 const canSubmit = computed(() => {
   if (!form.name) return false
   if (!form.channel_email && !form.channel_webhook) return false
@@ -265,6 +282,7 @@ const canSubmit = computed(() => {
 function reset() {
   submitError.value = ''
   submitting.value = false
+  clearSecret.value = false
   if (props.rule) {
     Object.assign(form, {
       name: props.rule.name,
@@ -338,7 +356,8 @@ async function submit() {
         webhook_url: form.channel_webhook ? (form.webhook_url || null) : null,
         enabled: form.enabled,
       }
-      if (form.webhook_secret) payload.webhook_secret = form.webhook_secret
+      if (clearSecret.value) payload.webhook_secret = ''
+      else if (form.webhook_secret) payload.webhook_secret = form.webhook_secret
       await alertsApi.update(props.rule.id, payload)
     } else {
       await alertsApi.create({

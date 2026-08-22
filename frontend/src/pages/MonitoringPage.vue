@@ -248,7 +248,7 @@ import LucideMail from '~icons/lucide/mail'
 import LucidePlus from '~icons/lucide/plus'
 import LucideWebhook from '~icons/lucide/webhook'
 import { ApiError } from '../api/client'
-import { alertsApi, METRIC_LABELS, type AlertFiring, type AlertRule } from '../api/alerts'
+import { alertsApi, METRIC_LABELS, type AlertFiring, type AlertRule, type ChannelOutcome } from '../api/alerts'
 import AlertRuleSheet from '../components/AlertRuleSheet.vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -265,6 +265,7 @@ const loading = ref(true)
 const incidentsLoading = ref(true)
 const loadError = ref('')
 const actionMessage = ref('')
+const testResult = ref<{ ruleName: string; channels: ChannelOutcome[] } | null>(null)
 const busyId = ref<number | null>(null)
 const sheetOpen = ref(false)
 const editingRule = ref<AlertRule | null>(null)
@@ -324,9 +325,10 @@ async function testRule(rule: AlertRule) {
   if (!canManage.value) return
   busyId.value = rule.id
   actionMessage.value = ''
+  testResult.value = null
   try {
-    await alertsApi.test(rule.id)
-    actionMessage.value = `Test alert sent for "${rule.name}". Check your configured channels.`
+    const firing = await alertsApi.test(rule.id)
+    testResult.value = { ruleName: rule.name, channels: firing.channels }
     await loadIncidents()
   } catch (e) {
     loadError.value = e instanceof ApiError ? e.message : 'Could not send test alert.'
