@@ -1366,6 +1366,12 @@ from app.core.commands.actions import (  # noqa: E402
     ResticBackupAction as _ResticBackupAction,
 )
 from app.core.commands.actions import (  # noqa: E402
+    ResticCheckAction as _ResticCheckAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    ResticForgetAction as _ResticForgetAction,
+)
+from app.core.commands.actions import (  # noqa: E402
     ResticInitAction as _ResticInitAction,
 )
 from app.core.commands.actions import (  # noqa: E402
@@ -1386,6 +1392,11 @@ RESTIC_REPO_URI = r"s3:[A-Za-z0-9._:/-]{1,300}"
 # The --host label restic stamps on a snapshot: the managed server's hostname (or
 # name). Shell-safe hostname whitelist; its own argv element.
 RESTIC_HOST = r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}"
+
+# `restic check --read-data-subset` argument (session 4.2): a percentage of pack
+# data to re-read ("5%"). A tight numeric-percent whitelist — shell-safe, its own
+# argv element, and small enough that no other subset syntax can slip through.
+RESTIC_CHECK_SUBSET = r"[0-9]{1,3}%"
 
 # `restic.install` — detect restic; install the pinned release to ~/.local/bin
 # when absent (no root). Read-only-ish (never touches the repo/secrets); no lock.
@@ -1565,6 +1576,26 @@ register(
     )
 )
 
+# `restic forget --prune` — DESTRUCTIVE retention sweep (session 4.2). The action
+# appends the per-repo `--keep-*` flags (built from the ResticRepo policy) to this
+# rendered prefix; the template carries `--prune` and the config tag so the sweep
+# only ever touches this platform's config snapshots. Non-idempotent so the engine
+# NEVER auto-retries it (golden rule destructive policy). Per-repo lock so two
+# prunes on the same server can't stack. server:manage only.
+register(
+    CommandTemplate(
+        action_name="restic.forget",
+        argv=("restic", "-r", "{repo}", "forget", "--tag", _CONFIG_TAG, "--prune"),
+        cwd=None,
+        params=(ParamSpec("repo", regex=RESTIC_REPO_URI),),
+        action_class=_ResticForgetAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
 register(
     CommandTemplate(
         action_name="ai.capture_diff",
@@ -1607,6 +1638,28 @@ register(
         idempotent=False,
         requires_lock=True,
         required_permission=_AI_OPERATE,
+        run_as=None,
+    )
+)
+
+# `restic check --read-data-subset` — periodic integrity verification (session
+# 4.2). Re-reads a validated percentage of pack data. Non-idempotent so a failed
+# check is never silently auto-retried (which would re-raise the breach alert);
+# the action records the result on the ResticRepo and alerts on a genuine failure.
+# server:manage only.
+register(
+    CommandTemplate(
+        action_name="restic.check",
+        argv=("restic", "-r", "{repo}", "check", "--read-data-subset", "{subset}"),
+        cwd=None,
+        params=(
+            ParamSpec("repo", regex=RESTIC_REPO_URI),
+            ParamSpec("subset", regex=RESTIC_CHECK_SUBSET),
+        ),
+        action_class=_ResticCheckAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
         run_as=None,
     )
 )
