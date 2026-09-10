@@ -246,6 +246,41 @@ def is_restic_lock_error(output: str) -> bool:
     return any(marker in low for marker in markers)
 
 
+def is_restic_transient_error(output: str) -> bool:
+    """True when a restic run failed because the repository was unreachable —
+    S3/network connectivity, DNS, throttling, timeouts — rather than because the
+    check found actual corruption. `restic check` cannot verify integrity if it
+    never reaches the repo, so classifying such a failure as `last_check_ok=False`
+    and firing the `restic.check_failed` breach alert ("the disaster-recovery
+    backup may not be restorable") is a false DR-panic. Like the lock case, this is
+    an operational condition, NOT an integrity breach: the check action uses it to
+    fail the job WITHOUT recording ok=False or alerting. Kept deliberately narrow —
+    only unambiguous connectivity markers, so genuine integrity errors ("pack ...
+    is damaged", "id ... not found", "tree ... invalid") still alert."""
+    low = output.lower()
+    markers = (
+        "unable to open repository",
+        "unable to open config file",
+        "connection refused",
+        "connection reset",
+        "network is unreachable",
+        "no route to host",
+        "no such host",
+        "i/o timeout",
+        "timeout awaiting",
+        "context deadline exceeded",
+        "dial tcp",
+        "temporary failure in name resolution",
+        "server misbehaving",
+        "requesterror",
+        "requesttimeout",
+        "slowdown",
+        "service unavailable",
+        "503",
+    )
+    return any(marker in low for marker in markers)
+
+
 def summarize_check(exit_code: int, output: str) -> tuple[bool, str]:
     """Interpret a `restic check` run into (ok, one-line summary).
 

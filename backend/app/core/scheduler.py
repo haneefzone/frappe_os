@@ -164,9 +164,10 @@ def _build_restic_fire(
     Loads the target server's single ResticRepo + its 2.2 StorageTarget and builds
     the restic repository URI (never decrypting any secret here — the repo password
     and S3 keys are resolved inside the worker only). Raises ScheduleError if the
-    repo is not ready (missing / no target / no password / not initialised) so a
-    misconfigured schedule fails its fire cleanly and pauses, rather than enqueuing
-    a job doomed to fail. `restic.backup` additionally carries the `--host` label;
+    repo is not ready (missing / no target / no password / not initialised, or —
+    for `restic.forget` — no retention policy configured) so a misconfigured
+    schedule fails its fire cleanly and pauses, rather than enqueuing a job doomed
+    to fail. `restic.backup` additionally carries the `--host` label;
     `restic.check` carries the read-data subset. The retention policy for
     `restic.forget` lives on the repo row (the action reads it), so no keep params
     are threaded through here."""
@@ -191,6 +192,13 @@ def _build_restic_fire(
         raise ScheduleError("restic repo has no password configured")
     if not repo.initialized:
         raise ScheduleError("restic repo is not initialised")
+    # A `restic.forget` fire with no keep policy would enqueue a job that fails at
+    # runtime (build_forget_keep_args -> ResticError) while the succeeded fire still
+    # advances next_run_at — leaving the schedule "active" but silently never
+    # pruning. Pause the schedule here instead, mirroring the API launch guard
+    # (422 in forget_config). See ScheduleError contract above.
+    if schedule.action_name == "restic.forget" and not repo.retention_configured:
+        raise ScheduleError("restic repo has no retention policy configured")
     target = (
         db.get(StorageTarget, repo.storage_target_id)
         if repo.storage_target_id
