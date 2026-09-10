@@ -13,7 +13,7 @@ All columns are nullable adds (idempotent for an existing table with rows); the
 downgrade drops them.
 
 Revision ID: b7e2d9f4c1a8
-Revises: b5e9d3c1a4f7
+Revises: b4e7c2a9d1f3
 Create Date: 2026-08-01 03:00:00.000000
 
 """
@@ -25,7 +25,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = 'b7e2d9f4c1a8'
-down_revision: str | Sequence[str] | None = 'b5e9d3c1a4f7'
+down_revision: str | Sequence[str] | None = 'b4e7c2a9d1f3'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

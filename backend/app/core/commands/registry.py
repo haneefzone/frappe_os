@@ -1785,8 +1785,12 @@ register(
 
 # `restic check` — verify repo integrity, optionally re-reading a data subset.
 # Read-only against the repo's *content* (no snapshot is added or removed), so
-# safe to auto-retry a transient SSH blip; still locked so it can't race a
-# concurrent forget/backup on the same repo.
+# `idempotent=True` lets a transient SSH blip auto-retry cleanly; still locked
+# so it can't race a concurrent forget/backup on the same repo. NOTE: a
+# *completed* check that reports damage is deterministic — ResticCheckAction
+# raises JobFailedNoRetry on a nonzero restic exit so that path is NOT retried
+# (one alert per event, no repeated `--read-data-subset` re-read); only a check
+# that could not run (infra failure) rides the idempotent auto-retry.
 register(
     CommandTemplate(
         action_name="restic.check",

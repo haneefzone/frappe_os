@@ -3411,6 +3411,7 @@ class ResticCheckAction(Action):
                     return
 
                 await ctx.emit(f"Integrity check FAILED: {message}", stream="stderr")
+                from app.core.jobs import JobFailedNoRetry
                 from app.core.notifications import dispatch_restic_check_failed
 
                 server = ctx.session.get(_server_model(), ctx.server_id)
@@ -3420,7 +3421,18 @@ class ResticCheckAction(Action):
                     server_name=server.name if server else str(ctx.server_id),
                     message=message,
                 )
-                raise RuntimeError(f"restic check reported a failure: {message}")
+                # restic *ran* and reported damage (nonzero exit) — a
+                # deterministic result. Raise the no-retry failure so the job
+                # runner does NOT auto-retry it: re-running an idempotent check
+                # here would only repeat the same damage report, duplicating
+                # this operator alert on every attempt and re-incurring the
+                # expensive `--read-data-subset` re-read. An infra failure (SSH
+                # drop, timeout) instead raises out of ctx.capture *before* this
+                # dispatch, propagating as a plain Exception → still auto-retried
+                # with no alert, which is the correct transient-blip behaviour.
+                raise JobFailedNoRetry(
+                    f"restic check reported a failure: {message}"
+                )
         finally:
             await ctx.capture(["rm", "-f", env_path])
 

@@ -47,6 +47,18 @@ class JobCancelled(Exception):
     """Raised inside execution when a cancel was requested for the job."""
 
 
+class JobFailedNoRetry(Exception):
+    """A determinate job failure that must NOT be auto-retried even when the
+    template is `idempotent=True`. Auto-retry exists to ride out a transient
+    infra blip (an SSH drop re-executes cleanly); it is wrong for a failure the
+    operation *ran to completion* and reproduced — e.g. `restic check` found
+    real repo damage (restic exits nonzero deterministically). Re-running only
+    burns an hours-long, S3-egress-heavy `--read-data-subset` re-read and
+    duplicates the operator alert. Raise this instead of a bare Exception when
+    the negative result is deterministic, so the runner goes straight to
+    terminal failure regardless of the idempotent flag."""
+
+
 class LockConflict(Exception):
     """Another live job already holds the target lock (rule 4 -> HTTP 409)."""
 
@@ -888,6 +900,14 @@ class JobRunner:
                 except JobCancelled:
                     log_writer.flush()
                     self._to_terminal(db, job, "cancelled")
+                    return
+                except JobFailedNoRetry:
+                    # A deterministic failure the operation reproduced (e.g.
+                    # restic check found repo damage) — auto-retry would only
+                    # repeat the same negative result, so go straight to
+                    # terminal failure even though the template is idempotent.
+                    log_writer.flush()
+                    self._to_terminal(db, job, "failure", exit_code=1)
                     return
                 except Exception:
                     log_writer.flush()

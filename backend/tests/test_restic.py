@@ -718,18 +718,43 @@ def test_check_action_failure_records_evidence_and_fires_alert(sf):
         params={"repo": "s3:https://minio.local:9000/fdm/restic/server"}, executor=ex,
     )
     with sf() as db:
-        assert db.get(CommandJob, job_id).status == "failure"
+        job = db.get(CommandJob, job_id)
+        assert job.status == "failure"
+        # A deterministic damage result is NOT auto-retried (DOO-1034): the
+        # check ran and reproduced damage, so retrying would only repeat the
+        # hours-long `--read-data-subset` re-read for the same answer.
+        assert job.retry_count == 0
         repo = db.scalars(select(ResticRepo)).first()
         assert repo.last_check_at is not None
         assert repo.last_check_ok is False
         assert "damaged" in repo.last_check_message.lower()
-        notif = db.scalars(select(Notification)).first()
-        assert notif is not None
+        # Exactly ONE `backup.check_failed` alert per active user for the single
+        # failed event — i.e. the dispatcher fires once (one fan-out), not once
+        # per retry attempt (the pre-DOO-1034 defect re-dispatched on all 4).
+        # (The orthogonal `job.failure` alert `_to_terminal` emits is excluded.)
+        from app.models.auth import User
+
+        active_users = db.scalars(
+            select(User).where(User.is_active.is_(True))
+        ).all()
+        check_notifs = db.scalars(
+            select(Notification).where(
+                Notification.event_type == "backup.check_failed"
+            )
+        ).all()
+        assert len(check_notifs) == len(active_users)
+        notif = check_notifs[0]
         assert notif.event_type == "backup.check_failed"
         assert "prod-1" in notif.title
         # The alert body names the failure reason, never raw restic output that
         # could in principle carry a path/credential fragment.
         assert notif.body
+    # And the expensive `restic check` itself is invoked exactly once, not 4×.
+    check_calls = [
+        a for a in ex.captured
+        if a[:3] == ["bash", "-c", _RESTIC_ENV_WRAP] and "check" in a
+    ]
+    assert len(check_calls) == 1
 
 
 def test_check_action_refuses_when_not_initialized(sf):
