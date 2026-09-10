@@ -200,12 +200,12 @@
       </div>
     </div>
 
-    <!-- Config repos tab (4.1) -->
+    <!-- Config repos tab (4.1 + 4.2) -->
     <div v-else-if="activeTab === 'config-repos'" class="min-h-0 flex-1 overflow-y-auto p-8">
       <div class="mb-4">
         <h2 class="text-section font-semibold text-ink-1">Config-tier repos</h2>
         <p class="text-label text-ink-3">
-          Per-server restic repos capturing OS/config snapshots. Read-only evidence view.
+          Per-server restic repos: OS/config snapshots with integrity checks and retention.
         </p>
       </div>
 
@@ -231,11 +231,12 @@
           <thead>
             <tr class="border-b border-line text-meta uppercase tracking-wide text-ink-3">
               <th class="px-4 py-2 font-medium">Server</th>
-              <th class="px-4 py-2 font-medium">Kind</th>
               <th class="px-4 py-2 font-medium">Storage</th>
-              <th class="px-4 py-2 font-medium">Initialized</th>
               <th class="px-4 py-2 font-medium">Last backup</th>
               <th class="px-4 py-2 font-medium">Snapshot</th>
+              <th class="px-4 py-2 font-medium">Integrity check</th>
+              <th class="px-4 py-2 font-medium">Retention</th>
+              <th v-if="canManage" class="px-4 py-2 text-right font-medium">Actions</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-line text-label">
@@ -243,22 +244,13 @@
               <td class="px-4 py-2.5">
                 <span class="font-medium text-ink-1">{{ serverName(repo.server_id) }}</span>
                 <div v-if="repo.prefix" class="truncate font-mono text-meta text-ink-3">{{ repo.prefix }}</div>
-              </td>
-              <td class="px-4 py-2.5">
-                <StatusBadge
-                  :status="kindChip(repo.kind).status"
-                  :label="kindChip(repo.kind).label"
-                />
+                <StatusBadge v-if="!repo.initialized" class="mt-0.5" status="muted" label="Not init" />
               </td>
               <td class="px-4 py-2.5">
                 <StatusBadge
                   :status="resticStorageChip(repo.storage_target_name).status"
                   :label="resticStorageChip(repo.storage_target_name).label"
                 />
-              </td>
-              <td class="px-4 py-2.5">
-                <StatusBadge v-if="repo.initialized" status="ok" label="Yes" />
-                <span v-else class="text-ink-3">No</span>
               </td>
               <td
                 class="px-4 py-2.5 text-ink-3"
@@ -269,11 +261,175 @@
               <td class="px-4 py-2.5 font-mono text-meta text-ink-3" :title="repo.last_snapshot_id ?? undefined">
                 {{ repo.last_snapshot_id ? repo.last_snapshot_id.slice(0, 8) : '—' }}
               </td>
+              <!-- Integrity check: pass/fail badge + timestamp -->
+              <td class="px-4 py-2.5">
+                <template v-if="repo.last_check_at">
+                  <div class="flex items-center gap-1.5">
+                    <StatusBadge
+                      :status="repo.last_check_ok === true ? 'ok' : repo.last_check_ok === false ? 'err' : 'muted'"
+                      :label="repo.last_check_ok === true ? 'Pass' : repo.last_check_ok === false ? 'Fail' : 'Unknown'"
+                    />
+                    <span class="text-meta text-ink-3" :title="absoluteTime(repo.last_check_at)">
+                      {{ relativeTime(repo.last_check_at) }}
+                    </span>
+                  </div>
+                  <div
+                    v-if="repo.last_check_summary"
+                    class="mt-0.5 truncate text-meta text-ink-3"
+                    :title="repo.last_check_summary"
+                  >
+                    {{ repo.last_check_summary }}
+                  </div>
+                </template>
+                <span v-else class="text-ink-3">—</span>
+              </td>
+              <!-- Retention summary -->
+              <td class="px-4 py-2.5 text-ink-3">
+                {{ repo.retention_summary ?? '—' }}
+              </td>
+              <!-- Actions (server:manage only) -->
+              <td v-if="canManage" class="px-4 py-2.5">
+                <div class="flex items-center justify-end gap-1">
+                  <Button
+                    variant="subtle"
+                    theme="gray"
+                    size="sm"
+                    label="Configure"
+                    :disabled="resticBusy !== null"
+                    @click="openRetentionEditor(repo)"
+                  />
+                  <Button
+                    v-if="repo.initialized"
+                    variant="subtle"
+                    theme="gray"
+                    size="sm"
+                    label="Run check"
+                    :loading="resticBusy === `check:${repo.id}`"
+                    :disabled="resticBusy !== null"
+                    @click="runCheck(repo)"
+                  />
+                  <Button
+                    v-if="repo.initialized && repo.retention_summary"
+                    variant="subtle"
+                    theme="red"
+                    size="sm"
+                    label="Prune"
+                    :disabled="resticBusy !== null"
+                    @click="openPrune(repo)"
+                  />
+                </div>
+              </td>
             </tr>
           </tbody>
         </table>
       </div>
     </div>
+
+    <!-- Retention editor modal -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-150 ease-out"
+        enter-from-class="opacity-0"
+        leave-active-class="transition duration-150 ease-out"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="retentionOpen"
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          @click.self="retentionOpen = false"
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Configure retention policy"
+            class="w-full max-w-md rounded-lg border border-line bg-raised"
+            @keydown.esc="retentionOpen = false"
+          >
+            <div class="border-b border-line px-5 py-4">
+              <h2 class="text-section font-semibold text-ink-1">Configure retention</h2>
+              <p class="mt-0.5 text-label text-ink-2">
+                Set keep-last/daily/weekly/monthly for
+                <span class="font-medium text-ink-1">{{ retentionRepo ? serverName(retentionRepo.server_id) : '' }}</span>.
+                All-empty = no retention policy (prune will refuse).
+              </p>
+            </div>
+            <div class="space-y-3 px-5 py-4">
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Keep last</label>
+                  <input
+                    v-model.number="retentionForm.keep_last"
+                    type="number"
+                    min="1"
+                    placeholder="e.g. 3"
+                    v-bind="retentionInputAttrs"
+                  />
+                </div>
+                <div>
+                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Keep daily</label>
+                  <input
+                    v-model.number="retentionForm.keep_daily"
+                    type="number"
+                    min="1"
+                    placeholder="e.g. 7"
+                    v-bind="retentionInputAttrs"
+                  />
+                </div>
+                <div>
+                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Keep weekly</label>
+                  <input
+                    v-model.number="retentionForm.keep_weekly"
+                    type="number"
+                    min="1"
+                    placeholder="e.g. 4"
+                    v-bind="retentionInputAttrs"
+                  />
+                </div>
+                <div>
+                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Keep monthly</label>
+                  <input
+                    v-model.number="retentionForm.keep_monthly"
+                    type="number"
+                    min="1"
+                    placeholder="e.g. 3"
+                    v-bind="retentionInputAttrs"
+                  />
+                </div>
+              </div>
+            </div>
+            <div class="flex justify-end gap-2 border-t border-line px-5 py-3.5">
+              <Button variant="subtle" theme="gray" label="Cancel" :disabled="resticBusy !== null" @click="retentionOpen = false" />
+              <Button
+                variant="solid"
+                theme="gray"
+                label="Save retention"
+                :loading="resticBusy === 'configure'"
+                :disabled="resticBusy !== null"
+                @click="saveRetention"
+              />
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Prune now confirmation (destructive: type-to-confirm) -->
+    <ConfirmModal
+      v-model="pruneOpen"
+      variant="destructive"
+      :title="`Prune ${pruneRepo ? serverName(pruneRepo.server_id) : ''}`"
+      :message="`Apply the retention policy (${pruneRepo?.retention_summary ?? ''}) and delete non-kept snapshots.`"
+      verb="Prune now"
+      :target-name="pruneRepo ? serverName(pruneRepo.server_id) : ''"
+      :consequences="[
+        'Snapshots outside the retention window are permanently deleted.',
+        'This cannot be undone — only the kept snapshots will survive.',
+        'The repo must not be locked by another job.',
+      ]"
+      :loading="resticBusy === 'prune'"
+      @confirm="confirmPrune"
+      @cancel="pruneRepo = null"
+    />
 
     <!-- Policies tab (B4.6) -->
     <div v-else-if="activeTab === 'policies'" class="min-h-0 flex-1 overflow-y-auto p-8">
@@ -560,6 +716,7 @@ import { resticApi, type ResticRepo } from '../api/restic'
 import { serversApi, type Server } from '../api/servers'
 import { sitesApi, type Site } from '../api/sites'
 import { storageApi, type StorageTarget } from '../api/storage'
+import ConfirmModal from '../components/ConfirmModal.vue'
 import EmptyState from '../components/EmptyState.vue'
 import KPICard from '../components/KPICard.vue'
 import PolicySheet from '../components/PolicySheet.vue'
@@ -586,6 +743,7 @@ const canBackup = auth.hasPermission('backup:create')
 const canRestore = auth.hasPermission('backup:restore')
 const canDownload = auth.hasPermission('backup:restore')
 const canManagePolicy = auth.hasPermission('schedule:manage')
+const canManage = auth.hasPermission('server:manage')
 const canMove = auth.hasPermission('backup:transfer')
 
 const backups = ref<Backup[]>([])
@@ -758,7 +916,7 @@ async function loadPolicies() {
   policies.value = next
 }
 
-// Config repos (4.1) — loaded lazily when the Config repos tab is first opened.
+// Config repos (4.1 + 4.2) — loaded lazily when the Config repos tab is first opened.
 async function loadConfigRepos() {
   configReposLoaded.value = true
   try {
@@ -772,6 +930,108 @@ async function loadConfigRepos() {
 
 function serverName(serverId: number): string {
   return servers.value.find((s) => s.id === serverId)?.name ?? `Server #${serverId}`
+}
+
+// -- Restic 4.2 controls (Run check / Prune now / Retention editor) ----------
+
+const resticBusy = ref<string | null>(null)
+
+// Retention editor state
+const retentionOpen = ref(false)
+const retentionRepo = ref<ResticRepo | null>(null)
+const retentionForm = reactive({
+  keep_last: null as number | null,
+  keep_daily: null as number | null,
+  keep_weekly: null as number | null,
+  keep_monthly: null as number | null,
+})
+const retentionInputAttrs = {
+  class: 'fdm-focus w-full rounded-lg border border-line bg-base px-2.5 py-1.5 text-label text-ink-1 focus:border-line-strong',
+}
+
+function openRetentionEditor(repo: ResticRepo) {
+  retentionRepo.value = repo
+  retentionForm.keep_last = repo.retention_keep_last
+  retentionForm.keep_daily = repo.retention_keep_daily
+  retentionForm.keep_weekly = repo.retention_keep_weekly
+  retentionForm.keep_monthly = repo.retention_keep_monthly
+  retentionOpen.value = true
+}
+
+async function saveRetention() {
+  const repo = retentionRepo.value
+  if (!repo || resticBusy.value) return
+  resticBusy.value = 'configure'
+  try {
+    const updated = await resticApi.configure(repo.server_id, {
+      storage_target_id: repo.storage_target_id!,
+      prefix: repo.prefix,
+      retention_keep_last: retentionForm.keep_last || null,
+      retention_keep_daily: retentionForm.keep_daily || null,
+      retention_keep_weekly: retentionForm.keep_weekly || null,
+      retention_keep_monthly: retentionForm.keep_monthly || null,
+    })
+    const idx = resticRepos.value.findIndex((r) => r.id === repo.id)
+    if (idx >= 0) resticRepos.value[idx] = updated
+    retentionOpen.value = false
+    toast.success('Retention policy saved.')
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not save retention policy.')
+  } finally {
+    resticBusy.value = null
+  }
+}
+
+async function runCheck(repo: ResticRepo) {
+  if (resticBusy.value) return
+  resticBusy.value = `check:${repo.id}`
+  try {
+    const job = await resticApi.check(repo.server_id)
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'A restic job is already running on this server.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not start integrity check.'
+    toast.error(message)
+  } finally {
+    resticBusy.value = null
+  }
+}
+
+// Prune now (destructive: type-to-confirm via ConfirmModal)
+const pruneOpen = ref(false)
+const pruneRepo = ref<ResticRepo | null>(null)
+
+function openPrune(repo: ResticRepo) {
+  pruneRepo.value = repo
+  pruneOpen.value = true
+}
+
+async function confirmPrune() {
+  const repo = pruneRepo.value
+  if (!repo || resticBusy.value) return
+  resticBusy.value = 'prune'
+  try {
+    const job = await resticApi.forget(repo.server_id)
+    pruneOpen.value = false
+    pruneRepo.value = null
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'A restic job is already running on this server.'
+        : error instanceof ApiError && error.status === 422
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : 'Could not start prune.'
+    toast.error(message)
+  } finally {
+    resticBusy.value = null
+  }
 }
 
 async function evaluateNow() {
