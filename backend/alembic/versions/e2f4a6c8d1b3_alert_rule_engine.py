@@ -7,7 +7,7 @@ appends when absent, so re-running is a no-op, and downgrade drops the tables an
 removes the grant.
 
 Revision ID: e2f4a6c8d1b3
-Revises: a2b6d4f8c3e1
+Revises: b5e9d3c1a4f7
 Create Date: 2026-07-25 12:00:00.000000
 
 """
@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from alembic import op
 
 revision: str = "e2f4a6c8d1b3"
-down_revision: str | Sequence[str] | None = "a2b6d4f8c3e1"
+down_revision: str | Sequence[str] | None = "b5e9d3c1a4f7"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
