@@ -307,6 +307,30 @@ def test_check_action_lock_clash_is_not_a_breach(sf):
         assert not any(n.event_type == "restic.check_failed" for n in notes)
 
 
+def test_check_action_transient_error_is_not_a_breach(sf):
+    """A connectivity/transient failure (S3 unreachable) means the check never
+    verified anything — fail the job, but do NOT record an integrity result or fire
+    the DR breach alert (which would be a false DR-panic)."""
+    with sf() as db:
+        sid = _seed(db)
+        db.add(User(email="ops3@example.com", full_name="Ops3", is_active=True,
+                    password_hash="x", role_id=1))
+        db.commit()
+    ex = RetentionExecutor(
+        check_exit=1,
+        check_stdout="Fatal: unable to open repository at s3:...: dial tcp: i/o timeout",
+    )
+    job_id = _run(sf, action="restic.check", server_id=sid,
+                  params={"repo": REPO_URI, "subset": "5%"}, executor=ex)
+    with sf() as db:
+        assert db.get(CommandJob, job_id).status == "failure"
+        repo = db.scalars(select(ResticRepo)).first()
+        # Inconclusive: no ok result recorded, no false integrity breach alert.
+        assert repo.last_check_ok is None
+        notes = db.scalars(select(Notification)).all()
+        assert not any(n.event_type == "restic.check_failed" for n in notes)
+
+
 # --------------------------------------------------------------------------- #
 # Scheduler dispatch (server-targeted restic DR actions)
 # --------------------------------------------------------------------------- #
@@ -363,6 +387,20 @@ def test_build_restic_fire_no_repo_raises(sf):
         sid = _server(db)  # server but no restic repo configured
         with pytest.raises(ScheduleError):
             _build_restic_fire(db, _schedule("restic.check", sid))
+
+
+def test_build_restic_fire_forget_without_policy_pauses(sf):
+    """A `restic.forget` fire on a repo with no retention policy must raise
+    ScheduleError (→ schedule pauses, next_run cleared) rather than enqueue a job
+    doomed to fail at runtime. Mirrors the API launch guard (422 in forget_config).
+    A `restic.check` on the same policy-less repo still fires fine."""
+    with sf() as db:
+        sid = _seed(db)  # ready repo, but no retention_* set
+        with pytest.raises(ScheduleError):
+            _build_restic_fire(db, _schedule("restic.forget", sid))
+        # Same repo: check/backup are unaffected by the missing retention policy.
+        _, _, params, _ = _build_restic_fire(db, _schedule("restic.check", sid))
+        assert params["subset"] == rst.DEFAULT_CHECK_SUBSET
 
 
 def test_fire_schedule_enqueues_restic_backup_commandjob(sf):

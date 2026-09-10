@@ -3361,10 +3361,12 @@ class ResticCheckAction(Action):
     `last_check_ok` and a credential-free `last_check_summary`. On a genuine
     failure it raises ONE breach alert through the shared 2.8/3.1 notification
     channel (`restic.check_failed` — not a forked path) and fails the job. A
-    restic *lock* clash (a concurrent backup/prune holds the repo) is an
-    operational retry condition, not an integrity breach: it fails the job WITHOUT
-    recording `ok=False` or alerting. Read-oriented but non-idempotent so a failed
-    check is never silently auto-retried (which would re-alert)."""
+    restic *lock* clash (a concurrent backup/prune holds the repo) — and likewise a
+    connectivity/transient failure (S3 unreachable, DNS, throttling, timeout) — is
+    an operational condition, not an integrity breach: it fails the job WITHOUT
+    recording `ok=False` or alerting, since the check never actually verified the
+    data. Read-oriented but non-idempotent so a failed check is never silently
+    auto-retried (which would re-alert)."""
 
     async def run(self, ctx: JobContext) -> None:
         from app.core import restic as rst
@@ -3401,6 +3403,17 @@ class ResticCheckAction(Action):
                     raise RuntimeError(
                         "restic check could not run — the repository is locked by "
                         "another operation; not recording an integrity result"
+                    )
+
+                # Likewise a connectivity/transient failure (S3 unreachable, DNS,
+                # throttling, timeout) means the check never verified anything —
+                # not that the backup is corrupt. Fail the job without recording
+                # ok=False or firing the DR breach alert, same as the lock case.
+                if res.exit_code != 0 and rst.is_restic_transient_error(combined):
+                    raise RuntimeError(
+                        "restic check could not run — the repository was "
+                        "unreachable (connectivity/transient error); not recording "
+                        "an integrity result"
                     )
 
                 ok, summary = rst.summarize_check(res.exit_code, combined)
