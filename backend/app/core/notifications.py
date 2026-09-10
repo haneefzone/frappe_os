@@ -413,6 +413,21 @@ def _send_webhook(
     cfg = get_settings()
     secret = cfg.notification_webhook_secret or ""
 
+    # Fail closed: without a shared secret the HMAC is keyed on b"" and the
+    # X-FDM-Signature is trivially forgeable by anyone who can reach the
+    # receiver — an unauthenticated request wearing a signature header, which is
+    # worse than sending none because a receiver validating in good faith gains
+    # a false authenticity guarantee. Skip the channel and surface the
+    # misconfiguration rather than emit an empty-key signature (DOO-1031).
+    if not secret:
+        logger.warning(
+            "webhook channel enabled but notification_webhook_secret is unset — "
+            "skipping unsigned delivery to %s (event %s)",
+            url,
+            event_type,
+        )
+        return
+
     payload = json.dumps(
         {
             "event_type": event_type,

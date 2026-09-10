@@ -320,3 +320,37 @@ def test_webhook_is_signed_over_the_exact_transmitted_bytes(monkeypatch):
     assert payload["entity_type"] == "job"
     assert payload["entity_id"] == 1
     assert secret not in sent["content"].decode()
+
+
+def test_webhook_fails_closed_when_secret_unset(monkeypatch, caplog):
+    """With no notification_webhook_secret, do NOT POST an empty-key-signed
+    request — skip the channel and warn (DOO-1031: fail closed, never emit a
+    trivially forgeable X-FDM-Signature)."""
+    import logging
+    from types import SimpleNamespace
+
+    import app.config as app_config
+    from app.core import notifications as notif
+
+    monkeypatch.setattr(
+        app_config,
+        "get_settings",
+        lambda: SimpleNamespace(notification_webhook_secret=None),
+    )
+
+    def _must_not_post(*args, **kwargs):  # pragma: no cover - asserts if reached
+        raise AssertionError("webhook must not be sent when secret is unset")
+
+    monkeypatch.setattr(notif.httpx, "post", _must_not_post)
+
+    with caplog.at_level(logging.WARNING, logger=notif.logger.name):
+        notif._send_webhook(
+            "https://hook.example/endpoint",
+            "job.failure",
+            "Backup failed",
+            "Job #1 failed.",
+            "job",
+            1,
+        )
+
+    assert any("notification_webhook_secret is unset" in r.message for r in caplog.records)

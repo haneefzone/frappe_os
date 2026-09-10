@@ -403,15 +403,35 @@ def deliver_firing(
             # revisit if egress hardening to internal endpoints is later
             # desired, DOO-437).
             secret = secrets.decrypt(rule.webhook_secret_enc) if rule.webhook_secret_enc else ""
-            payload = build_webhook_payload(firing)
-            post_webhook(
-                rule.webhook_url,
-                payload,
-                sign_payload(secret, payload),
-                timeout_seconds=webhook_timeout_seconds,
-                max_attempts=webhook_max_attempts,
-            )
-            outcomes.append({"channel": "webhook", "ok": True, "error": None})
+            # Fail closed: an empty secret keys the HMAC on b"", making the
+            # X-FDM-Signature trivially forgeable — worse than sending none,
+            # because a receiver validating in good faith gets a false
+            # authenticity guarantee. Skip and record the misconfiguration
+            # rather than emit an empty-key signature (DOO-1031).
+            if not secret:
+                logger.warning(
+                    "alert rule %s webhook enabled but no secret configured — "
+                    "skipping unsigned delivery for firing %s",
+                    rule.id,
+                    firing.id,
+                )
+                outcomes.append(
+                    {
+                        "channel": "webhook",
+                        "ok": False,
+                        "error": "webhook secret not configured — unsigned delivery refused",
+                    }
+                )
+            else:
+                payload = build_webhook_payload(firing)
+                post_webhook(
+                    rule.webhook_url,
+                    payload,
+                    sign_payload(secret, payload),
+                    timeout_seconds=webhook_timeout_seconds,
+                    max_attempts=webhook_max_attempts,
+                )
+                outcomes.append({"channel": "webhook", "ok": True, "error": None})
         except Exception as exc:  # noqa: BLE001
             logger.exception("alert webhook delivery failed for firing %s", firing.id)
             outcomes.append({"channel": "webhook", "ok": False, "error": str(exc)[:200]})

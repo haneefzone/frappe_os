@@ -171,6 +171,26 @@ def test_webhook_signature_verifies_and_tamper_fails(db_session, cap):
     assert not al.verify_signature("shhh-signing-secret", body + b"!", signature)
 
 
+def test_webhook_fails_closed_when_rule_has_no_secret(db_session, cap):
+    """A rule with the webhook channel enabled but no secret must NOT emit an
+    empty-key-signed POST — skip it and record the channel as failed with a
+    clear reason (DOO-1031)."""
+    s = _server(db_session)
+    _sample(db_session, s.id, disk_pct=92, ts=BASE)
+    _rule(db_session, cap.secrets, webhook_secret_enc=None)
+
+    al.evaluate_alerts(db_session, now=BASE, deliver=cap.deliver)
+
+    # No webhook POST was attempted.
+    assert cap.webhooks == []
+    firing = db_session.query(AlertFiring).one()
+    chans = {c["channel"]: c for c in firing.channels}
+    assert chans["webhook"]["ok"] is False
+    assert "secret not configured" in chans["webhook"]["error"]
+    # The other channel is unaffected.
+    assert chans["email"]["ok"] is True
+
+
 def test_cooldown_suppresses_then_refires_after_window(db_session, cap):
     s = _server(db_session)
     _sample(db_session, s.id, disk_pct=90, ts=BASE)
