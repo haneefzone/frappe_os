@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, require
 from app.api.routes.jobs import get_job_runner
+from app.audit import record_audit
 from app.core.commands import RenderError, get_template
 from app.core.jobs import JobRunner, LockConflict
 from app.core.permissions import DANGER, READ, SITE_OPERATE, role_allows
@@ -200,6 +201,28 @@ def create_pipeline(
     db.add(pipeline)
     db.commit()
     db.refresh(pipeline)
+
+    # A.8.11 accepted-risk record must be durable: the pipeline `note` above is a
+    # shared free-text field the lifecycle overwrites unconditionally (prod
+    # sign-off on promote, rollback message on failure), and a prod-clone-for-DR
+    # reaches those writes as a matter of course — so `note` is only a UI/ops
+    # breadcrumb. The authoritative audit trail is an immutable AuditLog row.
+    if audit_note is not None:
+        record_audit(
+            db,
+            action="update_pipeline.unmasked_prod_clone",
+            summary=(
+                "A.8.11 unmasked prod clone accepted; delete staging after use "
+                f"(A.8.10). source={source.name}"
+            ),
+            user_id=user.id,
+            entity_type="update_pipeline",
+            entity_id=pipeline.id,
+            # `result` is String(20); keep the tag short (a longer literal would
+            # be truncated / rejected on Postgres and silently dropped by
+            # record_audit, defeating the durability guarantee).
+            result="risk_accepted",
+        )
 
     params: dict[str, str] = {
         "source_site": source.name,

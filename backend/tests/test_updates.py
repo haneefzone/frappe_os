@@ -18,6 +18,7 @@ from app.core.jobs import CaptureResult, InMemoryJobBackend, JobRunner
 from app.core.security import get_secrets_service
 from app.db import Base
 from app.models import CommandJob, Server
+from app.models.audit import AuditLog
 from app.models.bench import Bench
 from app.models.site import Site
 from app.models.update_pipeline import UpdatePipeline
@@ -616,6 +617,50 @@ def test_create_prod_clone_acknowledge_records_residual_risk(api_runner):
     body = resp.json()
     assert body["scrub_method"] is None
     assert body["note"] and "A.8.11" in body["note"] and "A.8.10" in body["note"]
+
+
+def test_ack_prod_clone_writes_durable_audit_row(api_runner):
+    """The accepted-risk decision must be durable. `note` is a shared free-text
+    field the lifecycle overwrites (prod sign-off / rollback), so the guarantee
+    is an immutable AuditLog row that survives a subsequent `note` write."""
+    api = api_runner
+    db = api["db"]
+    c = api["client"]
+    login(c, "developer@example.com")
+    resp = c.post(
+        "/api/update-pipelines",
+        json=_create_body(source_site_id=api["site_id"], acknowledge_unmasked=True),
+        headers=csrf_headers(c),
+    )
+    assert resp.status_code == 201, resp.text
+    pipeline_id = resp.json()["id"]
+
+    row = db.scalars(
+        select(AuditLog).where(
+            AuditLog.action == "update_pipeline.unmasked_prod_clone",
+            AuditLog.entity_type == "update_pipeline",
+            AuditLog.entity_id == str(pipeline_id),
+        )
+    ).first()
+    assert row is not None, "expected a durable AuditLog row for the ack'd clone"
+    assert row.result == "risk_accepted"
+    assert "A.8.11" in row.summary and "A.8.10" in row.summary
+
+    # Simulate the lifecycle clobbering the pipeline `note` (promote sign-off).
+    pipeline = db.get(UpdatePipeline, pipeline_id)
+    pipeline.note = "prod sign-off: DR rehearsal 2026-09-11"
+    db.commit()
+
+    # The audit row is untouched by the note write — the accepted-risk record
+    # persists independently of the shared free-text field.
+    survivor = db.scalars(
+        select(AuditLog).where(
+            AuditLog.action == "update_pipeline.unmasked_prod_clone",
+            AuditLog.entity_id == str(pipeline_id),
+        )
+    ).first()
+    assert survivor is not None
+    assert survivor.id == row.id
 
 
 def test_create_nonprod_clone_needs_no_scrub(api_runner):
