@@ -234,7 +234,16 @@ def test_rule(
     db.add(firing)
     db.commit()
     db.refresh(firing)
-    firing = al.deliver_firing(db, firing, secrets=secrets)
+    # Runs inline (the operator wants the channel outcomes back in this
+    # response), so use the tighter test-time bounds — a dead webhook fails
+    # in ~3s instead of holding the worker for the sweep's ~31s (DOO-437).
+    firing = al.deliver_firing(
+        db,
+        firing,
+        secrets=secrets,
+        webhook_timeout_seconds=al.TEST_WEBHOOK_TIMEOUT_SECONDS,
+        webhook_max_attempts=al.TEST_WEBHOOK_MAX_ATTEMPTS,
+    )
     audit.record(
         action="alert.rule.test",
         summary=f"Sent test alert for rule {rule.name!r}",

@@ -55,6 +55,14 @@ _WEBHOOK_TIMEOUT_SECONDS = 10.0
 _WEBHOOK_MAX_ATTEMPTS = 3
 _WEBHOOK_BACKOFF_BASE = 0.5  # seconds: 0.5, 1.0, 2.0 …
 
+# POST /api/alerts/{id}/test runs synchronously in the request thread (the
+# operator wants the channel outcomes back in the response), so it uses a
+# tighter bound than the sweep's delivery: one attempt, short timeout — a dead
+# endpoint fails in ~3s instead of holding the worker for the sweep's ~31s
+# (3 attempts × 10s timeout + backoff).
+TEST_WEBHOOK_TIMEOUT_SECONDS = 3.0
+TEST_WEBHOOK_MAX_ATTEMPTS = 1
+
 
 # --------------------------------------------------------------------------- #
 # Comparison + signing (pure, unit-tested)                                    #
@@ -299,13 +307,25 @@ def post_webhook(
     signature: str,
     *,
     sleep: Callable[[float], None] = time.sleep,
+    timeout_seconds: float = _WEBHOOK_TIMEOUT_SECONDS,
+    max_attempts: int = _WEBHOOK_MAX_ATTEMPTS,
 ) -> None:
     """POST a signed body with timestamp + bounded exponential-backoff retry.
+
+    ``timeout_seconds``/``max_attempts`` default to the sweep's bounds; the
+    ``/test`` endpoint passes tighter ones so a dead operator-supplied URL
+    can't hold the request thread for the sweep's full worst case.
 
     Raises the last error if every attempt fails so the caller records the
     channel as failed (the firing row carries the outcome; the sweep never sees
     the exception).
     """
+    # X-FDM-Timestamp is send-time metadata, NOT part of the signed body (the
+    # signature covers `body` only — see sign_payload), so a captured request
+    # replays successfully against X-FDM-Signature verification alone.
+    # Integrators that need replay protection should reject deliveries whose
+    # X-FDM-Timestamp is older than a short max-age (e.g. 5 minutes) in
+    # addition to verifying the signature (DOO-437).
     headers = {
         "Content-Type": "application/json",
         "X-FDM-Signature": signature,
@@ -313,14 +333,14 @@ def post_webhook(
         "X-FDM-Event": "alert.fired",
     }
     last_exc: Exception | None = None
-    for attempt in range(_WEBHOOK_MAX_ATTEMPTS):
+    for attempt in range(max_attempts):
         try:
-            resp = httpx.post(url, content=body, headers=headers, timeout=_WEBHOOK_TIMEOUT_SECONDS)
+            resp = httpx.post(url, content=body, headers=headers, timeout=timeout_seconds)
             resp.raise_for_status()
             return
         except Exception as exc:  # noqa: BLE001 — retry transient failures.
             last_exc = exc
-            if attempt + 1 < _WEBHOOK_MAX_ATTEMPTS:
+            if attempt + 1 < max_attempts:
                 sleep(_WEBHOOK_BACKOFF_BASE * (2**attempt))
     assert last_exc is not None
     raise last_exc
@@ -338,10 +358,21 @@ def _email_recipients(db: Session, rule: AlertRule) -> list[str]:
     ]
 
 
-def deliver_firing(db: Session, firing: AlertFiring, *, secrets) -> AlertFiring:
+def deliver_firing(
+    db: Session,
+    firing: AlertFiring,
+    *,
+    secrets,
+    webhook_timeout_seconds: float = _WEBHOOK_TIMEOUT_SECONDS,
+    webhook_max_attempts: int = _WEBHOOK_MAX_ATTEMPTS,
+) -> AlertFiring:
     """Send a firing over its rule's enabled channels and record the per-channel
     outcome on the row. One channel failing never blocks the other; the secret is
-    decrypted here, in memory, only to sign — never persisted or logged."""
+    decrypted here, in memory, only to sign — never persisted or logged.
+
+    ``webhook_timeout_seconds``/``webhook_max_attempts`` default to the sweep's
+    bounds (RQ-delivered, off the request thread); ``POST /test`` runs inline
+    and passes the tighter ``_TEST_WEBHOOK_*`` bounds instead (DOO-437)."""
     rule = db.get(AlertRule, firing.rule_id) if firing.rule_id is not None else None
     outcomes: list[dict] = []
 
@@ -367,9 +398,19 @@ def deliver_firing(db: Session, firing: AlertFiring, *, secrets) -> AlertFiring:
 
     if rule is not None and rule.channel_webhook and rule.webhook_url:
         try:
+            # webhook_url is operator-supplied with no egress allowlist (same
+            # trust model as the 2.8 notification webhook — informational;
+            # revisit if egress hardening to internal endpoints is later
+            # desired, DOO-437).
             secret = secrets.decrypt(rule.webhook_secret_enc) if rule.webhook_secret_enc else ""
             payload = build_webhook_payload(firing)
-            post_webhook(rule.webhook_url, payload, sign_payload(secret, payload))
+            post_webhook(
+                rule.webhook_url,
+                payload,
+                sign_payload(secret, payload),
+                timeout_seconds=webhook_timeout_seconds,
+                max_attempts=webhook_max_attempts,
+            )
             outcomes.append({"channel": "webhook", "ok": True, "error": None})
         except Exception as exc:  # noqa: BLE001
             logger.exception("alert webhook delivery failed for firing %s", firing.id)

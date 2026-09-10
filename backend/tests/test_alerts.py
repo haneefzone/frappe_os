@@ -83,6 +83,7 @@ class _Capture:
 
     def post_webhook(self, url, body, signature, **kw):
         self.webhooks.append((url, body, signature))
+        self.webhook_kwargs = kw
 
     def deliver(self, firing_id):
         firing = self.db.get(AlertFiring, firing_id)
@@ -388,3 +389,47 @@ def test_test_endpoint_fires_synthetic_alert(client, db_session, monkeypatch):
     assert resp.status_code == 200, resp.text
     assert len(cap.emails) == 1
     assert len(cap.webhooks) == 1
+
+
+def test_test_endpoint_uses_tight_webhook_bound(client, db_session, monkeypatch):
+    """The /test endpoint runs inline in the request thread, so a dead webhook
+    must fail fast rather than holding the worker for the sweep's ~31s worst
+    case (DOO-437)."""
+    secrets = get_secrets_service()
+    rule = _rule(db_session, secrets, name="probe")
+    cap = _Capture(db_session, secrets)
+    monkeypatch.setattr(al, "send_email", cap.send_email)
+    monkeypatch.setattr(al, "post_webhook", cap.post_webhook)
+
+    login(client, "admin@example.com")
+    resp = client.post(f"/api/alerts/{rule.id}/test", headers=csrf_headers(client))
+    assert resp.status_code == 200, resp.text
+    assert cap.webhook_kwargs["timeout_seconds"] == al.TEST_WEBHOOK_TIMEOUT_SECONDS
+    assert cap.webhook_kwargs["max_attempts"] == al.TEST_WEBHOOK_MAX_ATTEMPTS
+    assert al.TEST_WEBHOOK_TIMEOUT_SECONDS < al._WEBHOOK_TIMEOUT_SECONDS
+    assert al.TEST_WEBHOOK_MAX_ATTEMPTS < al._WEBHOOK_MAX_ATTEMPTS
+
+
+def test_sweep_delivery_keeps_default_webhook_bound(db_session, cap):
+    """The sweep's delivery path (deliver_firing with no explicit bounds) keeps
+    the full retry budget — only the inline /test path is tightened."""
+    rule = _rule(db_session, cap.secrets, name="probe-sweep")
+    firing = AlertFiring(
+        rule_id=rule.id,
+        rule_name=rule.name,
+        server_id=None,
+        server_name="test",
+        metric=rule.metric,
+        comparator=rule.comparator,
+        threshold=rule.threshold,
+        value=rule.threshold,
+        channels=[],
+    )
+    db_session.add(firing)
+    db_session.commit()
+    db_session.refresh(firing)
+
+    al.deliver_firing(db_session, firing, secrets=cap.secrets)
+
+    assert cap.webhook_kwargs["timeout_seconds"] == al._WEBHOOK_TIMEOUT_SECONDS
+    assert cap.webhook_kwargs["max_attempts"] == al._WEBHOOK_MAX_ATTEMPTS
