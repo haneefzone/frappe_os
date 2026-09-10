@@ -16,6 +16,7 @@ here, server-side. The pre-update backup gate is enforced inside the promote job
 itself, so prod is never mutated without a recoverable backup taken first.
 """
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -25,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, require
 from app.api.routes.jobs import get_job_runner
+from app.audit import record_audit
 from app.core.commands import RenderError, get_template
 from app.core.jobs import JobRunner, LockConflict
 from app.core.permissions import DANGER, READ, SITE_OPERATE, role_allows
@@ -41,6 +43,8 @@ from app.schemas.update import (
     SetEnvironmentRequest,
     VerifyRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["updates"])
 
@@ -128,6 +132,38 @@ def create_pipeline(
     source = db.get(Site, body.source_site_id)
     if source is None:
         raise HTTPException(status_code=404, detail="Source site not found.")
+
+    # A.8.11 Data masking: a clone carries the source's live db + files (incl.
+    # PII) into a *non-production* staging site. When the source is classified
+    # `prod`, refuse to clone unmasked unless the caller either supplies a
+    # `scrub_method` (masks PII on the clone) or explicitly accepts the residual
+    # risk (`acknowledge_unmasked` — the codified prod-clone-for-DR exception).
+    # The unmasked clone must be deleted after use (A.8.10); we record the
+    # accepted-risk decision on the pipeline note for audit/tracking.
+    audit_note: str | None = None
+    if source.environment == "prod" and not body.scrub_method:
+        if not body.acknowledge_unmasked:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Cloning a production site to a non-production staging site "
+                    "copies live PII unmasked (ISO 27001 A.8.11 data masking). "
+                    "Provide a `scrub_method` to mask PII on the clone, or set "
+                    "`acknowledge_unmasked=true` to accept the residual risk for a "
+                    "valid prod-clone (e.g. a DR rehearsal). An unmasked clone must "
+                    "be deleted after use (A.8.10 information deletion)."
+                ),
+            )
+        audit_note = (
+            "A.8.11: UNMASKED prod clone — residual risk accepted at creation "
+            f"by user {user.id}; delete staging site after use (A.8.10)."
+        )
+        logger.warning(
+            "update-pipeline: unmasked prod clone accepted for source site %s "
+            "(%s) by user %s — no scrub_method supplied (A.8.11 residual risk).",
+            source.id, source.name, user.id,
+        )
+
     source_bench = _bench(db, source.bench_id)
     staging_bench = (
         _bench(db, body.staging_bench_id)
@@ -159,11 +195,34 @@ def create_pipeline(
         staging_site_name=body.staging_site_name,
         scrub_method=body.scrub_method,
         phase="cloning",
+        note=audit_note,
         created_by=user.id,
     )
     db.add(pipeline)
     db.commit()
     db.refresh(pipeline)
+
+    # A.8.11 accepted-risk record must be durable: the pipeline `note` above is a
+    # shared free-text field the lifecycle overwrites unconditionally (prod
+    # sign-off on promote, rollback message on failure), and a prod-clone-for-DR
+    # reaches those writes as a matter of course — so `note` is only a UI/ops
+    # breadcrumb. The authoritative audit trail is an immutable AuditLog row.
+    if audit_note is not None:
+        record_audit(
+            db,
+            action="update_pipeline.unmasked_prod_clone",
+            summary=(
+                "A.8.11 unmasked prod clone accepted; delete staging after use "
+                f"(A.8.10). source={source.name}"
+            ),
+            user_id=user.id,
+            entity_type="update_pipeline",
+            entity_id=pipeline.id,
+            # `result` is String(20); keep the tag short (a longer literal would
+            # be truncated / rejected on Postgres and silently dropped by
+            # record_audit, defeating the durability guarantee).
+            result="risk_accepted",
+        )
 
     params: dict[str, str] = {
         "source_site": source.name,
