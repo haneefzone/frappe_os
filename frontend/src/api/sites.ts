@@ -10,6 +10,7 @@ import type { JobDetail } from './jobs'
 
 export type SiteStatus = 'active' | 'missing'
 export type SiteHealth = 'unknown' | 'ok' | 'warn' | 'err'
+export type SiteEnvironment = 'dev' | 'staging' | 'prod'
 
 export interface Site {
   id: number
@@ -24,6 +25,9 @@ export interface Site {
   scheduler_enabled: boolean | null
   maintenance_mode: boolean
   health: SiteHealth
+  /** The site's own environment classification (dev/staging/prod). Drives the
+   *  prod-update guardrail. Operators set this here or at creation time. */
+  environment: SiteEnvironment
   webserver_port: number | null
   /** http://<server host>:<bench web port>, or null when the port is unknown. */
   url: string | null
@@ -72,6 +76,8 @@ export interface CreateSitePayload {
   bench_id: number
   name: string
   admin_password: string
+  /** Environment classification applied at registration time (DOO-988). */
+  environment?: SiteEnvironment
   priority?: 'high' | 'default' | 'low'
 }
 

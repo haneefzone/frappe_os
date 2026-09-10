@@ -463,21 +463,30 @@ def upsert_site_one(
     name: str,
     *,
     maintenance_mode: bool = False,
+    environment: str | None = None,
     now: datetime | None = None,
 ) -> Site:
     """Insert or refresh a single site row keyed on (bench_id, name) — used to
     register a site the platform just created (session 1.8), without a vanish
-    pass over the bench's other sites."""
+    pass over the bench's other sites.
+
+    `environment` is applied only when the site is first created (not on
+    re-registration), so an existing operator classification is never overwritten
+    by a subsequent create job.
+    """
     now = now or datetime.now(UTC)
     site = db.scalars(
         select(Site).where(Site.bench_id == bench_id, Site.name == name)
     ).first()
-    if site is None:
+    is_new = site is None
+    if is_new:
         site = Site(bench_id=bench_id, name=name)
         db.add(site)
     site.maintenance_mode = maintenance_mode
     site.status = "active"
     site.discovered_at = now
+    if is_new and environment is not None:
+        site.environment = environment
     db.commit()
     db.refresh(site)
     return site

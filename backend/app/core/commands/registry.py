@@ -313,6 +313,10 @@ register(
             ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
             ParamSpec("db_root_pw", regex=SECRET_TEXT, secret=True),
             ParamSpec("admin_pw", regex=SECRET_TEXT, secret=True),
+            # Optional environment classification (DOO-988): applied at registration
+            # so operators who pick prod/staging in the wizard get the right guardrail
+            # immediately without a separate classify step.
+            ParamSpec("environment", enum=("dev", "staging", "prod"), required=False),
         ),
         action_class=CreateSiteAction,
         idempotent=False,

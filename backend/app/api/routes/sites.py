@@ -154,7 +154,8 @@ def create_site(
             # fight over its shared Redis (rule 4 + gotcha #3).
             target_type="bench",
             target_id=bench.path,
-            params={"site": body.name, "bench_path": bench.path},
+            params={"site": body.name, "bench_path": bench.path,
+                    "environment": body.environment},
             user_secrets={"admin_pw": body.admin_password},
             priority=body.priority,
             created_by=user.id,

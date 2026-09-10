@@ -144,7 +144,36 @@
               <dt class="text-meta uppercase tracking-wide text-ink-3">{{ spec.label }}</dt>
               <dd class="max-w-[62%] truncate text-label text-ink-1" :title="spec.value">{{ spec.value }}</dd>
             </div>
+            <!-- Environment classification row (DOO-988) -->
+            <div class="flex items-center justify-between px-4 py-2.5">
+              <dt class="text-meta uppercase tracking-wide text-ink-3">Environment</dt>
+              <dd class="flex items-center gap-2">
+                <EnvironmentBadge :env="site.environment" />
+                <select
+                  v-if="canOperate"
+                  :value="site.environment"
+                  :disabled="envClassifying"
+                  class="fdm-focus rounded border border-line bg-base px-2 py-1 text-meta text-ink-1 disabled:opacity-50"
+                  aria-label="Change environment classification"
+                  @change="classifyEnv(($event.target as HTMLSelectElement).value as SiteEnvironment)"
+                >
+                  <option value="dev">dev</option>
+                  <option value="staging">staging</option>
+                  <option value="prod">prod</option>
+                </select>
+                <span v-if="envClassifying" class="text-meta text-ink-3">Saving…</span>
+              </dd>
+            </div>
           </dl>
+          <!-- Nudge: unclassified sites silently skip the prod guardrail (DOO-988) -->
+          <div
+            v-if="site.environment === 'dev'"
+            class="border-t border-warn/30 bg-warn/5 px-4 py-3 text-meta text-warn"
+            role="note"
+          >
+            This site is classified <strong>dev</strong>. If it serves real users, change it to
+            <strong>prod</strong> so the safe-update pipeline requires a sign-off before promoting.
+          </div>
         </section>
 
         <!-- Quick actions -->
@@ -814,7 +843,8 @@ import { backupsApi } from '../api/backups'
 import { ApiError } from '../api/client'
 import { domainsApi, HOSTNAME_RE, type DomainOut } from '../api/domains'
 import { jobsApi, streamJobLogs } from '../api/jobs'
-import { sitesApi, type Site, type UptimeSeries } from '../api/sites'
+import { sitesApi, type Site, type SiteEnvironment, type UptimeSeries } from '../api/sites'
+import { updatesApi } from '../api/updates'
 import { driftApi, type DriftBaseline } from '../api/drift'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import DriftChip from '../components/DriftChip.vue'
@@ -846,6 +876,22 @@ const canRemove = auth.hasPermission('danger')
 const canBackup = auth.hasPermission('backup:create')
 const canSslManage = auth.hasPermission('ssl:manage')
 const backingUp = ref(false)
+
+const envClassifying = ref(false)
+
+async function classifyEnv(env: SiteEnvironment) {
+  if (!site.value || envClassifying.value) return
+  envClassifying.value = true
+  try {
+    await updatesApi.setEnvironment(site.value.id, { environment: env })
+    site.value = { ...site.value, environment: env }
+    toast.success(`Environment set to ${env}.`)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not update environment.')
+  } finally {
+    envClassifying.value = false
+  }
+}
 
 // -- Tabs --------------------------------------------------------------------
 type TabKey = 'overview' | 'domains'

@@ -428,7 +428,10 @@ class CreateSiteAction(Action):
                         "site to its bench."
                     )
                 else:
-                    row = discovery.upsert_site_one(ctx.session, bench.id, site)
+                    env = params.get("environment") or "dev"
+                    row = discovery.upsert_site_one(
+                        ctx.session, bench.id, site, environment=env
+                    )
                     await ctx.emit(f"Registered site #{row.id} ({site}).")
         finally:
             # 5) Dev bench: shut the Redis we started back down so `bench start`

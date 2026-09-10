@@ -1,6 +1,7 @@
 """Request/response models for the sites API (session 1.8)."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +27,10 @@ class SiteOut(BaseModel):
     scheduler_enabled: bool | None
     maintenance_mode: bool
     health: str
+    # The site's own environment classification (dev/staging/prod). Drives the
+    # prod-update guardrail; operators set this via POST /api/sites/{id}/environment
+    # or at creation time. Defaults to "dev" until explicitly classified.
+    environment: str
     # The bench's dev web port (from common_site_config.json); None if unknown.
     webserver_port: int | None
     # Pre-built http URL to reach the site, or None when the port is unknown.
@@ -54,6 +59,7 @@ class SiteOut(BaseModel):
             scheduler_enabled=site.scheduler_enabled,
             maintenance_mode=site.maintenance_mode,
             health=site.health,
+            environment=site.environment,
             webserver_port=port,
             url=url,
             uptime_enabled=site.uptime_enabled,
@@ -73,6 +79,10 @@ class CreateSiteRequest(BaseModel):
     bench_id: int
     name: str
     admin_password: str = Field(min_length=1, max_length=128)
+    # Environment classification applied at registration time (DOO-988). Prevents
+    # a real prod site from being promoted without the danger/confirm/sign-off
+    # chain because nobody set its environment after creation.
+    environment: Literal["dev", "staging", "prod"] = "dev"
     # bench new-site is longer-running; default it to the high queue.
     priority: str = "high"
 

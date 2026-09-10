@@ -118,6 +118,36 @@
                   encrypted — never shown in job logs.
                 </p>
               </div>
+
+              <!-- Environment classification (DOO-988) -->
+              <div>
+                <fieldset>
+                  <legend class="mb-2 text-label font-medium text-ink-1">Environment</legend>
+                  <div class="flex gap-3">
+                    <label
+                      v-for="opt in ENV_OPTIONS"
+                      :key="opt.value"
+                      class="fdm-focus-within flex flex-1 cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition"
+                      :class="form.environment === opt.value
+                        ? 'border-line-strong bg-raised'
+                        : 'border-line hover:border-line-strong'"
+                    >
+                      <input
+                        v-model="form.environment"
+                        type="radio"
+                        name="environment"
+                        :value="opt.value"
+                        class="sr-only"
+                      />
+                      <EnvironmentBadge :env="opt.value" />
+                      <span class="mt-0.5 text-meta text-ink-3">{{ opt.desc }}</span>
+                    </label>
+                  </div>
+                  <p v-if="form.environment === 'prod'" class="mt-2 rounded-lg border border-err/40 bg-err/5 px-3 py-2 text-meta text-err">
+                    Promoting a prod site requires the <strong>danger</strong> role, typed site-name confirm, and a sign-off.
+                  </p>
+                </fieldset>
+              </div>
             </div>
           </template>
 
@@ -135,6 +165,10 @@
               <div class="flex justify-between px-4 py-2.5 text-label">
                 <dt class="text-ink-3">Site</dt>
                 <dd class="font-mono text-ink-1">{{ form.name }}</dd>
+              </div>
+              <div class="flex items-center justify-between px-4 py-2.5 text-label">
+                <dt class="text-ink-3">Environment</dt>
+                <dd><EnvironmentBadge :env="form.environment" /></dd>
               </div>
             </dl>
 
@@ -167,7 +201,7 @@ import LucideLayers from '~icons/lucide/layers'
 import { ApiError } from '../api/client'
 import { benchesApi, type Bench } from '../api/benches'
 import { serversApi, type EnvTag, type Server } from '../api/servers'
-import { sitesApi } from '../api/sites'
+import { sitesApi, type SiteEnvironment } from '../api/sites'
 import EmptyState from '../components/EmptyState.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
 import { toast } from '../components/toast'
@@ -181,8 +215,15 @@ const NAME_RE = /^[a-z0-9][a-z0-9.-]{1,80}$/
 
 const steps: WizardStep[] = [
   { key: 'bench', label: 'Bench', description: 'Where the site will be created.' },
-  { key: 'details', label: 'Details', description: 'Name the site and set its admin password.' },
+  { key: 'details', label: 'Details', description: 'Name the site, set its password, and classify its environment.' },
   { key: 'review', label: 'Review', description: 'Confirm the exact command, then create.' },
+]
+
+// Environment options shown in the Details step picker.
+const ENV_OPTIONS: { value: SiteEnvironment; desc: string }[] = [
+  { value: 'dev', desc: 'Local or internal dev bench' },
+  { value: 'staging', desc: 'Pre-production / QA' },
+  { value: 'prod', desc: 'Serves real users — strict guardrail' },
 ]
 
 const active = ref(0)
@@ -195,6 +236,7 @@ const form = reactive({
   benchId: null as number | null,
   name: '',
   adminPassword: '',
+  environment: 'dev' as SiteEnvironment,
 })
 
 const nameValid = computed(() => NAME_RE.test(form.name))
@@ -284,6 +326,7 @@ async function submit() {
       bench_id: form.benchId,
       name: form.name,
       admin_password: form.adminPassword,
+      environment: form.environment,
     })
     toast.success('Site creation started.')
     router.push(`/jobs/${job.id}`)
