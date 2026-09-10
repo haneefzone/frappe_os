@@ -30,6 +30,16 @@ class ResticRepoOut(BaseModel):
     last_backup_at: datetime | None
     last_check_at: datetime | None
     last_snapshot_id: str | None
+    # Session 4.2 evidence: last integrity-check result + retention state.
+    last_check_ok: bool | None
+    last_check_summary: str | None
+    last_forget_at: datetime | None
+    retention_keep_last: int | None
+    retention_keep_daily: int | None
+    retention_keep_weekly: int | None
+    retention_keep_monthly: int | None
+    # A compact human policy string for the §6 evidence view ("last 3, 7 daily").
+    retention_summary: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -48,6 +58,14 @@ class ResticRepoOut(BaseModel):
             last_backup_at=repo.last_backup_at,
             last_check_at=repo.last_check_at,
             last_snapshot_id=repo.last_snapshot_id,
+            last_check_ok=repo.last_check_ok,
+            last_check_summary=repo.last_check_summary,
+            last_forget_at=repo.last_forget_at,
+            retention_keep_last=repo.retention_keep_last,
+            retention_keep_daily=repo.retention_keep_daily,
+            retention_keep_weekly=repo.retention_keep_weekly,
+            retention_keep_monthly=repo.retention_keep_monthly,
+            retention_summary=repo.retention_summary,
             created_at=repo.created_at,
             updated_at=repo.updated_at,
         )
@@ -61,3 +79,12 @@ class ResticRepoConfigure(BaseModel):
     storage_target_id: int
     prefix: str = Field(default="", max_length=255)
     password: str | None = Field(default=None, min_length=1, max_length=255)
+
+    # Session 4.2 retention policy for `restic forget --prune`. Each dimension maps
+    # to the matching restic `--keep-*` flag; omit (None) to leave that dimension
+    # unset. All None = no policy, and the forget action refuses to prune. Counts
+    # are >= 1 (a 0 keep would be a destructive footgun).
+    retention_keep_last: int | None = Field(default=None, ge=1, le=10000)
+    retention_keep_daily: int | None = Field(default=None, ge=1, le=10000)
+    retention_keep_weekly: int | None = Field(default=None, ge=1, le=10000)
+    retention_keep_monthly: int | None = Field(default=None, ge=1, le=10000)

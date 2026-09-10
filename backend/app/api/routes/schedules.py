@@ -117,14 +117,26 @@ def _validate_action_params(
         )
 
 
-def _resolve_target(db: Session, target_type: str, target_id: int) -> None:
+def _resolve_target(db: Session, target_type: str, target_id: int | None) -> None:
     """Ensure the schedule points at a real, supported target (validated at
-    create/edit so a schedule can never be saved pointing at nothing)."""
+    create/edit so a schedule can never be saved pointing at nothing).
+
+    Branches on `target_type`: a `site` target resolves a Site (+ its bench); a
+    `server` target (6.7 drift, 4.2 restic DR) resolves a Server; a `report`
+    target (6.2) has no row at all — its config lives in `params`."""
     if target_type not in SCHEDULE_TARGET_TYPES:
         raise HTTPException(
             status_code=422, detail=f"Unsupported target_type {target_type!r}."
         )
-    site = db.get(Site, target_id)
+    if target_type == "report":
+        return  # no row target — report config lives in params
+    if target_type == "server":
+        from app.models.server import Server
+
+        if target_id is None or db.get(Server, target_id) is None:
+            raise HTTPException(status_code=404, detail="Target server not found.")
+        return
+    site = db.get(Site, target_id) if target_id is not None else None
     if site is None:
         raise HTTPException(status_code=404, detail="Target site not found.")
     if db.get(Bench, site.bench_id) is None:  # pragma: no cover - FK-guaranteed

@@ -55,6 +55,12 @@ SCHEDULE_ACTIONS = (
     # Config drift detection (session 6.7): re-hash a server's tracked config
     # artefacts and diff against baseline. Server-targeted (see below).
     "server.drift_check",
+    # Full-system DR (session 4.2): the weekly config-tier restic snapshot, the
+    # retention prune, and the periodic integrity check. All server-targeted —
+    # each server has one restic repo, resolved from the target server at dispatch.
+    "restic.backup",
+    "restic.forget",
+    "restic.check",
     # Reports (session 6.2): render a registry report and email the artifact.
     # Platform-local — it targets no server, so it carries target_type "report".
     "report.generate",
