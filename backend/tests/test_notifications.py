@@ -262,3 +262,61 @@ def test_search_readonly_no_actions(client, seeded_users, db_session):
     results = resp.json()["results"]
     action_results = [r for r in results if r["kind"] == "action"]
     assert len(action_results) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Signed webhook channel (session 2.8 acceptance)                              #
+# --------------------------------------------------------------------------- #
+
+def test_webhook_is_signed_over_the_exact_transmitted_bytes(monkeypatch):
+    """X-FDM-Signature must be HMAC-SHA256 of the bytes actually POSTed."""
+    import hashlib
+    import hmac
+    import json
+    from types import SimpleNamespace
+
+    import app.config as app_config
+    from app.core import notifications as notif
+
+    secret = "s3cr3t-webhook-key"
+    monkeypatch.setattr(
+        app_config,
+        "get_settings",
+        lambda: SimpleNamespace(notification_webhook_secret=secret),
+    )
+
+    sent = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+    def _fake_post(url, content=None, headers=None, timeout=None):
+        sent["url"] = url
+        sent["content"] = content
+        sent["headers"] = headers
+        return _Resp()
+
+    monkeypatch.setattr(notif.httpx, "post", _fake_post)
+
+    notif._send_webhook(
+        "https://hook.example/endpoint",
+        "job.failure",
+        "Backup failed",
+        "Job #1 failed.",
+        "job",
+        1,
+    )
+
+    assert sent["url"] == "https://hook.example/endpoint"
+    assert sent["headers"]["Content-Type"] == "application/json"
+
+    expected = hmac.new(secret.encode(), sent["content"], hashlib.sha256).hexdigest()
+    assert sent["headers"]["X-FDM-Signature"] == f"sha256={expected}"
+
+    # Signature must cover the real payload, and the secret must never ride along.
+    payload = json.loads(sent["content"])
+    assert payload["event_type"] == "job.failure"
+    assert payload["entity_type"] == "job"
+    assert payload["entity_id"] == 1
+    assert secret not in sent["content"].decode()
