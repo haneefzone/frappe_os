@@ -530,10 +530,12 @@ class JobRunner:
     def _lock_key(
         server_id: int | None, target_type: str, target_id: str | None, action: str
     ) -> str:
-        # rule 4: keyed on the target + action so two dangerous ops on the same
-        # target can never run at once. Uses action_name as the action class.
-        # A platform-local job (6.2) has no server; "local" keeps the key shape
-        # stable and scopes such a lock to the platform rather than a server.
+        # rule 4: keyed on the target + action class so two dangerous ops on the
+        # same target can never run at once. `action` is the template's
+        # `lock_class` when it declares one (so a family of related templates —
+        # e.g. every tool install shares "tools" — serialises), otherwise its
+        # action_name. A platform-local job (6.2) has no server; "local" keeps
+        # the key shape stable and scopes such a lock to the platform.
         scope = server_id if server_id is not None else "local"
         return f"{scope}:{target_type}:{target_id or '-'}:{action}"
 
@@ -598,7 +600,9 @@ class JobRunner:
             created_by=created_by,
         )
         if template.requires_lock:
-            job.lock_key = self._lock_key(server_id, target_type, target_id, action_name)
+            job.lock_key = self._lock_key(
+                server_id, target_type, target_id, template.lock_class or action_name
+            )
         db.add(job)
         db.commit()
         db.refresh(job)

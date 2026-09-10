@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+#
+# fdm-wkhtmltopdf — the FDM Platform's single-purpose privileged helper for
+# installing the patched-Qt wkhtmltopdf build (session 6.1, "Tool installer").
+#
+# THE DECISION (documented for the ISO review — DOO-255):
+#   CLAUDE.md gotcha #6 requires the *patched-Qt* 0.12.6.1 build; the distro
+#   `apt-get install wkhtmltopdf` package is an UNPATCHED Qt build that renders
+#   Frappe print formats wrong. So the install is "fetch a specific .deb, then
+#   dpkg -i it", and dpkg genuinely needs root.
+#
+#   The obvious shape — have the job download the .deb as the bench user and then
+#   run `sudo -n /usr/bin/dpkg -i $HOME/.fdm/downloads/wkhtmltox.deb` — is a
+#   ROOT-ESCALATION VECTOR, the same class of bug as the DOO-220 certbot finding.
+#   The sudoers line would name a path inside a BENCH-USER-WRITABLE directory, so
+#   any code running as `frappe` can verify a good .deb, pass the checksum gate,
+#   and then swap the file for a malicious one before (or between) the sudo call —
+#   a plain TOCTOU. Worse, a .deb's maintainer scripts run AS ROOT by design, so
+#   `dpkg -i <attacker-controlled file>` is not "install a package", it is
+#   arbitrary root code execution. Granting it is equivalent to NOPASSWD: ALL.
+#
+#   Sudoers cannot fix this: the vulnerability is that the *content* at the path
+#   is untrusted, not that the path is wildcarded. So — exactly like `fdm-certbot`
+#   (2.4) and `fdm-elevate` (2.5) — the platform routes this through THIS fixed,
+#   root-owned wrapper. The wrapper takes NO caller-supplied input at all: the
+#   URL, the version and the SHA-256 digest are pinned HERE, it downloads into a
+#   ROOT-OWNED 0700 staging directory the bench user cannot write to, verifies the
+#   digest itself, and only then runs dpkg. The bench user never has an
+#   opportunity to influence the bytes that reach root.
+#
+# Install once per managed server (see docs/production-setup.md):
+#   sudo install -m 0755 -o root -g root deploy/fdm-wkhtmltopdf /usr/local/sbin/fdm-wkhtmltopdf
+#   # add to /etc/sudoers.d/fdm-platform (validated with visudo -cf):
+#   #   frappe ALL=(root) NOPASSWD: /usr/local/sbin/fdm-wkhtmltopdf
+#
+# Subcommands:
+#   install     download (pinned URL), verify (pinned SHA-256), dpkg -i, fix deps
+#   version     print the installed wkhtmltopdf version (read-only)
+#
+set -euo pipefail
+
+# --------------------------------------------------------------------------- #
+# Pinned release. Bump URL, VERSION and SHA256 together — never one alone.
+# sha256 of wkhtmltox_0.12.6.1-3.jammy_amd64.deb, verified against the published
+# GitHub release asset on 2026-07-19.
+# --------------------------------------------------------------------------- #
+VERSION="0.12.6.1-3"
+URL="https://github.com/wkhtmltopdf/packaging/releases/download/${VERSION}/wkhtmltox_${VERSION}.jammy_amd64.deb"
+SHA256="4f723b2691ad8638a9df960e0421d346d7315083e3583a334f33362280ddba15"
+
+# Root-owned staging directory. NOT /tmp (world-writable, symlink games) and NOT
+# anything under the bench user's $HOME — the whole point is that the bench user
+# cannot write here, so the bytes dpkg reads are the bytes this script verified.
+STAGE=/var/lib/fdm-platform/wkhtmltopdf
+
+DPKG=/usr/bin/dpkg
+APT_GET=/usr/bin/apt-get
+CURL=/usr/bin/curl
+SHA256SUM=/usr/bin/sha256sum
+WKHTMLTOPDF=/usr/local/bin/wkhtmltopdf
+
+die() { echo "fdm-wkhtmltopdf: $*" >&2; exit 1; }
+
+cmd_install() {
+  [[ $# -eq 0 ]] || die "install takes no arguments"
+  [[ $EUID -eq 0 ]] || die "must run as root (invoke via sudo)"
+
+  # 0700 root:root — created fresh each run so a pre-existing attacker-planted
+  # file can never be mistaken for our download.
+  install -d -m 0700 -o root -g root "$STAGE"
+  local deb="$STAGE/wkhtmltox-${VERSION}.deb"
+  rm -f "$deb"
+
+  echo "Downloading wkhtmltopdf ${VERSION} (patched Qt)..."
+  "$CURL" -fsSL --proto '=https' --tlsv1.2 -o "$deb" "$URL" \
+    || die "download failed from $URL"
+
+  echo "Verifying SHA-256..."
+  # `sha256sum -c` against the pinned digest. The file lives in a root-only
+  # directory, so nothing can swap it between this check and the dpkg below.
+  echo "${SHA256}  ${deb}" | "$SHA256SUM" -c - \
+    || die "SHA-256 mismatch — refusing to install (expected ${SHA256})"
+
+  echo "Installing package..."
+  "$DPKG" -i "$deb" || {
+    # A fresh box is usually just missing the font/X libs the .deb depends on;
+    # -f -y resolves them from the distro repos and completes the install.
+    echo "dpkg reported unmet dependencies — resolving..."
+    DEBIAN_FRONTEND=noninteractive "$APT_GET" install -f -y \
+      || die "dependency resolution failed"
+  }
+
+  rm -f "$deb"
+  cmd_version
+}
+
+cmd_version() {
+  [[ $# -eq 0 ]] || die "version takes no arguments"
+  [[ -x "$WKHTMLTOPDF" ]] || die "wkhtmltopdf not found at $WKHTMLTOPDF"
+  exec "$WKHTMLTOPDF" --version
+}
+
+main() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    install) cmd_install "$@" ;;
+    version) cmd_version "$@" ;;
+    *) die "unknown subcommand: ${sub:-<none>}" ;;
+  esac
+}
+
+# Only run when executed directly, so the helpers can be sourced and unit-tested
+# without invoking dpkg (mirrors fdm-certbot / fdm-elevate).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

@@ -30,6 +30,11 @@ REPORT_GENERATE = "report:generate"  # generate compliance / audit report export
 # Admin holds (Admin has it via the wildcard). Deliberately absent from
 # Developer/Operator in DEFAULT_ROLES — those reports are Admin-only.
 REPORT_SENSITIVE = "report:sensitive"
+# Re-detect a server's toolchain (session 6.1). Separate from `read` because a
+# scan enqueues a job, and Read-only can never mutate (rule 7); separate from
+# `server:manage` because an Operator may check the stack without being allowed
+# to change what is installed on the box.
+TOOL_SCAN = "tool:scan"
 
 # name -> permissions. Admin gets the wildcard; Read-only can never mutate
 # (CLAUDE.md golden rule 7).
@@ -50,6 +55,7 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         SSL_MANAGE,
         ALERT_MANAGE,
         REPORT_GENERATE,
+        TOOL_SCAN,
     ],
     "Operator": [
         READ,
@@ -58,6 +64,7 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         JOB_MANAGE,
         SSL_MANAGE,
         ALERT_MANAGE,
+        TOOL_SCAN,
     ],
     "Read-only": [READ],
 }

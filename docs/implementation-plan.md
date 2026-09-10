@@ -80,7 +80,39 @@ frappe ALL=(root) NOPASSWD: /usr/bin/find /etc/supervisor/conf.d -maxdepth 1 -ty
 # time-boxed, single-command drop-in for `bench setup production <user>` and revokes it after
 # the run, so no permanent setup-production grant exists (drift-baseline-clean, Phase 6.7).
 frappe ALL=(root) NOPASSWD: /usr/local/sbin/fdm-elevate
+
+# Tool installer (Session 6.1). Each root-needing install is ONE explicit line
+# with the package name baked in — no wildcard binary, no `apt-get install *`
+# (which would let any package, including a malicious local .deb, be named).
+# The command templates render exactly these argvs as constants; nothing is
+# assembled from a tool id.
+frappe ALL=(root) NOPASSWD: /usr/bin/apt-get install -y git
+frappe ALL=(root) NOPASSWD: /usr/bin/apt-get install -y redis-server
+frappe ALL=(root) NOPASSWD: /usr/bin/apt-get install -y nginx
+frappe ALL=(root) NOPASSWD: /usr/bin/apt-get install -y supervisor
+frappe ALL=(root) NOPASSWD: /usr/bin/apt-get install -y htop
+frappe ALL=(root) NOPASSWD: /usr/bin/apt-get install -y jq
+
+# wkhtmltopdf needs the patched-Qt 0.12.6.1 build (gotcha #6), which is a .deb
+# fetched from GitHub rather than a distro package. dpkg is NOT granted directly:
+# a .deb's maintainer scripts run as root by design, so `dpkg -i <path>` where the
+# path is bench-user-writable is arbitrary root code execution (a TOCTOU — the
+# caller can swap the file after any checksum gate the caller itself performs).
+# That is the DOO-220 lesson again: sudoers can pin a path but not the bytes at
+# it. So wkhtmltopdf is routed through the fixed root-owned wrapper
+# `deploy/fdm-wkhtmltopdf` (installed at /usr/local/sbin/fdm-wkhtmltopdf), which
+# takes no caller input at all — URL, version and SHA-256 are pinned in the
+# wrapper, it stages into root-owned 0700 /var/lib/fdm-platform/wkhtmltopdf, and
+# it verifies the digest itself before invoking dpkg.
+frappe ALL=(root) NOPASSWD: /usr/local/sbin/fdm-wkhtmltopdf
 ```
+
+**Userspace installs need no sudoers line at all.** `uv`, Node (via nvm), the
+bench CLI (via `uv tool install`), `gh`, `code-server` and `claude-code` all
+install into the bench-owner's `$HOME` and are executed as the SSH user with no
+sudo in the argv. Python and MariaDB are **detect-only** by design — swapping the
+system interpreter or a database major version is an OS/data-migration decision,
+not a one-click button, so no template (and no sudo right) exists for them.
 
 The Session 2.5 elevation mechanism and rollback are documented in
 `docs/production-setup.md`. The `fdm-elevate` helper ships in `deploy/fdm-elevate`; the

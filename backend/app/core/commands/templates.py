@@ -98,6 +98,12 @@ class CommandTemplate:
     requires_lock: bool
     # RBAC action-class required to launch this (checked in POST /api/jobs).
     required_permission: str
+    # Rule 4's "action class" for the Redis lock. Templates that must not run
+    # concurrently against the same target share one string — e.g. every
+    # `tool.install_*` uses "tools", so two tool installs on one server serialise
+    # even though their action_names differ. None = lock on action_name alone
+    # (the original behaviour; each action only excludes itself).
+    lock_class: str | None = None
     # OS user to run the command as (via `sudo -u`); None = the SSH login user.
     run_as: str | None = None
     # Platform-local action (session 6.2): the work runs inside the platform

@@ -17,7 +17,8 @@ on first read so the app works before anyone visits Settings.
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, func
+from sqlalchemy import JSON, DateTime, Integer, String, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from app.config import get_settings
@@ -25,6 +26,9 @@ from app.db import Base
 
 # The single row's fixed primary key.
 SINGLETON_ID = 1
+
+# JSONB on Postgres, plain JSON elsewhere (SQLite test fallback).
+MatrixOverridesJSON = JSON().with_variant(JSONB(), "postgresql")
 
 
 class PlatformSettings(Base):
@@ -70,6 +74,15 @@ class PlatformSettings(Base):
     bench_base_path: Mapped[str] = mapped_column(String(300), default="/home/frappe")
     port_range_start: Mapped[int] = mapped_column(Integer, default=8000)
     port_range_end: Mapped[int] = mapped_column(Integer, default=8999)
+
+    # Defaults tab: version-matrix overrides (B4.17), consumed by the 6.1 tool
+    # resolver. Shaped `{"<frappe major>": {"<slot>": "<version>"}}`, e.g.
+    # `{"16": {"node": "24"}}`. Empty = ship the CLAUDE.md matrix unchanged. An
+    # override sets an open-ended floor, so it can only relax the shipped rule —
+    # it is an escape hatch for a fleet that moved ahead of the matrix.
+    version_matrix_overrides: Mapped[dict] = mapped_column(
+        MatrixOverridesJSON, default=dict, server_default="{}"
+    )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

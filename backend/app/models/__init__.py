@@ -26,6 +26,7 @@ from app.models.report_run import ReportRun
 from app.models.restic import ResticRepo
 from app.models.schedule import Schedule
 from app.models.server import Server, SSHCredential
+from app.models.server_tool import ServerTool
 from app.models.settings import PlatformSettings
 from app.models.site import Site
 from app.models.storage import StorageTarget
@@ -65,6 +66,7 @@ __all__ = [
     "SecurityPolicy",
     "SSHCredential",
     "Server",
+    "ServerTool",
     "Site",
     "StorageTarget",
     "TerminalSession",

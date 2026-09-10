@@ -3315,3 +3315,133 @@ def _now_utc():
     from datetime import UTC, datetime
 
     return datetime.now(UTC)
+
+
+# --------------------------------------------------------------------------- #
+# Tool installer (session 6.1)
+# --------------------------------------------------------------------------- #
+
+
+async def _detect_one(ctx: JobContext, tool) -> str | None:
+    """Run one tool's fixed detect argv and return its parsed version.
+
+    `nginx -v` writes its banner to stderr and a missing binary exits non-zero,
+    so both streams are searched and any failure is simply "not detected" — a
+    server without htop is not a failed job.
+    """
+    from app.core.tools import format_version, parse_version
+
+    try:
+        res = await ctx.capture(list(tool.detect_argv))
+    except Exception:
+        return None
+    if res.exit_code != 0:
+        return None
+    parsed = parse_version(f"{res.stdout}\n{res.stderr}")
+    return format_version(parsed) if parsed else None
+
+
+def _tool_for_job(ctx: JobContext):
+    """Which tool this install job is for, derived from the job's own template.
+
+    Deliberately NOT a request parameter: the tool is whatever the (fixed,
+    per-tool) command template says it is, so there is no client-supplied value
+    anywhere near the install path (golden rule 1).
+    """
+    from app.core.tools import TOOL_DEFINITIONS
+    from app.models.job import CommandJob
+
+    job = ctx.session.get(CommandJob, ctx.job_id)
+    action_name = job.action_name if job is not None else None
+    for tool in TOOL_DEFINITIONS:
+        if tool.install_action and tool.install_action == action_name:
+            return tool
+    raise RuntimeError(f"no tool registered for action {action_name!r}")
+
+
+class ScanToolsAction(Action):
+    """`server.scan_tools` — inventory every registered tool and persist verdicts.
+
+    Extends the 1.2 `check_connection` detection from a transient stream into
+    durable `ServerTool` rows judged against the CLAUDE.md version matrix.
+    Read-only on the target, so it takes no lock. A missing tool is data, not a
+    failure — only an unexpected error fails the job.
+    """
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core.toolinventory import build_context, upsert_server_tool
+        from app.core.tools import TOOL_DEFINITIONS
+
+        inv = build_context(ctx.session, ctx.server_id)
+
+        with ctx.step("Resolve version matrix"):
+            if inv.major_known:
+                await ctx.emit(f"Highest Frappe version on this server: v{inv.major}")
+            elif inv.has_bench:
+                await ctx.emit("Benches found but no Frappe version recorded yet.")
+            else:
+                await ctx.emit(
+                    "No benches on this server — version-dependent tools "
+                    "(Python, Node, MariaDB) will be reported as 'unknown'."
+                )
+
+        for tool in TOOL_DEFINITIONS:
+            with ctx.step(f"Detect {tool.display_name}"):
+                detected = await _detect_one(ctx, tool)
+                row = upsert_server_tool(
+                    ctx.session,
+                    server_id=ctx.server_id,
+                    tool=tool,
+                    detected_version=detected,
+                    ctx=inv,
+                )
+                await ctx.emit(
+                    f"  {tool.tool_id}: detected={detected or 'not installed'} "
+                    f"recommended={row.recommended_version} -> {row.status}"
+                )
+        ctx.session.commit()
+
+
+class InstallToolAction(Action):
+    """`tool.install_*` — run one tool's fixed installer, then re-detect it.
+
+    Every template this class serves is a *constant argv for exactly one tool*;
+    there is no generic "run this installer" template and nothing is assembled
+    from a tool id. Not idempotent-auto-retry: a half-finished package install
+    replayed blind is how you corrupt a dpkg database, so the templates set
+    `idempotent=False` and a failed install waits for a human.
+    """
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core.toolinventory import build_context, upsert_server_tool
+
+        tool = _tool_for_job(ctx)
+
+        with ctx.step(f"Install {tool.display_name}"):
+            await ctx.emit(f"$ {ctx.rendered.display}")
+            code = await ctx.stream(ctx.rendered.argv, cwd=ctx.rendered.cwd)
+            if code != 0:
+                raise RuntimeError(
+                    f"{tool.display_name} install exited with status {code}"
+                )
+
+        with ctx.step(f"Verify {tool.display_name}"):
+            inv = build_context(ctx.session, ctx.server_id)
+            detected = await _detect_one(ctx, tool)
+            row = upsert_server_tool(
+                ctx.session,
+                server_id=ctx.server_id,
+                tool=tool,
+                detected_version=detected,
+                ctx=inv,
+            )
+            ctx.session.commit()
+            if detected is None:
+                raise RuntimeError(
+                    f"{tool.display_name} still not detected after install — "
+                    "the installer may need a new login shell for PATH changes."
+                )
+            await ctx.emit(
+                f"{tool.display_name} {detected} "
+                f"(recommended {row.recommended_version}) -> {row.status}"
+            )

@@ -27,6 +27,7 @@ from app.core.commands.actions import (
     EchoDemoAction,
     GetAppAction,
     InstallAppOnSiteAction,
+    InstallToolAction,
     ListBranchesAction,
     MigrateAllSitesAction,
     MoveBackupAction,
@@ -34,6 +35,7 @@ from app.core.commands.actions import (
     RenderVhostAction,
     RestartServiceAction,
     RestoreAction,
+    ScanToolsAction,
     SetMaintenanceAction,
     SetSchedulerAction,
     SetupProductionAction,
@@ -1466,6 +1468,203 @@ register(
         idempotent=True,
         requires_lock=False,
         required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
+
+# --- Tool installer (session 6.1) ---------------------------------------- #
+#
+# One template per tool. Each is a *constant argv* — the tool is baked into the
+# template, never assembled from a `tool_id`, so there is no generic "run this
+# installer" action and no client-supplied value on the install path (rule 1).
+#
+# Every template shares `lock_class="tools"`, so rule 4's Redis lock serialises
+# tool work per server: a second install while one is running gets HTTP 409 with
+# the blocking job id. Package managers are not concurrency-safe (dpkg takes its
+# own lock and fails hard), so this is a correctness requirement, not politeness.
+#
+# None of them are idempotent: `idempotent=False` means the engine never
+# auto-retries a half-finished package install. A failed install waits for a
+# human to read the log.
+#
+# ROOT INSTALLS map 1:1 onto explicit lines in the docs/implementation-plan.md
+# sudoers allowlist — absolute paths, one package per line, no wildcard binary.
+# `sudo -n` fails loudly (never prompts) if a line is missing.
+#
+# USERSPACE INSTALLS run as the bench-owner SSH user with no sudo at all. They
+# need a shell for pipes and `$HOME`, so they use `bash -lc` with a *fixed,
+# developer-authored* script constant. Note these scripts must not contain `{}`
+# braces: every argv token goes through `_substitute`'s `.format()`, so `$HOME`
+# is written bare, never `${HOME}`.
+
+# Node major versions the matrix can ask for. An enum, so the only values that
+# can reach `nvm install` are the four the CLAUDE.md matrix names. The API
+# resolves this server-side from the server's Frappe version — it is never taken
+# from the request body.
+NODE_MAJORS = ("16", "18", "20", "24")
+
+_APT_INSTALL = ("sudo", "-n", "/usr/bin/apt-get", "install", "-y")
+
+
+def _apt_tool(action_name: str, package: str) -> None:
+    """Register a root apt install for one package.
+
+    The package name is a developer-authored constant closed over here, not a
+    parameter — the rendered argv has no placeholders at all.
+    """
+    register(
+        CommandTemplate(
+            action_name=action_name,
+            argv=(*_APT_INSTALL, package),
+            cwd=None,
+            params=(),
+            action_class=InstallToolAction,
+            idempotent=False,
+            requires_lock=True,
+            required_permission=SERVER_MANAGE,
+            run_as=None,
+            lock_class="tools",
+        )
+    )
+
+
+_apt_tool("tool.install_git", "git")
+_apt_tool("tool.install_redis", "redis-server")
+_apt_tool("tool.install_nginx", "nginx")
+_apt_tool("tool.install_supervisor", "supervisor")
+_apt_tool("tool.install_htop", "htop")
+_apt_tool("tool.install_jq", "jq")
+
+
+def _userspace_tool(action_name: str, script: str, params: tuple = ()) -> None:
+    """Register a no-sudo install that runs as the bench-owner SSH user.
+
+    `bash -lc` (login shell) so the tool's own PATH additions in `.profile` /
+    `.bashrc` are picked up by the verify step that follows.
+    """
+    register(
+        CommandTemplate(
+            action_name=action_name,
+            argv=("bash", "-lc", script),
+            cwd=None,
+            params=params,
+            action_class=InstallToolAction,
+            idempotent=False,
+            requires_lock=True,
+            required_permission=SERVER_MANAGE,
+            run_as=None,
+            lock_class="tools",
+        )
+    )
+
+
+# uv — the official standalone installer, into $HOME/.local/bin. Required by the
+# bench CLI for EVERY Frappe version (gotcha #2), so this is the one install
+# that matters on a v14 box as much as a v16 one.
+_userspace_tool(
+    "tool.install_uv",
+    "set -euo pipefail; "
+    "curl -LsSf https://astral.sh/uv/install.sh | sh",
+)
+
+# Node via nvm, per-user. Deliberately does NOT touch the system Node: a bench
+# needs a specific major, and replacing /usr/bin/node would break anything else
+# on the box. The major is an enum-validated argv element.
+_userspace_tool(
+    "tool.install_node",
+    "set -euo pipefail; "
+    "export NVM_DIR=\"$HOME/.nvm\"; "
+    "if [ ! -s \"$NVM_DIR/nvm.sh\" ]; then "
+    "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash; "
+    "fi; "
+    ". \"$NVM_DIR/nvm.sh\"; "
+    "nvm install \"$NODE_MAJOR\" && nvm alias default \"$NODE_MAJOR\"",
+    params=(ParamSpec("node_major", enum=NODE_MAJORS),),
+)
+
+# The bench CLI itself, via uv's tool installer (the v16-era supported path).
+# Depends on uv, which is why uv is `critical` in the tool registry.
+_userspace_tool(
+    "tool.install_bench",
+    "set -euo pipefail; "
+    "uv tool install --force frappe-bench",
+)
+
+# GitHub CLI from the official release tarball into $HOME/.local — no apt repo,
+# no sudo, no root-owned files.
+_userspace_tool(
+    "tool.install_gh",
+    "set -euo pipefail; "
+    "ver=2.63.2; "
+    "tmp=$(mktemp -d); "
+    "trap 'rm -rf \"$tmp\"' EXIT; "
+    "curl -fsSL -o \"$tmp/gh.tar.gz\" "
+    "\"https://github.com/cli/cli/releases/download/v$ver/gh_\"$ver\"_linux_amd64.tar.gz\"; "
+    "tar -xzf \"$tmp/gh.tar.gz\" -C \"$tmp\"; "
+    "mkdir -p \"$HOME/.local/bin\"; "
+    "install -m 0755 \"$tmp/gh_\"$ver\"_linux_amd64/bin/gh\" \"$HOME/.local/bin/gh\"",
+)
+
+# code-server standalone into $HOME/.local — the official script's --method
+# standalone path, which explicitly avoids apt/sudo.
+_userspace_tool(
+    "tool.install_code_server",
+    "set -euo pipefail; "
+    "curl -fsSL https://code-server.dev/install.sh | "
+    "sh -s -- --method standalone --prefix \"$HOME/.local\"",
+)
+
+# Claude Code CLI — official installer, lands in $HOME/.local/bin.
+_userspace_tool(
+    "tool.install_claude_code",
+    "set -euo pipefail; "
+    "curl -fsSL https://claude.ai/install.sh | bash",
+)
+
+# wkhtmltopdf — gotcha #6: the distro package is an UNPATCHED Qt build that
+# renders Frappe print formats wrong, so we install the official patched-Qt
+# 0.12.6.1 .deb instead of `apt-get install wkhtmltopdf`.
+#
+# Routed through the fixed root-owned `fdm-wkhtmltopdf` wrapper, NOT through a
+# bench-user download + `sudo dpkg -i`. Downloading as the bench user and then
+# handing root the path is a TOCTOU root escalation (DOO-255, same class as the
+# DOO-220 certbot finding): the sudoers line would name a path in a
+# BENCH-USER-WRITABLE directory, and a .deb's maintainer scripts run as root by
+# design — so `dpkg -i <file the caller can rewrite>` is arbitrary root code
+# execution, i.e. equivalent to NOPASSWD: ALL. Sudoers cannot express "and the
+# contents must be trustworthy", so the wrapper owns the whole operation: URL,
+# version and SHA-256 are pinned inside it, it stages into a root-owned 0700
+# directory the bench user cannot write to, and it verifies before dpkg runs.
+# The caller supplies nothing — the argv below is a constant.
+register(
+    CommandTemplate(
+        action_name="tool.install_wkhtmltopdf",
+        argv=("sudo", "-n", "/usr/local/sbin/fdm-wkhtmltopdf", "install"),
+        cwd=None,
+        params=(),
+        action_class=InstallToolAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+        lock_class="tools",
+    )
+)
+
+# `server.scan_tools` — read-only inventory that writes ServerTool rows. Lock-free
+# (it mutates nothing on the target) and idempotent, so it is safe to auto-retry
+# and safe to run while an unrelated job is in flight.
+register(
+    CommandTemplate(
+        action_name="server.scan_tools",
+        argv=("true",),  # nominal; ScanToolsAction runs each tool's detect argv.
+        cwd=None,
+        params=(),
+        action_class=ScanToolsAction,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=READ,
         run_as=None,
     )
 )
