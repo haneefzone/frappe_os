@@ -62,6 +62,12 @@ SCHEDULE_ACTIONS = (
     # cadence, target_type='platform'. Runs locally on the control plane.
     "platform.self_backup",
     "platform.self_backup_retention_sweep",
+    # Full-system DR (session 4.2): weekly config-tier snapshot (reuses the 4.1
+    # job), retention pruning, and integrity verification. All server-targeted,
+    # like server.drift_check — a server has at most one restic repo.
+    "restic.backup",
+    "restic.forget",
+    "restic.check",
 )
 
 # What a schedule points at. "site" (backups + sweeps + SSL), "server" (the 6.7

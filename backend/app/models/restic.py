@@ -63,11 +63,33 @@ class ResticRepo(Base):
     initialized: Mapped[bool] = mapped_column(default=False)
 
     # Evidence timestamps (§6). last_backup_at set after a successful config
-    # snapshot; last_check_at reserved for the 4.2 `restic check` schedule.
+    # snapshot; last_check_at set by the 4.2 `restic check` integrity job.
     last_backup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Short id of the most recent config snapshot (evidence / acceptance proof).
     last_snapshot_id: Mapped[str | None] = mapped_column(String(64))
+
+    # --- 4.2 retention policy + integrity check ---------------------------- #
+    # restic `forget --prune` retention (keep the last N daily/weekly/monthly
+    # snapshots). NULL means that dimension is not applied; the forget action
+    # REFUSES to run when all three are NULL (an unpolicied `forget` would remove
+    # every snapshot — never let a destructive prune run with no keep policy).
+    keep_daily: Mapped[int | None] = mapped_column()
+    keep_weekly: Mapped[int | None] = mapped_column()
+    keep_monthly: Mapped[int | None] = mapped_column()
+
+    # `restic check --read-data-subset` selector for large repos (e.g. "5%",
+    # "1/10", "50G"). NULL = structural check only (metadata, no data re-read).
+    # Validated to restic's subset grammar before it reaches the argv.
+    check_read_data_subset: Mapped[str | None] = mapped_column(String(20))
+
+    # Result of the most recent `restic check` (evidence). last_check_ok is None
+    # until the first check runs, then True/False; last_check_message is a short,
+    # secret-free summary ("no errors were found" / the failure line).
+    last_check_ok: Mapped[bool | None] = mapped_column()
+    last_check_message: Mapped[str | None] = mapped_column(String(500))
+    # When the last `restic forget --prune` completed (retention evidence).
+    last_forget_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

@@ -1372,6 +1372,12 @@ from app.core.commands.actions import (  # noqa: E402
     ResticBackupAction as _ResticBackupAction,
 )
 from app.core.commands.actions import (  # noqa: E402
+    ResticCheckAction as _ResticCheckAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    ResticForgetAction as _ResticForgetAction,
+)
+from app.core.commands.actions import (  # noqa: E402
     ResticInitAction as _ResticInitAction,
 )
 from app.core.commands.actions import (  # noqa: E402
@@ -1747,5 +1753,50 @@ register(
         required_permission=_SETTINGS_MANAGE,
         run_as=None,
         local=True,
+    )
+)
+# --------------------------------------------------------------------------- #
+# restic retention + integrity check (session 4.2 — Full-system DR)
+#
+# `restic forget --prune` (retention) and `restic check` (integrity) share the
+# 4.1 repo/env-file plumbing above; only the trailing argv differs, and that
+# tail (the --keep-* flags / --read-data-subset selector) is computed from the
+# repo's own DB columns and appended by the action — the same pattern
+# `restic.backup` already uses for its variable source-path list — so these
+# templates declare just the fixed, non-secret prefix.
+# --------------------------------------------------------------------------- #
+
+# `restic forget --prune` — apply the repo's retention policy. Destructive
+# (deletes snapshots outside the keep window), so it is never auto-retried.
+# Per-server lock: must not race an init/backup/check on the same repo.
+register(
+    CommandTemplate(
+        action_name="restic.forget",
+        argv=("restic", "-r", "{repo}", "forget", "--prune"),
+        cwd=None,
+        params=(ParamSpec("repo", regex=RESTIC_REPO_URI),),
+        action_class=_ResticForgetAction,
+        idempotent=False,  # destructive: never auto-retried.
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
+# `restic check` — verify repo integrity, optionally re-reading a data subset.
+# Read-only against the repo's *content* (no snapshot is added or removed), so
+# safe to auto-retry a transient SSH blip; still locked so it can't race a
+# concurrent forget/backup on the same repo.
+register(
+    CommandTemplate(
+        action_name="restic.check",
+        argv=("restic", "-r", "{repo}", "check"),
+        cwd=None,
+        params=(ParamSpec("repo", regex=RESTIC_REPO_URI),),
+        action_class=_ResticCheckAction,
+        idempotent=True,
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
     )
 )

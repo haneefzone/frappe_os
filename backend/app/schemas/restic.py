@@ -30,6 +30,14 @@ class ResticRepoOut(BaseModel):
     last_backup_at: datetime | None
     last_check_at: datetime | None
     last_snapshot_id: str | None
+    # --- 4.2 retention policy + integrity-check evidence -------------------- #
+    keep_daily: int | None
+    keep_weekly: int | None
+    keep_monthly: int | None
+    check_read_data_subset: str | None
+    last_check_ok: bool | None
+    last_check_message: str | None
+    last_forget_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -48,6 +56,13 @@ class ResticRepoOut(BaseModel):
             last_backup_at=repo.last_backup_at,
             last_check_at=repo.last_check_at,
             last_snapshot_id=repo.last_snapshot_id,
+            keep_daily=repo.keep_daily,
+            keep_weekly=repo.keep_weekly,
+            keep_monthly=repo.keep_monthly,
+            check_read_data_subset=repo.check_read_data_subset,
+            last_check_ok=repo.last_check_ok,
+            last_check_message=repo.last_check_message,
+            last_forget_at=repo.last_forget_at,
             created_at=repo.created_at,
             updated_at=repo.updated_at,
         )
@@ -56,8 +71,18 @@ class ResticRepoOut(BaseModel):
 class ResticRepoConfigure(BaseModel):
     """Create/update a server's restic config-tier repo. `password` is write-only:
     a non-empty value (re-)encrypts it, omitting it on an existing repo leaves it
-    unchanged. A repo needs both a storage target and a password before it runs."""
+    unchanged. A repo needs both a storage target and a password before it runs.
+
+    The 4.2 retention fields follow normal PUT-replace semantics like `prefix`:
+    omitting a `keep_*` field (or sending `null`) clears that dimension.
+    `forget --prune` itself still refuses to run while all three end up unset
+    (see `restic.forget_keep_args`) — this schema only validates each *given*
+    value is `>= 1`, not that at least one is set."""
 
     storage_target_id: int
     prefix: str = Field(default="", max_length=255)
     password: str | None = Field(default=None, min_length=1, max_length=255)
+    keep_daily: int | None = Field(default=None, ge=1)
+    keep_weekly: int | None = Field(default=None, ge=1)
+    keep_monthly: int | None = Field(default=None, ge=1)
+    check_read_data_subset: str | None = Field(default=None, max_length=20)

@@ -3305,6 +3305,126 @@ class ResticSnapshotsAction(Action):
             await ctx.capture(["rm", "-f", env_path])
 
 
+class ResticForgetAction(Action):
+    """`restic.forget` — apply the repo's retention policy with `forget --prune`
+    (session 4.2).
+
+    Refuses to run when the repo has no keep_daily/weekly/monthly set at all
+    (`forget_keep_args` raises `ResticError`) — an unpolicied `forget --prune`
+    would delete every snapshot in the repo, so this action never sends one
+    (golden rule 1). Records `last_forget_at` evidence on success. Per-server
+    lock (races init/backup on the same repo); never auto-retried — a
+    destructive prune must not silently repeat if the first attempt's outcome
+    is unclear (golden rule: destructive actions never auto-retry)."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import restic as rst
+        from app.core.commands import get_template, render
+
+        repo, env = await _restic_prepare(ctx)
+        if not repo.initialized:
+            raise rst.ResticError(
+                "restic repository is not initialised — run init before forget --prune"
+            )
+        keep_args = rst.forget_keep_args(repo)  # ResticError if no policy is set.
+        cmd = render(get_template("restic.forget"), {"repo": env.repository})
+        env_path = await _stage_restic_env(ctx, env)
+        try:
+            with ctx.step("restic forget --prune (retention)"):
+                await ctx.emit(
+                    f"$ restic -r {rst.redacted_repository(env.repository)} forget "
+                    f"--prune {' '.join(keep_args)}"
+                )
+                res = await ctx.capture(
+                    _restic_wrap(env_path, [*cmd.argv, *keep_args]), timeout=3600
+                )
+                combined = f"{res.stdout}\n{res.stderr}"
+                for line in combined.splitlines():
+                    if line.strip():
+                        await ctx.emit(line)
+                if res.exit_code != 0:
+                    raise RuntimeError(
+                        f"restic forget --prune exited with status {res.exit_code}"
+                    )
+                repo.last_forget_at = _now_utc()
+                ctx.session.commit()
+                await ctx.emit("Retention policy applied.")
+        finally:
+            await ctx.capture(["rm", "-f", env_path])
+
+
+class ResticCheckAction(Action):
+    """`restic.check` — verify repo integrity (session 4.2).
+
+    Runs a structural (metadata-only) check, or re-reads a data subset when the
+    repo's `check_read_data_subset` is set (validated to restic's subset grammar
+    before it reaches argv). Always records last_check_at/ok/message evidence —
+    even on failure, so the §6 view shows the true last-known state. A failed
+    check fires `backup.check_failed` through the existing 2.8 notification
+    dispatcher (the same channel `server.drift_check` uses for config.drift) —
+    reused, not forked — then raises so the CommandJob itself shows failed.
+    Per-server lock; idempotent (read-only against the repo, safe to auto-retry
+    a transient SSH blip)."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import restic as rst
+        from app.core.commands import get_template, render
+
+        repo, env = await _restic_prepare(ctx)
+        if not repo.initialized:
+            raise rst.ResticError(
+                "restic repository is not initialised — run init before a check"
+            )
+        subset = rst.validate_read_data_subset(repo.check_read_data_subset)
+        cmd = render(get_template("restic.check"), {"repo": env.repository})
+        extra = ["--read-data-subset", subset] if subset else []
+        env_path = await _stage_restic_env(ctx, env)
+        try:
+            with ctx.step("restic check (integrity)"):
+                await ctx.emit(
+                    f"$ restic -r {rst.redacted_repository(env.repository)} check"
+                    + (f" --read-data-subset {subset}" if subset else "")
+                )
+                res = await ctx.capture(
+                    _restic_wrap(env_path, [*cmd.argv, *extra]), timeout=3600
+                )
+                combined = f"{res.stdout}\n{res.stderr}"
+                for line in combined.splitlines():
+                    if line.strip():
+                        await ctx.emit(line)
+                ok, message = rst.parse_check_result(combined)
+                if res.exit_code != 0:
+                    # The process exit code is the ground truth for pass/fail; a
+                    # nonzero exit is never reported ok even if some output line
+                    # happened to look clean.
+                    ok = False
+                    if message == "no errors were found":
+                        message = f"restic check exited with status {res.exit_code}"
+
+                repo.last_check_at = _now_utc()
+                repo.last_check_ok = ok
+                repo.last_check_message = message
+                ctx.session.commit()
+
+                if ok:
+                    await ctx.emit(f"Integrity check passed: {message}")
+                    return
+
+                await ctx.emit(f"Integrity check FAILED: {message}", stream="stderr")
+                from app.core.notifications import dispatch_restic_check_failed
+
+                server = ctx.session.get(_server_model(), ctx.server_id)
+                dispatch_restic_check_failed(
+                    ctx.session,
+                    server_id=ctx.server_id,
+                    server_name=server.name if server else str(ctx.server_id),
+                    message=message,
+                )
+                raise RuntimeError(f"restic check reported a failure: {message}")
+        finally:
+            await ctx.capture(["rm", "-f", env_path])
+
+
 def _server_model():
     from app.models.server import Server
 

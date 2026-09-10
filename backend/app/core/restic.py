@@ -16,6 +16,7 @@ action stages it via base64 and removes it in a `finally`.
 
 from __future__ import annotations
 
+import re
 import shlex
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -190,6 +191,79 @@ def parse_snapshot_id(output: str) -> str | None:
             if len(parts) >= 3:
                 return parts[1]
     return None
+
+
+# --------------------------------------------------------------------------- #
+# 4.2 retention + integrity helpers
+# --------------------------------------------------------------------------- #
+
+# Valid `restic check --read-data-subset` selectors: a percentage ("5%"), an
+# "n/m" fraction ("1/10"), or a size with an optional unit ("50G"). Anchored so
+# nothing outside restic's subset grammar can reach the argv element.
+_SUBSET_RE = re.compile(r"(?:[0-9]{1,3}%|[0-9]+/[0-9]+|[0-9]+(?:\.[0-9]+)?[KMGT]?)\Z")
+
+
+def validate_read_data_subset(subset: str | None) -> str | None:
+    """Normalise + validate a restic `check --read-data-subset` selector.
+
+    Returns the cleaned selector, or None for an empty value (a structural,
+    metadata-only check). Raises ResticError for anything outside restic's subset
+    grammar so an operator can never smuggle an argv fragment through this field.
+    """
+    if subset is None:
+        return None
+    cleaned = subset.strip()
+    if not cleaned:
+        return None
+    if not _SUBSET_RE.match(cleaned):
+        raise ResticError(
+            "read-data-subset must be a percentage (e.g. '5%'), an 'n/m' fraction "
+            "(e.g. '1/10'), or a size (e.g. '50G')"
+        )
+    return cleaned
+
+
+def forget_keep_args(repo: ResticRepo) -> list[str]:
+    """Build the `--keep-daily/weekly/monthly N` argv fragment from a repo's
+    retention policy.
+
+    Raises ResticError when NO keep dimension is set: an unpolicied
+    `restic forget --prune` would delete *every* snapshot, so we refuse to launch
+    one rather than let a destructive prune go out with no keep policy (rule 1 —
+    never generate a footgun).
+    """
+    args: list[str] = []
+    for flag, value in (
+        ("--keep-daily", repo.keep_daily),
+        ("--keep-weekly", repo.keep_weekly),
+        ("--keep-monthly", repo.keep_monthly),
+    ):
+        if value is not None:
+            if int(value) < 1:
+                raise ResticError(f"{flag} must be >= 1")
+            args += [flag, str(int(value))]
+    if not args:
+        raise ResticError(
+            "no retention policy set — configure at least one of keep_daily / "
+            "keep_weekly / keep_monthly before running forget --prune"
+        )
+    return args
+
+
+def parse_check_result(output: str) -> tuple[bool, str]:
+    """Interpret `restic check` output as (ok, short_message) evidence.
+
+    restic prints 'no errors were found' on a clean repo; anything else (or an
+    error/damage line) is a failed integrity check. The message is a short,
+    credential-free summary the §6 evidence row renders."""
+    lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
+    if any("no errors were found" in ln for ln in lines):
+        return True, "no errors were found"
+    for ln in lines:
+        low = ln.lower()
+        if "error" in low or "damaged" in low or "corrupt" in low:
+            return False, ln[:500]
+    return (False, lines[-1][:500] if lines else "check produced no output")
 
 
 def redacted_repository(uri: str) -> str:

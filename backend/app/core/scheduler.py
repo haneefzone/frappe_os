@@ -156,6 +156,49 @@ def _build_report_fire(schedule: Schedule) -> tuple[None, str, dict, None]:
     return None, str(report_id), params, None
 
 
+def _build_restic_fire(
+    db: Session, schedule: Schedule
+) -> tuple[int | None, str, dict, None]:
+    """Params for a `restic.backup` / `restic.forget` / `restic.check` fire
+    (session 4.2). Server-targeted like `server.drift_check` — a server has at
+    most one restic repo, resolved here (not by the action's own lookup) so an
+    unconfigured/unready repo fails the *schedule* dispatch cleanly rather than
+    the job. `repo` is the same non-secret S3 URI param the manual endpoints
+    pass; `host` is added for `restic.backup` only (the template's snapshot
+    label)."""
+    from sqlalchemy import select as _select
+
+    from app.core import restic as rst
+    from app.models.restic import ResticRepo
+    from app.models.server import Server
+    from app.models.storage import StorageTarget
+
+    if schedule.target_type != "server":
+        raise ScheduleError(f"{schedule.action_name} requires target_type 'server'")
+    server = db.get(Server, schedule.target_id)
+    if server is None:
+        raise ScheduleError(f"server {schedule.target_id} no longer exists")
+    repo = db.scalars(
+        _select(ResticRepo).where(ResticRepo.server_id == server.id)
+    ).first()
+    if repo is None:
+        raise ScheduleError(f"server {server.name!r} has no restic repo configured")
+    target = (
+        db.get(StorageTarget, repo.storage_target_id) if repo.storage_target_id else None
+    )
+    if target is None:
+        raise ScheduleError(f"server {server.name!r}'s restic repo has no storage target")
+    try:
+        repo_uri = rst.repository_uri(target, repo.prefix)
+    except rst.ResticError as exc:
+        raise ScheduleError(str(exc)) from exc
+
+    params = {"repo": repo_uri}
+    if schedule.action_name == "restic.backup":
+        params["host"] = server.hostname or server.name
+    return server.id, str(server.id), params, None
+
+
 def _build_fire(
     db: Session, schedule: Schedule
 ) -> tuple[int | None, str, dict, object | None]:
@@ -178,6 +221,9 @@ def _build_fire(
         if server is None:
             raise ScheduleError(f"server {schedule.target_id} no longer exists")
         return server.id, None, {}, None
+
+    if schedule.action_name in ("restic.backup", "restic.forget", "restic.check"):
+        return _build_restic_fire(db, schedule)
 
     if schedule.action_name == "report.generate":
         return _build_report_fire(schedule)

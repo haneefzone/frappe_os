@@ -26,8 +26,10 @@ from app.db import Base
 from app.models import CommandJob, CommandStep, Server
 from app.models.backup import Backup
 from app.models.bench import Bench
+from app.models.restic import ResticRepo
 from app.models.schedule import Schedule
 from app.models.site import Site
+from app.models.storage import StorageTarget
 from tests.conftest import csrf_headers, login
 
 BENCH_PATH = "/home/frappe/frappe-bench"
@@ -71,6 +73,30 @@ def _setup_site(db) -> tuple[int, int, int]:
     db.add(site)
     db.commit()
     return s.id, bench.id, site.id
+
+
+def _setup_restic_server(db, *, hostname="prod-1.local") -> tuple[int, int]:
+    """A server with a ready (target-attached, password-set) restic repo —
+    session 4.2's weekly backup/forget/check schedules are server-targeted."""
+    secrets = get_secrets_service()
+    s = Server(name="prod-1", hostname=hostname)
+    db.add(s)
+    db.commit()
+    target = StorageTarget(
+        name="minio", provider="minio", endpoint_url="https://minio.local:9000",
+        bucket="fdm", region="me-central-1",
+        access_key_enc=secrets.encrypt("AKIA_TEST"),
+        secret_key_enc=secrets.encrypt("s3cr3t"),
+    )
+    db.add(target)
+    db.commit()
+    repo = ResticRepo(
+        server_id=s.id, storage_target_id=target.id, prefix="restic/prod-1",
+        password_enc=secrets.encrypt("repo-pw"), initialized=True,
+    )
+    db.add(repo)
+    db.commit()
+    return s.id, repo.id
 
 
 def _runner(sf) -> JobRunner:
@@ -262,6 +288,103 @@ def test_dispatch_backup_creates_job_and_pending_backup(sf):
         assert len(rows) == 1
         assert rows[0].status == "pending"
         assert rows[0].taken_by_job_id == job.id
+
+
+# --------------------------------------------------------------------------- #
+# 4.2 — restic.backup / restic.forget / restic.check server-targeted dispatch
+# --------------------------------------------------------------------------- #
+
+
+def test_dispatch_restic_backup_weekly_creates_job_with_repo_and_host(sf):
+    with sf() as db:
+        server_id, _repo_id = _setup_restic_server(db)
+        sched = Schedule(
+            name="weekly config snapshot", target_type="server", target_id=server_id,
+            action_name="restic.backup", cron="0 2 * * 0", timezone="UTC",
+            priority="low", enabled=True, next_run_at=NOW - timedelta(seconds=1),
+        )
+        db.add(sched)
+        db.commit()
+        sched_id = sched.id
+    runner = _runner(sf)
+    with sf() as db:
+        sched = db.get(Schedule, sched_id)
+        job = dispatch_schedule(db, runner, sched, now=NOW)
+        assert job is not None
+        assert job.action_name == "restic.backup"
+        assert job.server_id == server_id
+        params = job.params_sanitized
+        assert params["repo"] == "s3:https://minio.local:9000/fdm/restic/prod-1"
+        assert params["host"] == "prod-1.local"
+        # next_run_at advances to the next cron fire after `now`: cron
+        # "0 2 * * 0" is Sunday 02:00, and NOW is Fri 2026-07-10 10:00, so the
+        # next occurrence is Sun 2026-07-12 02:00 (not a naive now+7d).
+        assert sched.next_run_at == datetime(2026, 7, 12, 2, 0, tzinfo=UTC)
+
+
+def test_dispatch_restic_forget_and_check_carry_repo_param_only(sf):
+    with sf() as db:
+        server_id, _repo_id = _setup_restic_server(db)
+        forget = Schedule(
+            name="weekly retention", target_type="server", target_id=server_id,
+            action_name="restic.forget", cron="0 3 * * 0", timezone="UTC",
+            enabled=True, next_run_at=NOW - timedelta(seconds=1),
+        )
+        check = Schedule(
+            name="weekly integrity check", target_type="server", target_id=server_id,
+            action_name="restic.check", cron="0 4 * * 0", timezone="UTC",
+            enabled=True, next_run_at=NOW - timedelta(seconds=1),
+        )
+        db.add_all([forget, check])
+        db.commit()
+        forget_id, check_id = forget.id, check.id
+    runner = _runner(sf)
+    with sf() as db:
+        forget_job = dispatch_schedule(db, runner, db.get(Schedule, forget_id), now=NOW)
+        check_job = dispatch_schedule(db, runner, db.get(Schedule, check_id), now=NOW)
+        assert set(forget_job.params_sanitized) == {"repo"}
+        assert set(check_job.params_sanitized) == {"repo"}
+        assert forget_job.server_id == server_id == check_job.server_id
+
+
+def test_dispatch_restic_action_requires_server_target_type(sf):
+    with sf() as db:
+        _s, _b, site_id = _setup_site(db)
+        sched = Schedule(
+            name="bad target", target_type="site", target_id=site_id,
+            action_name="restic.backup", interval_seconds=3600, timezone="UTC",
+            enabled=True, next_run_at=NOW - timedelta(seconds=1),
+        )
+        db.add(sched)
+        db.commit()
+        sched_id = sched.id
+    runner = _runner(sf)
+    with sf() as db:
+        sched = db.get(Schedule, sched_id)
+        job = dispatch_schedule(db, runner, sched, now=NOW)
+        assert job is None
+        assert sched.next_run_at is None  # paused: bad target_type never fires
+
+
+def test_dispatch_restic_action_pauses_when_no_repo_configured(sf):
+    with sf() as db:
+        s = Server(name="bare", hostname="bare.local")
+        db.add(s)
+        db.commit()
+        sched = Schedule(
+            name="no repo yet", target_type="server", target_id=s.id,
+            action_name="restic.check", interval_seconds=3600, timezone="UTC",
+            enabled=True, next_run_at=NOW - timedelta(seconds=1),
+        )
+        db.add(sched)
+        db.commit()
+        sched_id = sched.id
+    runner = _runner(sf)
+    with sf() as db:
+        sched = db.get(Schedule, sched_id)
+        job = dispatch_schedule(db, runner, sched, now=NOW)
+        assert job is None
+        assert sched.next_run_at is None
 
 
 def test_tick_fires_due_skips_future_and_disabled(sf):
