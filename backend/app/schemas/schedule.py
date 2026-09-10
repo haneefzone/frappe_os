@@ -18,7 +18,7 @@ class ScheduleOut(BaseModel):
     id: int
     name: str
     target_type: str
-    target_id: int
+    target_id: int | None
     target_label: str | None
     action_name: str
     cron: str | None

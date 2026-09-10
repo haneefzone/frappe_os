@@ -14,7 +14,7 @@ export interface Schedule {
   id: number
   name: string
   target_type: string
-  target_id: number
+  target_id: number | null
   target_label: string | null
   action_name: ScheduleActionName | string
   cron: string | null

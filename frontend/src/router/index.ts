@@ -10,6 +10,7 @@ import JobsPage from '../pages/JobsPage.vue'
 import PlaceholderPage from '../pages/PlaceholderPage.vue'
 import RestorePage from '../pages/RestorePage.vue'
 import MonitoringPage from '../pages/MonitoringPage.vue'
+import ReportsPage from '../pages/ReportsPage.vue'
 import SchedulesPage from '../pages/SchedulesPage.vue'
 import ServersPage from '../pages/ServersPage.vue'
 import SettingsPage from '../pages/SettingsPage.vue'
@@ -28,6 +29,7 @@ const pageOverrides: Record<string, Component> = {
   schedules: SchedulesPage,
   jobs: JobsPage,
   monitoring: MonitoringPage,
+  reports: ReportsPage,
   terminal: TerminalPage,
   'audit-log': AuditPage,
   settings: SettingsPage,

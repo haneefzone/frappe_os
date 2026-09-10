@@ -139,7 +139,7 @@ import { schedulesApi } from '../api/schedules'
 import { sitesApi, type Site } from '../api/sites'
 import Field from './SheetField.vue'
 
-const props = defineProps<{ open: boolean }>()
+const props = defineProps<{ open: boolean; initialName?: string }>()
 const emit = defineEmits<{ close: []; saved: [] }>()
 
 const inputAttrs = {
@@ -177,7 +177,7 @@ function reset() {
   intervalValue.value = 1
   intervalUnit.value = '86400'
   Object.assign(form, {
-    name: '', target_id: null, action_name: 'site.backup', with_files: false,
+    name: props.initialName ?? '', target_id: null, action_name: 'site.backup', with_files: false,
     retention_keep_last: null, retention_keep_days: null, cron: '0 2 * * *',
     timezone: 'Asia/Dubai',
   })

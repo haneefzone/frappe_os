@@ -128,14 +128,14 @@
       </div>
     </div>
 
-    <CreateScheduleSheet :open="sheetOpen" @close="sheetOpen = false" @saved="reload" />
+    <CreateScheduleSheet :open="sheetOpen" :initial-name="sheetInitialName" @close="sheetOpen = false" @saved="reload" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { Button } from 'frappe-ui'
 import { computed, onMounted, ref } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import LucideCalendarClock from '~icons/lucide/calendar-clock'
 import { ApiError } from '../api/client'
 import { cadenceLabel, schedulesApi, type Schedule } from '../api/schedules'
@@ -146,6 +146,7 @@ import type { Status } from '../components/types'
 import { absoluteTime, relativeTime } from '../lib/servers'
 import { useAuthStore } from '../stores/auth'
 
+const route = useRoute()
 const auth = useAuthStore()
 const canManage = computed(() => auth.hasPermission('schedule:manage'))
 // Run-now needs the underlying action's permission (backups use backup:create).
@@ -156,10 +157,12 @@ const loading = ref(true)
 const loadError = ref('')
 const busyId = ref<number | null>(null)
 const sheetOpen = ref(false)
+const sheetInitialName = ref('')
 
 function actionLabel(action: string): string {
   if (action === 'site.backup') return 'Backup'
   if (action === 'backup.retention_sweep') return 'Retention sweep'
+  if (action === 'report.generate') return 'Report delivery'
   return action
 }
 
@@ -227,5 +230,14 @@ async function remove(s: Schedule) {
   }
 }
 
-onMounted(reload)
+onMounted(() => {
+  void reload()
+  // When navigated from /reports?report=<id>&name=<title>, auto-open the sheet
+  // pre-filled with the report title so the user has immediate context.
+  const name = route.query.name
+  if (route.query.report && canManage.value && name) {
+    sheetInitialName.value = String(name)
+    sheetOpen.value = true
+  }
+})
 </script>
