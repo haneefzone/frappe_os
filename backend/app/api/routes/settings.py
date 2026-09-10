@@ -334,14 +334,14 @@ def environment(_: Annotated[object, Depends(require(READ))]) -> EnvironmentInfo
     )
 
 
-@router.get("/security", response_model=SecurityPolicyOut)
+@router.get("/api/settings/security", response_model=SecurityPolicyOut)
 def get_security_policy(
     db: DbSession, _: Annotated[object, Depends(require(READ))]
 ) -> SecurityPolicyOut:
     return SecurityPolicyOut.from_model(SecurityPolicy.get_or_create(db))
 
 
-@router.put("/security", response_model=SecurityPolicyOut)
+@router.put("/api/settings/security", response_model=SecurityPolicyOut)
 def update_security_policy(
     body: SecurityPolicyUpdate,
     db: DbSession,
