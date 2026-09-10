@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.api.routes.jobs import get_job_runner
 from app.core import backups as bk
 from app.core.commands import RenderError, get_template, render
 from app.core.commands.actions import _MODE_PROBE
@@ -533,3 +534,99 @@ def test_operator_can_classify_environment(api):
     resp = c.post(f"/api/sites/{api['site_id']}/environment",
                   json={"environment": "dev"}, headers=csrf_headers(c))
     assert resp.status_code == 200 and resp.json()["environment"] == "dev"
+
+
+# --------------------------------------------------------------------------- #
+# A.8.11 data masking: prod->non-prod clones must scrub PII or accept the risk
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def api_runner(api):
+    """`api`, plus an in-memory job runner so create-pipeline can enqueue the
+    clone job (the prod-clone guard passes through to `runner.create`)."""
+    runner = JobRunner(
+        lambda: api["db"], InMemoryJobBackend(), enqueue=lambda job: None,
+        secrets=get_secrets_service(),
+    )
+    c = api["client"]
+    c.app.dependency_overrides[get_job_runner] = lambda: runner
+    yield api
+    c.app.dependency_overrides.pop(get_job_runner, None)
+
+
+def _set_environment(db, site_id, environment):
+    site = db.get(Site, site_id)
+    site.environment = environment
+    db.commit()
+
+
+def _create_body(**overrides):
+    body = {
+        "source_site_id": None,  # filled per-test
+        "staging_site_name": "stg.localhost",
+        "admin_password": "adminpass",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_create_prod_clone_without_scrub_or_ack_is_422(api):
+    """A `prod` source cloned to non-prod staging with no scrub_method and no
+    acknowledgement is refused (A.8.11 data masking)."""
+    c = api["client"]
+    login(c, "developer@example.com")  # has backup:restore (clone permission)
+    resp = c.post("/api/update-pipelines",
+                  json=_create_body(source_site_id=api["site_id"]),
+                  headers=csrf_headers(c))
+    assert resp.status_code == 422
+    assert "A.8.11" in resp.json()["error"]["message"]
+
+
+def test_create_prod_clone_with_scrub_passes(api_runner):
+    """Supplying a scrub_method masks PII on the clone and clears the guard."""
+    api = api_runner
+    c = api["client"]
+    login(c, "developer@example.com")
+    resp = c.post(
+        "/api/update-pipelines",
+        json=_create_body(source_site_id=api["site_id"],
+                          scrub_method="fdm_hooks.privacy.mask_pii"),
+        headers=csrf_headers(c),
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["scrub_method"] == "fdm_hooks.privacy.mask_pii"
+    # No residual-risk note when the clone is scrubbed.
+    assert body["note"] is None
+
+
+def test_create_prod_clone_acknowledge_records_residual_risk(api_runner):
+    """The explicit `acknowledge_unmasked` override (prod-clone-for-DR exception)
+    clears the guard and records the accepted residual risk on the pipeline."""
+    api = api_runner
+    c = api["client"]
+    login(c, "developer@example.com")
+    resp = c.post(
+        "/api/update-pipelines",
+        json=_create_body(source_site_id=api["site_id"], acknowledge_unmasked=True),
+        headers=csrf_headers(c),
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["scrub_method"] is None
+    assert body["note"] and "A.8.11" in body["note"] and "A.8.10" in body["note"]
+
+
+def test_create_nonprod_clone_needs_no_scrub(api_runner):
+    """A non-prod source (dev/staging) is not PII-sensitive under A.8.11, so no
+    scrub is required and no residual-risk note is recorded."""
+    api = api_runner
+    _set_environment(api["db"], api["site_id"], "staging")
+    c = api["client"]
+    login(c, "developer@example.com")
+    resp = c.post("/api/update-pipelines",
+                  json=_create_body(source_site_id=api["site_id"]),
+                  headers=csrf_headers(c))
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["note"] is None

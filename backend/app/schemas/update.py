@@ -19,6 +19,12 @@ class CreatePipelineRequest(BaseModel):
     admin_password: str = Field(min_length=1, max_length=128)
     # Optional dotted bench method that masks PII on the clone (uiux §8).
     scrub_method: str | None = None
+    # Explicit acknowledgement that a `prod` source may be cloned into a
+    # non-production staging site WITHOUT masking (ISO 27001 A.8.11). Only
+    # honoured when `scrub_method` is omitted for a prod source; it records the
+    # accepted residual risk on the pipeline (the unmasked clone must then be
+    # deleted after use — A.8.10). Valid use: prod-clone-for-DR rehearsals.
+    acknowledge_unmasked: bool = False
     priority: str = "default"
 
 
