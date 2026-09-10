@@ -596,7 +596,6 @@ const storageTargets = ref<StorageTarget[]>([])
 const summary = ref<ComplianceSummary | null>(null)
 const policies = ref<Record<number, BackupPolicy>>({})
 const resticRepos = ref<ResticRepo[]>([])
-const servers = ref<Server[]>([])
 const configReposLoaded = ref(false)
 const loading = ref(true)
 const loadError = ref('')
@@ -807,8 +806,6 @@ async function loadMoveTargets() {
     servers.value = []
   }
 }
-
-const serverName = (id: number) => servers.value.find((s) => s.id === id)?.name ?? `Server #${id}`
 
 // -- Move to another server (session 2.6) ------------------------------------
 const moveOpen = ref(false)
