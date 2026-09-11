@@ -177,80 +177,18 @@
         </template>
 
         <!-- ----------------------------------------------------------------
-             Step 4: Notifications (optional, skippable)
+             Step 4: Notifications (informational — configured post-setup)
         ---------------------------------------------------------------- -->
         <template #step-notifications>
           <div class="space-y-4">
-            <div class="flex items-center justify-between">
-              <p class="text-label text-ink-2">
-                Configure SMTP to receive alerts by email. You can skip this and set it up later in
-                Settings → Notifications.
+            <div class="rounded-md border border-line bg-raised px-4 py-3 text-label text-ink-2">
+              <p class="font-medium text-ink-1 mb-1">Email notifications</p>
+              <p>
+                SMTP configuration is available after setup in
+                <span class="font-medium text-ink-1">Settings → Notifications</span>.
+                You can configure alert recipients, SMTP credentials, and test delivery there once
+                you are logged in.
               </p>
-              <Button
-                variant="ghost"
-                theme="gray"
-                size="sm"
-                :label="notificationsSkipped ? 'Configure' : 'Skip'"
-                @click="notificationsSkipped = !notificationsSkipped"
-              />
-            </div>
-
-            <template v-if="!notificationsSkipped">
-              <label class="block">
-                <span class="mb-1.5 block text-label font-medium text-ink-2">SMTP host</span>
-                <input
-                  v-model="notifications.smtpHost"
-                  type="text"
-                  placeholder="smtp.example.com"
-                  v-bind="inputAttrs"
-                />
-              </label>
-              <div class="flex gap-3">
-                <label class="flex-1">
-                  <span class="mb-1.5 block text-label font-medium text-ink-2">Port</span>
-                  <input
-                    v-model.number="notifications.smtpPort"
-                    type="number"
-                    placeholder="587"
-                    v-bind="inputAttrs"
-                  />
-                </label>
-                <label class="flex-1">
-                  <span class="mb-1.5 block text-label font-medium text-ink-2">From address</span>
-                  <input
-                    v-model="notifications.smtpFrom"
-                    type="email"
-                    placeholder="noreply@example.com"
-                    v-bind="inputAttrs"
-                  />
-                </label>
-              </div>
-              <label class="block">
-                <span class="mb-1.5 block text-label font-medium text-ink-2">
-                  Username (optional)
-                </span>
-                <input
-                  v-model="notifications.smtpUsername"
-                  type="text"
-                  autocomplete="off"
-                  v-bind="inputAttrs"
-                />
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-label font-medium text-ink-2">
-                  Password (optional)
-                </span>
-                <input
-                  v-model="notifications.smtpPassword"
-                  type="password"
-                  autocomplete="new-password"
-                  v-bind="inputAttrs"
-                />
-              </label>
-            </template>
-
-            <div v-else class="rounded-md border border-line bg-raised px-4 py-3 text-label text-ink-2">
-              Email notifications skipped — configure later in Settings → Notifications.
             </div>
           </div>
         </template>
@@ -298,11 +236,7 @@
             <div class="rounded-md border border-line bg-raised px-4 py-3">
               <p class="mb-2 text-label font-medium text-ink-1">Notifications</p>
               <p class="text-label text-ink-2">
-                {{
-                  notificationsSkipped
-                    ? 'Skipped — configure later in Settings → Notifications.'
-                    : `SMTP: ${notifications.smtpHost || '(not configured)'}`
-                }}
+                Configure SMTP in Settings → Notifications after setup.
               </p>
             </div>
 
@@ -417,10 +351,6 @@ const commonTimezones = [
   { label: 'UTC', value: 'UTC' },
 ]
 
-// ------ Notifications ------
-const notificationsSkipped = ref(true)
-const notifications = ref({ smtpHost: '', smtpPort: 587, smtpFrom: '', smtpUsername: '', smtpPassword: '' })
-
 // ------ canContinue per step ------
 const canContinue = computed(() => {
   switch (activeStep.value) {
@@ -462,15 +392,6 @@ async function handleSubmit() {
         product_name: branding.value.productName.trim(),
         default_tz: branding.value.defaultTz,
       },
-      notifications: notificationsSkipped.value
-        ? null
-        : {
-            smtp_host: notifications.value.smtpHost || null,
-            smtp_port: notifications.value.smtpPort,
-            smtp_from: notifications.value.smtpFrom || null,
-            smtp_username: notifications.value.smtpUsername || null,
-            smtp_password: notifications.value.smtpPassword || null,
-          },
     })
     // Backend auto-issues session cookies; sync the auth store then redirect.
     await auth.bootstrap()

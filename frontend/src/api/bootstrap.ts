@@ -33,18 +33,9 @@ export interface BrandingIn {
   accent_hex?: string | null
 }
 
-export interface NotificationsIn {
-  smtp_host?: string | null
-  smtp_port?: number
-  smtp_from?: string | null
-  smtp_username?: string | null
-  smtp_password?: string | null
-}
-
 export interface CompleteIn {
   admin: AdminIn
   branding?: BrandingIn
-  notifications?: NotificationsIn | null
 }
 
 export interface CompleteOut {

@@ -57,18 +57,9 @@ class BrandingIn(BaseModel):
         return v
 
 
-class NotificationsIn(BaseModel):
-    smtp_host: str | None = None
-    smtp_port: int = 587
-    smtp_from: str | None = None
-    smtp_username: str | None = None
-    smtp_password: str | None = None
-
-
 class CompleteIn(BaseModel):
     admin: AdminIn
     branding: BrandingIn = Field(default_factory=BrandingIn)
-    notifications: NotificationsIn | None = None
 
 
 class CompleteOut(BaseModel):

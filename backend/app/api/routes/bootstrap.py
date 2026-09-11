@@ -16,12 +16,14 @@ Bootstrap routes are:
       enumeration of instance state beyond the boolean.
 """
 
+import logging
 import secrets
 import time
 from datetime import UTC, datetime
 from functools import lru_cache
 from threading import Lock
 from typing import Annotated
+from urllib.parse import urlparse
 
 import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -53,6 +55,8 @@ from app.schemas.bootstrap import (
     PreflightCheck,
     PreflightOut,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/bootstrap", tags=["bootstrap"])
 
@@ -112,15 +116,24 @@ def _require_no_users(db: Session) -> None:
 # Preflight checks
 # ---------------------------------------------------------------------------
 
+def _redis_host_display(url: str) -> str:
+    """Return only host:port from a Redis URL — never credentials."""
+    parsed = urlparse(url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 6379
+    return f"{host}:{port}"
+
+
 def _check_db(db: Session) -> PreflightCheck:
     try:
         db.execute(select(func.now()))
         return PreflightCheck(name="Database", ok=True, detail="PostgreSQL reachable")
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
+        logger.exception("Bootstrap preflight: database check failed")
         return PreflightCheck(
             name="Database",
             ok=False,
-            detail=f"Cannot reach database: {exc}",
+            detail="Cannot reach database",
             hint="Ensure PostgreSQL is running and DATABASE_URL is correct.",
         )
 
@@ -130,12 +143,13 @@ def _check_redis(settings: Settings) -> PreflightCheck:
         r = redis_lib.from_url(settings.redis_url, socket_connect_timeout=3)
         r.ping()
         return PreflightCheck(name="Redis", ok=True, detail="Redis reachable")
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
+        logger.exception("Bootstrap preflight: Redis check failed")
         return PreflightCheck(
             name="Redis",
             ok=False,
-            detail=f"Cannot reach Redis: {exc}",
-            hint=f"Ensure Redis is running at {settings.redis_url}.",
+            detail="Cannot reach Redis",
+            hint=f"Ensure Redis is running at {_redis_host_display(settings.redis_url)}.",
         )
 
 
