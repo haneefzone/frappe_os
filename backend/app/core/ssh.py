@@ -248,9 +248,7 @@ class SSHService:
     ) -> CommandOutput:
         """Run a fixed argv on an open connection. Never raises on a non-zero
         exit; the caller inspects exit_status."""
-        command = shlex.join(argv)
-        if cwd is not None:
-            command = f"cd {shlex.quote(cwd)} && {command}"
+        command = self._wrap_command(argv, cwd, run_as=None)
         async with self._session_slot(conn):
             result = await conn.run(command, check=False, timeout=timeout)
         return CommandOutput(
