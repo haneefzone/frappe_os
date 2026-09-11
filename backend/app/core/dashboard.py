@@ -259,11 +259,6 @@ def build_dashboard(db: Session) -> dict:
         },
         # Row 4 "Needs attention" — updates available (real, session 3.2); failed
         # restore tests + drift flags land with their engines (3.4+).
-        "needs_attention": {
-            "updates_available": updates["apps_behind"],
-            "sites_behind": updates["sites_behind"],
-            "security_updates": updates["security_updates"],
-        },
         "morning_brief": _morning_brief(
             servers_total=len(servers),
             servers_online=servers_online,
@@ -274,8 +269,11 @@ def build_dashboard(db: Session) -> dict:
         ),
         "servers": servers_strip,
         # "Needs attention" row (B4.1 row 4). Config drift + failed restore tests
-        # land here; updates-available joins them in its own session.
+        # + updates-available (real, session 3.2) all land here.
         "needs_attention": {
+            "updates_available": updates["apps_behind"],
+            "sites_behind": updates["sites_behind"],
+            "security_updates": updates["security_updates"],
             "config_drift": {
                 "count": len(drifted),
                 "server_ids": sorted({r.server_id for r in drifted}),
