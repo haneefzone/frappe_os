@@ -12,6 +12,7 @@ sessions can chain from a clean single revision.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "a9b2c3d4e5f6"
