@@ -238,6 +238,73 @@
           <p v-if="testError" class="px-4 pb-3 text-label text-err" role="alert">{{ testError }}</p>
         </section>
 
+        <!-- Config DR (restic) evidence (4.2) -->
+        <section v-if="resticRepo || resticLoaded" class="rounded-lg border border-line bg-surface lg:col-span-2">
+          <div class="flex items-center justify-between border-b border-line px-4 py-2.5">
+            <h2 class="text-label font-semibold text-ink-1">Config DR (restic)</h2>
+            <div v-if="canManage && resticRepo?.initialized" class="flex items-center gap-2">
+              <Button
+                variant="subtle"
+                theme="gray"
+                size="sm"
+                :label="resticChecking ? 'Starting…' : 'Run check'"
+                :loading="resticChecking"
+                @click="runResticCheck"
+              />
+            </div>
+          </div>
+
+          <div v-if="!resticRepo" class="px-4 py-3 text-label text-ink-3">
+            No config-tier restic repo configured for this server.
+          </div>
+
+          <dl v-else class="divide-y divide-line">
+            <!-- Last snapshot -->
+            <div class="flex items-center justify-between px-4 py-2">
+              <dt class="text-meta uppercase tracking-wide text-ink-3">Last snapshot</dt>
+              <dd class="text-label text-ink-1">
+                <span v-if="resticRepo.last_backup_at" :title="absoluteTime(resticRepo.last_backup_at)">
+                  {{ relativeTime(resticRepo.last_backup_at) }}
+                  <span v-if="resticRepo.last_snapshot_id" class="ml-1.5 font-mono text-meta text-ink-3">
+                    {{ resticRepo.last_snapshot_id.slice(0, 8) }}
+                  </span>
+                </span>
+                <span v-else class="text-ink-3">—</span>
+              </dd>
+            </div>
+            <!-- Integrity check -->
+            <div class="flex items-center justify-between px-4 py-2">
+              <dt class="text-meta uppercase tracking-wide text-ink-3">Integrity check</dt>
+              <dd class="flex items-center gap-2 text-label text-ink-1">
+                <template v-if="resticRepo.last_check_at">
+                  <StatusBadge
+                    :status="resticRepo.last_check_ok === true ? 'ok' : resticRepo.last_check_ok === false ? 'err' : 'muted'"
+                    :label="resticRepo.last_check_ok === true ? 'Pass' : resticRepo.last_check_ok === false ? 'Fail' : 'Unknown'"
+                  />
+                  <span class="text-ink-3" :title="absoluteTime(resticRepo.last_check_at)">
+                    {{ relativeTime(resticRepo.last_check_at) }}
+                  </span>
+                  <span
+                    v-if="resticRepo.last_check_summary"
+                    class="max-w-[40ch] truncate text-meta text-ink-3"
+                    :title="resticRepo.last_check_summary"
+                  >
+                    {{ resticRepo.last_check_summary }}
+                  </span>
+                </template>
+                <span v-else class="text-ink-3">—</span>
+              </dd>
+            </div>
+            <!-- Retention policy -->
+            <div class="flex items-center justify-between px-4 py-2">
+              <dt class="text-meta uppercase tracking-wide text-ink-3">Retention</dt>
+              <dd class="text-label text-ink-1">
+                {{ resticRepo.retention_summary ?? '—' }}
+              </dd>
+            </div>
+          </dl>
+        </section>
+
         <!-- Config drift (session 6.7) -->
         <section class="rounded-lg border border-line bg-surface lg:col-span-2">
           <div class="flex items-center justify-between border-b border-line px-4 py-2.5">
@@ -331,6 +398,7 @@ import {
   type ServerDashboard,
 } from '../api/servers'
 import { driftApi, type DriftBaseline } from '../api/drift'
+import { resticApi, type ResticRepo } from '../api/restic'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import ToolsChecklist from '../components/ToolsChecklist.vue'
 import DriftChip from '../components/DriftChip.vue'
@@ -338,6 +406,7 @@ import DriftDrawer from '../components/DriftDrawer.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
 import KPICard from '../components/KPICard.vue'
 import ResourceGauge from '../components/ResourceGauge.vue'
+import StatusBadge from '../components/StatusBadge.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { toast } from '../components/toast'
 import type { Status } from '../components/types'
@@ -389,6 +458,41 @@ const savingDbPw = ref(false)
 const server = ref<Server | null>(null)
 const loading = ref(true)
 const loadError = ref('')
+
+// -- Config DR (restic) evidence (4.2) ----------------------------------------
+const resticRepo = ref<ResticRepo | null>(null)
+const resticLoaded = ref(false)
+const resticChecking = ref(false)
+
+async function loadRestic() {
+  try {
+    resticRepo.value = await resticApi.get(serverId)
+  } catch {
+    // 404 = no repo configured; show the "not configured" state
+    resticRepo.value = null
+  } finally {
+    resticLoaded.value = true
+  }
+}
+
+async function runResticCheck() {
+  if (resticChecking.value) return
+  resticChecking.value = true
+  try {
+    const job = await resticApi.check(serverId)
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'A restic job is already running on this server.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not start integrity check.'
+    toast.error(message)
+  } finally {
+    resticChecking.value = false
+  }
+}
 
 // -- Config drift (session 6.7) -----------------------------------------------
 const driftBaselines = ref<DriftBaseline[]>([])
@@ -689,6 +793,7 @@ onMounted(() => {
   void load()
   void loadMonitoring(true)
   void loadDrift()
+  void loadRestic()
   monTimer = setInterval(() => void loadMonitoring(), MON_POLL_MS)
 })
 

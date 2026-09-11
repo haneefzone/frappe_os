@@ -22,6 +22,10 @@ USER_MANAGE = "user:manage"
 SETTINGS_MANAGE = "settings:manage"
 SCHEDULE_MANAGE = "schedule:manage"  # create/edit/enable/disable recurring schedules
 SSL_MANAGE = "ssl:manage"  # manage site domains, nginx vhosts, TLS certificates
+# AI-driven shell-adjacent actions are security-sensitive (ISO 27001 review before
+# M5): only Admin + Developer hold them; Operator/Read-only never do.
+AI_MANAGE = "ai:manage"  # register/edit/delete scoped AI agent configs
+AI_OPERATE = "ai:operate"  # start a scoped agent session; apply/rollback its diff
 ALERT_MANAGE = "alert:manage"  # create/edit/enable/disable metric AlertRules (session 3.1)
 REPORT_GENERATE = "report:generate"  # generate compliance / audit report exports (session 4.4)
 # Session 6.2. Non-sensitive reports are gated on plain READ so Read-only can
@@ -59,6 +63,8 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         SCHEDULE_MANAGE,
         MAINTENANCE_MANAGE,
         SSL_MANAGE,
+        AI_MANAGE,
+        AI_OPERATE,
         ALERT_MANAGE,
         REPORT_GENERATE,
         TOOL_SCAN,

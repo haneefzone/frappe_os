@@ -1,3 +1,8 @@
+from app.models.ai_agent import (
+    AIAgentAllowedServer,
+    AIAgentConfig,
+    AIAgentSession,
+)
 from app.models.ai_settings import AISettings
 from app.models.alert import AlertFiring, AlertRule, AlertRuleState
 from app.models.app import AppSource, InstalledApp
@@ -14,6 +19,7 @@ from app.models.compliance import (
 from app.models.domain import Domain
 from app.models.drift import ConfigBaseline
 from app.models.job import CommandJob, CommandStep, LogEntry
+from app.models.job_analysis import JobAnalysis
 from app.models.maintenance_window import MaintenanceWindow
 from app.models.mfa import (
     LoginAttempt,
@@ -39,6 +45,9 @@ from app.models.updates import AppVersionStatus, UpstreamTagCache
 from app.models.uptime import UptimeSample
 
 __all__ = [
+    "AIAgentAllowedServer",
+    "AIAgentConfig",
+    "AIAgentSession",
     "AISettings",
     "AlertFiring",
     "AlertRule",
@@ -57,6 +66,7 @@ __all__ = [
     "ConfigBaseline",
     "Domain",
     "InstalledApp",
+    "JobAnalysis",
     "LogEntry",
     "LoginAttempt",
     "MaintenanceWindow",

@@ -1487,6 +1487,11 @@ RESTIC_REPO_URI = r"s3:[A-Za-z0-9._:/-]{1,300}"
 # name). Shell-safe hostname whitelist; its own argv element.
 RESTIC_HOST = r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}"
 
+# `restic check --read-data-subset` argument (session 4.2): a percentage of pack
+# data to re-read ("5%"). A tight numeric-percent whitelist — shell-safe, its own
+# argv element, and small enough that no other subset syntax can slip through.
+RESTIC_CHECK_SUBSET = r"[0-9]{1,3}%"
+
 # `restic.install` — detect restic; install the pinned release to ~/.local/bin
 # when absent (no root). Read-only-ish (never touches the repo/secrets); no lock.
 register(
@@ -1843,62 +1848,186 @@ register(
         local=True,
     )
 )
-# --------------------------------------------------------------------------- #
-# restic retention + integrity check (session 4.2 — Full-system DR)
-#
-# `restic forget --prune` (retention) and `restic check` (integrity) share the
-# 4.1 repo/env-file plumbing above; only the trailing argv differs, and that
-# tail (the --keep-* flags / --read-data-subset selector) is computed from the
-# repo's own DB columns and appended by the action — the same pattern
-# `restic.backup` already uses for its variable source-path list — so these
-# templates declare just the fixed, non-secret prefix.
-# --------------------------------------------------------------------------- #
 
-# `restic forget --prune` — apply the repo's retention policy. Destructive
-# (deletes snapshots outside the keep window), so it is never auto-retried.
-# Per-server lock: must not race an init/backup/check on the same repo.
+
+# --- AI Agents module (session 5.1) ------------------------------------- #
+#
+# Jailed git snapshot/diff/apply/rollback for a scoped AI session. Every command
+# is a fixed argv with cwd = the validated working dir (ABS_PATH + `..`-rejected),
+# so nothing user-supplied reaches a shell (golden rule 1). The orchestrators
+# (`ai.pre_change_snapshot`, `ai.capture_diff`, `ai.apply`, `ai.rollback`) are the
+# only actions the API launches; the `ai.git_*` sub-templates are rendered by
+# those actions and never launched on their own path. Gated on `ai:operate`,
+# which only Admin + Developer hold (security-sensitive — ISO 27001 review).
+# Imported locally to keep concurrent-session edits to this file collision-free.
+from app.core.commands.actions import (  # noqa: E402
+    AIApplyAction as _AIApplyAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    AICaptureDiffAction as _AICaptureDiffAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    AIPreChangeSnapshotAction as _AIPreChangeSnapshotAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    AIRollbackAction as _AIRollbackAction,
+)
+from app.core.permissions import AI_OPERATE as _AI_OPERATE  # noqa: E402
+
+# A git object name (commit/stash sha) captured from `git rev-parse`/`stash
+# create`. Hex only; its own argv element — never a shell.
+_GIT_SHA = r"[0-9a-f]{7,64}"
+
+# The commit message for an applied session. Shell-safe text; passed as its own
+# argv element to `git commit -m` (execve, no shell), so injection isn't possible.
+_AI_COMMIT_MSG = r"[\w .,:@/=+()#-]{1,200}"
+
+
+def _ai_sub(action_name: str, argv: tuple[str, ...], params: tuple) -> None:
+    """Register an `ai.git_*` sub-template (cwd = the jail; never launched
+    directly — rendered by an orchestrator action)."""
+    register(
+        CommandTemplate(
+            action_name=action_name,
+            argv=argv,
+            cwd="{working_dir}",
+            params=params,
+            action_class=_AIRollbackAction,  # unused directly; see block note.
+            idempotent=True,
+            requires_lock=False,
+            required_permission=_AI_OPERATE,
+            run_as=None,
+        )
+    )
+
+
+_WD = ParamSpec("working_dir", regex=ABS_PATH, is_path=True)
+
+_ai_sub("ai.git_add_all", ("git", "add", "-A"), (_WD,))
+_ai_sub("ai.git_status", ("git", "status", "--porcelain"), (_WD,))
+_ai_sub("ai.git_clean", ("git", "clean", "-fd"), (_WD,))
+_ai_sub(
+    "ai.git_diff_cached",
+    ("git", "-c", "core.quotepath=false", "diff", "--cached", "{base}"),
+    (_WD, ParamSpec("base", regex=_GIT_SHA)),
+)
+_ai_sub(
+    "ai.git_reset_hard",
+    ("git", "reset", "--hard", "{ref}"),
+    (_WD, ParamSpec("ref", regex=_GIT_SHA)),
+)
+_ai_sub(
+    "ai.git_stash_apply",
+    ("git", "stash", "apply", "{ref}"),
+    (_WD, ParamSpec("ref", regex=_GIT_SHA)),
+)
+_ai_sub(
+    "ai.git_commit",
+    (
+        "git", "-c", "user.email=ai@fdm.local", "-c", "user.name=FDM AI",
+        "commit", "-m", "{message}",
+    ),
+    (_WD, ParamSpec("message", regex=_AI_COMMIT_MSG)),
+)
+
+# Orchestrator: pre-change snapshot (verify repo + record base/stash). Locked per
+# working dir so two sessions can't snapshot/write the same jail at once.
+register(
+    CommandTemplate(
+        action_name="ai.pre_change_snapshot",
+        argv=("true",),
+        cwd=None,
+        params=(_WD, ParamSpec("session_id", regex=r"[0-9]{1,12}")),
+        action_class=_AIPreChangeSnapshotAction,
+        idempotent=True,  # all reads; a transient SSH blip can retry.
+        requires_lock=True,
+        required_permission=_AI_OPERATE,
+        run_as=None,
+    )
+)
+
+# `restic forget --prune` — DESTRUCTIVE retention sweep (session 4.2). The action
+# appends the per-repo `--keep-*` flags (built from the ResticRepo policy) to this
+# rendered prefix; the template carries `--prune` and the config tag so the sweep
+# only ever touches this platform's config snapshots. Non-idempotent so the engine
+# NEVER auto-retries it (golden rule destructive policy). Per-repo lock so two
+# prunes on the same server can't stack. server:manage only.
 register(
     CommandTemplate(
         action_name="restic.forget",
-        argv=("restic", "-r", "{repo}", "forget", "--prune"),
+        argv=("restic", "-r", "{repo}", "forget", "--tag", _CONFIG_TAG, "--prune"),
         cwd=None,
-        # keep_* are recorded, not substituted into argv — the action derives the
-        # real --keep flags from the repo via forget_keep_args(). Declaring them
-        # here (non-required, positive-int) lets the launcher pass the effective
-        # retention dims so they land in params_sanitized → AuditLog.params_masked,
-        # answering "what keep-policy governed this prune?" from the audit alone
-        # (DOO-1105). Non-secret ints; render rejects any *undeclared* param, so
-        # these must be declared to be recorded.
-        params=(
-            ParamSpec("repo", regex=RESTIC_REPO_URI),
-            ParamSpec("keep_daily", regex=_POSITIVE_INT, required=False),
-            ParamSpec("keep_weekly", regex=_POSITIVE_INT, required=False),
-            ParamSpec("keep_monthly", regex=_POSITIVE_INT, required=False),
-        ),
+        params=(ParamSpec("repo", regex=RESTIC_REPO_URI),),
         action_class=_ResticForgetAction,
-        idempotent=False,  # destructive: never auto-retried.
+        idempotent=False,
         requires_lock=True,
         required_permission=SERVER_MANAGE,
         run_as=None,
     )
 )
 
-# `restic check` — verify repo integrity, optionally re-reading a data subset.
-# Read-only against the repo's *content* (no snapshot is added or removed), so
-# `idempotent=True` lets a transient SSH blip auto-retry cleanly; still locked
-# so it can't race a concurrent forget/backup on the same repo. NOTE: a
-# *completed* check that reports damage is deterministic — ResticCheckAction
-# raises JobFailedNoRetry on a nonzero restic exit so that path is NOT retried
-# (one alert per event, no repeated `--read-data-subset` re-read); only a check
-# that could not run (infra failure) rides the idempotent auto-retry.
+register(
+    CommandTemplate(
+        action_name="ai.capture_diff",
+        argv=("true",),
+        cwd=None,
+        params=(_WD, ParamSpec("session_id", regex=r"[0-9]{1,12}")),
+        action_class=_AICaptureDiffAction,
+        idempotent=False,  # a read-only violation revert must not silently retry.
+        requires_lock=True,
+        required_permission=_AI_OPERATE,
+        run_as=None,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="ai.apply",
+        argv=("true",),
+        cwd=None,
+        params=(
+            _WD,
+            ParamSpec("session_id", regex=r"[0-9]{1,12}"),
+            ParamSpec("message", regex=_AI_COMMIT_MSG),
+        ),
+        action_class=_AIApplyAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=_AI_OPERATE,
+        run_as=None,
+    )
+)
+
+register(
+    CommandTemplate(
+        action_name="ai.rollback",
+        argv=("true",),
+        cwd=None,
+        params=(_WD, ParamSpec("session_id", regex=r"[0-9]{1,12}")),
+        action_class=_AIRollbackAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=_AI_OPERATE,
+        run_as=None,
+    )
+)
+
+# `restic check --read-data-subset` — periodic integrity verification (session
+# 4.2). Re-reads a validated percentage of pack data. Non-idempotent so a failed
+# check is never silently auto-retried (which would re-raise the breach alert);
+# the action records the result on the ResticRepo and alerts on a genuine failure.
+# server:manage only.
 register(
     CommandTemplate(
         action_name="restic.check",
-        argv=("restic", "-r", "{repo}", "check"),
+        argv=("restic", "-r", "{repo}", "check", "--read-data-subset", "{subset}"),
         cwd=None,
-        params=(ParamSpec("repo", regex=RESTIC_REPO_URI),),
+        params=(
+            ParamSpec("repo", regex=RESTIC_REPO_URI),
+            ParamSpec("subset", regex=RESTIC_CHECK_SUBSET),
+        ),
         action_class=_ResticCheckAction,
-        idempotent=True,
+        idempotent=False,
         requires_lock=True,
         required_permission=SERVER_MANAGE,
         run_as=None,

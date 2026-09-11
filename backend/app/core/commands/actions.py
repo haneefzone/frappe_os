@@ -3594,16 +3594,16 @@ class ResticSnapshotsAction(Action):
 
 
 class ResticForgetAction(Action):
-    """`restic.forget` — apply the repo's retention policy with `forget --prune`
-    (session 4.2).
+    """`restic.forget` — apply the repo's retention policy and prune (session 4.2).
 
-    Refuses to run when the repo has no keep_daily/weekly/monthly set at all
-    (`forget_keep_args` raises `ResticError`) — an unpolicied `forget --prune`
-    would delete every snapshot in the repo, so this action never sends one
-    (golden rule 1). Records `last_forget_at` evidence on success. Per-server
-    lock (races init/backup on the same repo); never auto-retried — a
-    destructive prune must not silently repeat if the first attempt's outcome
-    is unclear (golden rule: destructive actions never auto-retry)."""
+    Reads the per-repo retention policy (keep-last/daily/weekly/monthly) off the
+    ResticRepo, turns it into restic `--keep-*` flags, and runs
+    `restic forget … --prune` scoped to the config tag. DESTRUCTIVE: it deletes
+    snapshots and reclaims their data, so its template is non-idempotent — the
+    engine never auto-retries it (golden rule destructive policy). If NO retention
+    dimension is configured the action refuses to run (an empty policy would
+    delete every snapshot). Records `last_forget_at` and streams restic's
+    kept/removed summary as evidence. Per-repo lock via the template."""
 
     async def run(self, ctx: JobContext) -> None:
         from app.core import restic as rst
@@ -3612,115 +3612,121 @@ class ResticForgetAction(Action):
         repo, env = await _restic_prepare(ctx)
         if not repo.initialized:
             raise rst.ResticError(
-                "restic repository is not initialised — run init before forget --prune"
+                "restic repository is not initialised — nothing to prune"
             )
-        keep_args = rst.forget_keep_args(repo)  # ResticError if no policy is set.
+        # Raises ResticError (→ job failure) when no policy is set: we never send
+        # `forget --prune` with no keep flags, which would wipe every snapshot.
+        keep_args = rst.build_forget_keep_args(repo)
+
         cmd = render(get_template("restic.forget"), {"repo": env.repository})
+        restic_argv = [*cmd.argv, *keep_args]
         env_path = await _stage_restic_env(ctx, env)
         try:
-            with ctx.step("restic forget --prune (retention)"):
+            with ctx.step("restic forget --prune (retention policy)"):
                 await ctx.emit(
                     f"$ restic -r {rst.redacted_repository(env.repository)} forget "
-                    f"--prune {' '.join(keep_args)}"
+                    f"--tag {rst.CONFIG_TAG} --prune {' '.join(keep_args)}"
                 )
-                res = await ctx.capture(
-                    _restic_wrap(env_path, [*cmd.argv, *keep_args]), timeout=3600
-                )
+                res = await ctx.capture(_restic_wrap(env_path, restic_argv), timeout=3600)
                 combined = f"{res.stdout}\n{res.stderr}"
                 for line in combined.splitlines():
                     if line.strip():
                         await ctx.emit(line)
                 if res.exit_code != 0:
                     raise RuntimeError(
-                        f"restic forget --prune exited with status {res.exit_code}"
+                        f"restic forget exited with status {res.exit_code}"
                     )
                 repo.last_forget_at = _now_utc()
                 ctx.session.commit()
-                await ctx.emit("Retention policy applied.")
+                await ctx.emit("Retention prune complete.")
         finally:
             await ctx.capture(["rm", "-f", env_path])
 
 
 class ResticCheckAction(Action):
-    """`restic.check` — verify repo integrity (session 4.2).
+    """`restic.check` — verify repository integrity (session 4.2).
 
-    Runs a structural (metadata-only) check, or re-reads a data subset when the
-    repo's `check_read_data_subset` is set (validated to restic's subset grammar
-    before it reaches argv). Always records last_check_at/ok/message evidence —
-    even on failure, so the §6 view shows the true last-known state. A failed
-    check fires `backup.check_failed` through the existing 2.8 notification
-    dispatcher (the same channel `server.drift_check` uses for config.drift) —
-    reused, not forked — then raises so the CommandJob itself shows failed.
-    Per-server lock; idempotent (read-only against the repo, safe to auto-retry
-    a transient SSH blip)."""
+    Runs `restic check --read-data-subset <subset>` (a fraction of the pack data
+    is actually re-read + verified, keeping the check affordable on a large repo)
+    and records the outcome on the ResticRepo: `last_check_at` always, plus
+    `last_check_ok` and a credential-free `last_check_summary`. On a genuine
+    failure it raises ONE breach alert through the shared 2.8/3.1 notification
+    channel (`restic.check_failed` — not a forked path) and fails the job. A
+    restic *lock* clash (a concurrent backup/prune holds the repo) — and likewise a
+    connectivity/transient failure (S3 unreachable, DNS, throttling, timeout) — is
+    an operational condition, not an integrity breach: it fails the job WITHOUT
+    recording `ok=False` or alerting, since the check never actually verified the
+    data. Read-oriented but non-idempotent so a failed check is never silently
+    auto-retried (which would re-alert)."""
 
     async def run(self, ctx: JobContext) -> None:
         from app.core import restic as rst
         from app.core.commands import get_template, render
+        from app.core.notifications import dispatch_restic_check_failed
 
         repo, env = await _restic_prepare(ctx)
         if not repo.initialized:
             raise rst.ResticError(
-                "restic repository is not initialised — run init before a check"
+                "restic repository is not initialised — nothing to check"
             )
-        subset = rst.validate_read_data_subset(repo.check_read_data_subset)
-        cmd = render(get_template("restic.check"), {"repo": env.repository})
-        extra = ["--read-data-subset", subset] if subset else []
+        subset = str(
+            ctx.rendered.params_sanitized.get("subset") or rst.DEFAULT_CHECK_SUBSET
+        )
+        cmd = render(
+            get_template("restic.check"), {"repo": env.repository, "subset": subset}
+        )
         env_path = await _stage_restic_env(ctx, env)
         try:
             with ctx.step("restic check (integrity)"):
                 await ctx.emit(
-                    f"$ restic -r {rst.redacted_repository(env.repository)} check"
-                    + (f" --read-data-subset {subset}" if subset else "")
+                    f"$ restic -r {rst.redacted_repository(env.repository)} check "
+                    f"--read-data-subset {subset}"
                 )
-                res = await ctx.capture(
-                    _restic_wrap(env_path, [*cmd.argv, *extra]), timeout=3600
-                )
+                res = await ctx.capture(_restic_wrap(env_path, list(cmd.argv)), timeout=3600)
                 combined = f"{res.stdout}\n{res.stderr}"
                 for line in combined.splitlines():
                     if line.strip():
                         await ctx.emit(line)
-                ok, message = rst.parse_check_result(combined)
-                if res.exit_code != 0:
-                    # The process exit code is the ground truth for pass/fail; a
-                    # nonzero exit is never reported ok even if some output line
-                    # happened to look clean.
-                    ok = False
-                    if message == "no errors were found":
-                        message = f"restic check exited with status {res.exit_code}"
 
+                # A repo-lock clash is not an integrity failure: fail the job but
+                # do not record ok=False or raise a (false) breach alert.
+                if res.exit_code != 0 and rst.is_restic_lock_error(combined):
+                    raise RuntimeError(
+                        "restic check could not run — the repository is locked by "
+                        "another operation; not recording an integrity result"
+                    )
+
+                # Likewise a connectivity/transient failure (S3 unreachable, DNS,
+                # throttling, timeout) means the check never verified anything —
+                # not that the backup is corrupt. Fail the job without recording
+                # ok=False or firing the DR breach alert, same as the lock case.
+                if res.exit_code != 0 and rst.is_restic_transient_error(combined):
+                    raise RuntimeError(
+                        "restic check could not run — the repository was "
+                        "unreachable (connectivity/transient error); not recording "
+                        "an integrity result"
+                    )
+
+                ok, summary = rst.summarize_check(res.exit_code, combined)
                 repo.last_check_at = _now_utc()
                 repo.last_check_ok = ok
-                repo.last_check_message = message
+                repo.last_check_summary = summary
                 ctx.session.commit()
 
-                if ok:
-                    await ctx.emit(f"Integrity check passed: {message}")
-                    return
-
-                await ctx.emit(f"Integrity check FAILED: {message}", stream="stderr")
-                from app.core.jobs import JobFailedNoRetry
-                from app.core.notifications import dispatch_restic_check_failed
-
-                server = ctx.session.get(_server_model(), ctx.server_id)
-                dispatch_restic_check_failed(
-                    ctx.session,
-                    server_id=ctx.server_id,
-                    server_name=server.name if server else str(ctx.server_id),
-                    message=message,
-                )
-                # restic *ran* and reported damage (nonzero exit) — a
-                # deterministic result. Raise the no-retry failure so the job
-                # runner does NOT auto-retry it: re-running an idempotent check
-                # here would only repeat the same damage report, duplicating
-                # this operator alert on every attempt and re-incurring the
-                # expensive `--read-data-subset` re-read. An infra failure (SSH
-                # drop, timeout) instead raises out of ctx.capture *before* this
-                # dispatch, propagating as a plain Exception → still auto-retried
-                # with no alert, which is the correct transient-blip behaviour.
-                raise JobFailedNoRetry(
-                    f"restic check reported a failure: {message}"
-                )
+                if not ok:
+                    server = ctx.session.get(_server_model(), ctx.server_id)
+                    server_name = (
+                        (server.hostname or server.name) if server else "server"
+                    )
+                    # Reuse the shared channel groundwork — one breach alert.
+                    dispatch_restic_check_failed(
+                        ctx.session,
+                        server_id=ctx.server_id,
+                        server_name=server_name,
+                        summary=summary,
+                    )
+                    raise RuntimeError(f"restic check failed: {summary}")
+                await ctx.emit(f"Integrity check passed: {summary}")
         finally:
             await ctx.capture(["rm", "-f", env_path])
 
@@ -3737,410 +3743,259 @@ def _now_utc():
     return datetime.now(UTC)
 
 
-# --------------------------------------------------------------------------- #
-# Tool installer (session 6.1)
-# --------------------------------------------------------------------------- #
-
-
-async def _detect_one(ctx: JobContext, tool) -> str | None:
-    """Run one tool's fixed detect argv and return its parsed version.
-
-    `nginx -v` writes its banner to stderr and a missing binary exits non-zero,
-    so both streams are searched and any failure is simply "not detected" — a
-    server without htop is not a failed job.
-    """
-    from app.core.tools import format_version, parse_version
-
-    try:
-        res = await ctx.capture(list(tool.detect_argv))
-    except Exception:
-        return None
-    if res.exit_code != 0:
-        return None
-    parsed = parse_version(f"{res.stdout}\n{res.stderr}")
-    return format_version(parsed) if parsed else None
-
-
-def _tool_for_job(ctx: JobContext):
-    """Which tool this install job is for, derived from the job's own template.
-
-    Deliberately NOT a request parameter: the tool is whatever the (fixed,
-    per-tool) command template says it is, so there is no client-supplied value
-    anywhere near the install path (golden rule 1).
-    """
-    from app.core.tools import TOOL_DEFINITIONS
-    from app.models.job import CommandJob
-
-    job = ctx.session.get(CommandJob, ctx.job_id)
-    action_name = job.action_name if job is not None else None
-    for tool in TOOL_DEFINITIONS:
-        if tool.install_action and tool.install_action == action_name:
-            return tool
-    raise RuntimeError(f"no tool registered for action {action_name!r}")
-
-
-class ScanToolsAction(Action):
-    """`server.scan_tools` — inventory every registered tool and persist verdicts.
-
-    Extends the 1.2 `check_connection` detection from a transient stream into
-    durable `ServerTool` rows judged against the CLAUDE.md version matrix.
-    Read-only on the target, so it takes no lock. A missing tool is data, not a
-    failure — only an unexpected error fails the job.
-    """
-
-    async def run(self, ctx: JobContext) -> None:
-        from app.core.toolinventory import build_context, upsert_server_tool
-        from app.core.tools import TOOL_DEFINITIONS
-
-        inv = build_context(ctx.session, ctx.server_id)
-
-        with ctx.step("Resolve version matrix"):
-            if inv.major_known:
-                await ctx.emit(f"Highest Frappe version on this server: v{inv.major}")
-            elif inv.has_bench:
-                await ctx.emit("Benches found but no Frappe version recorded yet.")
-            else:
-                await ctx.emit(
-                    "No benches on this server — version-dependent tools "
-                    "(Python, Node, MariaDB) will be reported as 'unknown'."
-                )
-
-        for tool in TOOL_DEFINITIONS:
-            with ctx.step(f"Detect {tool.display_name}"):
-                detected = await _detect_one(ctx, tool)
-                row = upsert_server_tool(
-                    ctx.session,
-                    server_id=ctx.server_id,
-                    tool=tool,
-                    detected_version=detected,
-                    ctx=inv,
-                )
-                await ctx.emit(
-                    f"  {tool.tool_id}: detected={detected or 'not installed'} "
-                    f"recommended={row.recommended_version} -> {row.status}"
-                )
-        ctx.session.commit()
-
-
-class InstallToolAction(Action):
-    """`tool.install_*` — run one tool's fixed installer, then re-detect it.
-
-    Every template this class serves is a *constant argv for exactly one tool*;
-    there is no generic "run this installer" template and nothing is assembled
-    from a tool id. Not idempotent-auto-retry: a half-finished package install
-    replayed blind is how you corrupt a dpkg database, so the templates set
-    `idempotent=False` and a failed install waits for a human.
-    """
-
-    async def run(self, ctx: JobContext) -> None:
-        from app.core.toolinventory import build_context, upsert_server_tool
-
-        tool = _tool_for_job(ctx)
-
-        with ctx.step(f"Install {tool.display_name}"):
-            await ctx.emit(f"$ {ctx.rendered.display}")
-            code = await ctx.stream(ctx.rendered.argv, cwd=ctx.rendered.cwd)
-            if code != 0:
-                raise RuntimeError(
-                    f"{tool.display_name} install exited with status {code}"
-                )
-
-        with ctx.step(f"Verify {tool.display_name}"):
-            inv = build_context(ctx.session, ctx.server_id)
-            detected = await _detect_one(ctx, tool)
-            row = upsert_server_tool(
-                ctx.session,
-                server_id=ctx.server_id,
-                tool=tool,
-                detected_version=detected,
-                ctx=inv,
-            )
-            ctx.session.commit()
-            if detected is None:
-                raise RuntimeError(
-                    f"{tool.display_name} still not detected after install — "
-                    "the installer may need a new login shell for PATH changes."
-                )
-            await ctx.emit(
-                f"{tool.display_name} {detected} "
-                f"(recommended {row.recommended_version}) -> {row.status}"
-            )
 
 
 # --------------------------------------------------------------------------- #
-# Platform self-backup (session 6.3)
+# AI Agents module (session 5.1): jailed git snapshot / diff / apply / rollback.
 #
-# These are `local` actions: they run on the platform host itself (no SSH, no
-# managed Server), driven by a LocalRemoteExecutor. The heavy lifting lives in
-# app/core/platform_backup.py (pure/injectable) so the flow is unit-testable
-# without a live Postgres, MinIO or master key. CLAUDE.md rule 6: the master key
-# and the backup passphrase never touch the DB, a log line, a job param, the
-# archive, or an error message.
+# Every git operation below is a registered command template (fixed argv, cwd =
+# the validated working dir, `..`-rejected), rendered as a sub-step here — never
+# a shell string (golden rule 1). The orchestrators write the snapshot/diff and
+# the apply/rollback disposition onto the AIAgentSession row so the review screen
+# and the audit trail stay in sync.
 # --------------------------------------------------------------------------- #
 
 
-def _platform_config_root():
-    """The platform root that holds the config set to back up (`deploy/` units +
-    nginx conf, and `.env`). Overridable via PLATFORM_ROOT; defaults to the repo
-    root (the backend package's grandparent)."""
-    import os
-    from pathlib import Path
+def _load_ai_session(ctx: JobContext, session_id: int):
+    """Load the AIAgentSession row this job acts on, or None if it's gone."""
+    from app.models.ai_agent import AIAgentSession
 
-    from app.config import get_settings
-
-    override = getattr(get_settings(), "platform_root", "") or os.environ.get("PLATFORM_ROOT", "")
-    if override:
-        return Path(override)
-    # app/core/commands/actions.py -> parents: commands, core, app, backend, root
-    return Path(__file__).resolve().parents[4]
+    return ctx.session.get(AIAgentSession, int(session_id))
 
 
-class PlatformSelfBackupAction(Action):
-    """`platform.self_backup` — dump the platform Postgres + config set, encrypt
-    the archive with the operator-held backup passphrase, and upload it offsite
-    with the sha256 re-verified end to end (session 6.3). The API pre-creates a
-    `pending` PlatformBackup row and threads its id, so a failed run still leaves
-    a visible failed record."""
+async def _git(ctx: JobContext, action_name: str, params: dict, *, label: str):
+    """Render + stream one AI git sub-template as its own step; return exit code."""
+    from app.core.commands import get_template, render
 
-    async def run(self, ctx: JobContext) -> None:
-        import os
-        import tempfile
-
-        from app.config import get_settings
-        from app.core import platform_backup as pb
-        from app.core import storage as st
-        from app.models.platform_backup import PlatformBackup
-        from app.models.storage import StorageTarget
-
-        params = ctx.rendered.params_sanitized
-        backup_id = int(params["backup_id"]) if params.get("backup_id") else None
-        raw_target = params.get("storage_target_id")
-        storage_target_id = int(raw_target) if raw_target else None
-        settings = get_settings()
-        row = ctx.session.get(PlatformBackup, backup_id) if backup_id else None
-
-        try:
-            with ctx.step("Check backup passphrase + storage target"):
-                if not settings.fdm_backup_passphrase:
-                    raise pb.SelfBackupError(
-                        "no backup passphrase configured — set FDM_BACKUP_PASSPHRASE "
-                        "(escrowed separately from FDM_SECRET_KEY; see "
-                        "docs/master-key-escrow.md). Refusing to run."
-                    )
-                target = (
-                    ctx.session.get(StorageTarget, storage_target_id)
-                    if storage_target_id
-                    else None
-                )
-                if target is None or not target.enabled:
-                    raise pb.SelfBackupError(
-                        "no enabled storage target — configure one in "
-                        "Settings → Storage and select it."
-                    )
-                cfg = st.S3Config.from_target(target)  # decrypts keys in memory only
-                client = st.build_client(cfg)
-                await ctx.emit(
-                    f"Passphrase present; target {target.name!r} "
-                    f"(s3://{cfg.bucket}) selected."
-                )
-
-            with ctx.step("Dump platform DB + config, encrypt, upload offsite"):
-                config_root = _platform_config_root()
-                await ctx.emit(
-                    "Dumping platform Postgres (pg_dump --format=custom) and "
-                    f"capturing the config set from {config_root} "
-                    "(.env has FDM_SECRET_KEY excluded)…"
-                )
-                with tempfile.TemporaryDirectory(prefix="fdm-selfbackup-") as work:
-                    def _upload(local_path: str, expected_sha: str) -> str:
-                        key = st.platform_object_key(
-                            cfg, row.id, os.path.basename(local_path)
-                        )
-                        result = st.upload_local_file(
-                            client,
-                            cfg,
-                            local_path=local_path,
-                            key=key,
-                            expected_sha256=expected_sha,
-                        )
-                        if not result.ok:
-                            raise pb.SelfBackupError(
-                                f"offsite upload failed: {result.error}"
-                            )
-                        return result.key
-
-                    res = pb.create_self_backup(
-                        database_url=settings.database_url,
-                        passphrase=settings.fdm_backup_passphrase,
-                        config_root=config_root,
-                        work_dir=work,
-                        backup_id=row.id,
-                        upload_fn=_upload,
-                    )
-                mb = res.archive_size / (1024 * 1024)
-                await ctx.emit(
-                    f"Encrypted archive uploaded ({mb:.2f} MB), sha256 "
-                    f"{res.sha256[:12]}… re-verified end to end → {res.object_key}"
-                )
-
-            with ctx.step("Record platform backup"):
-                row.status = "success"
-                row.size_bytes = res.archive_size
-                row.sha256 = res.sha256
-                row.plaintext_sha256 = res.plaintext_sha256
-                row.kdf_salt = res.kdf_salt
-                row.encrypted = True
-                row.storage_target_id = target.id
-                row.object_key = res.object_key
-                row.verify_status = "unverified"
-                row.taken_by_job_id = ctx.job_id
-                row.error = None
-                ctx.session.commit()
-                await ctx.emit(
-                    "Self-backup recorded. Run the verify job to prove it is "
-                    "restorable (download → checksum → pg_restore --list)."
-                )
-        except Exception as exc:
-            if row is not None:
-                row.status = "failed"
-                row.error = str(exc)[:500]
-                ctx.session.commit()
-            raise
+    cmd = render(get_template(action_name), params)
+    with ctx.step(label):
+        await ctx.emit(f"$ {cmd.display}")
+        code = await ctx.stream(cmd.argv, cwd=cmd.cwd)
+    return code
 
 
-class PlatformSelfBackupVerifyAction(Action):
-    """`platform.self_backup_verify` — the only real proof the self-backup works:
-    download the encrypted archive, re-checksum it, decrypt with the passphrase +
-    stored salt, and `pg_restore --list` the dump (structure readable). Marks the
-    row verified/failed (session 6.3)."""
+async def _git_capture(ctx: JobContext, action_name: str, params: dict, *, label: str):
+    """Render + capture one AI git sub-template as its own step; return the result."""
+    from app.core.commands import get_template, render
+
+    cmd = render(get_template(action_name), params)
+    with ctx.step(label):
+        await ctx.emit(f"$ {cmd.display}")
+        res = await ctx.capture(cmd.argv, cwd=cmd.cwd)
+    return res
+
+
+class AIPreChangeSnapshotAction(Action):
+    """`ai.pre_change_snapshot` — verify the jail is a git repo and record a
+    pre-change snapshot (base commit + `git stash create` of any pre-existing
+    dirty state) onto the session, so a later rollback restores it exactly.
+
+    Runs for every session at launch: for a read-write session it is the gated
+    pre-change backup; for a read-only session it is the safety baseline the
+    end-of-session violation check reverts against. Idempotent (all reads)."""
 
     async def run(self, ctx: JobContext) -> None:
-        import tempfile
-        from datetime import UTC, datetime
-
-        from app.config import get_settings
-        from app.core import platform_backup as pb
-        from app.core import storage as st
-        from app.models.platform_backup import PlatformBackup
-        from app.models.storage import StorageTarget
+        import json
 
         params = ctx.rendered.params_sanitized
-        backup_id = int(params["backup_id"])
-        settings = get_settings()
-        row = ctx.session.get(PlatformBackup, backup_id)
+        working_dir = params["working_dir"]
+        session = _load_ai_session(ctx, params["session_id"])
 
-        with ctx.step("Load backup + storage target"):
-            if row is None:
-                raise pb.SelfBackupError(f"platform backup #{backup_id} not found")
-            if not row.object_key or not row.storage_target_id or not row.sha256:
-                raise pb.SelfBackupError(
-                    "this backup has no uploaded archive to verify"
-                )
-            if not settings.fdm_backup_passphrase:
-                raise pb.SelfBackupError(
-                    "no backup passphrase configured — set FDM_BACKUP_PASSPHRASE"
-                )
-            target = ctx.session.get(StorageTarget, row.storage_target_id)
-            if target is None:
-                raise pb.SelfBackupError(
-                    "the storage target for this backup was deleted"
-                )
-
-        try:
-            with ctx.step("Download → checksum → decrypt → pg_restore --list"):
-                with tempfile.TemporaryDirectory(prefix="fdm-verify-") as work:
-                    def _download(key: str, dest: str) -> None:
-                        st.download_object_to_file(target, key, dest)
-
-                    verdict = pb.verify_self_backup(
-                        passphrase=settings.fdm_backup_passphrase,
-                        kdf_salt=row.kdf_salt,
-                        expected_sha256=row.sha256,
-                        object_key=row.object_key,
-                        work_dir=work,
-                        download_fn=_download,
-                    )
-                await ctx.emit(verdict.detail)
-                if not verdict.ok:
-                    raise pb.SelfBackupError(f"verify failed: {verdict.detail}")
-
-            with ctx.step("Mark verified"):
-                row.verify_status = "verified"
-                row.verified_at = datetime.now(UTC)
-                row.verified_by_job_id = ctx.job_id
-                ctx.session.commit()
-                await ctx.emit("Verified: this self-backup is restorable.")
-        except Exception as exc:
-            row.verify_status = "failed"
-            ctx.session.commit()
-            _ = exc
-            raise
-
-
-class PlatformBackupRetentionSweepAction(Action):
-    """`platform.self_backup_retention_sweep` — prune platform self-backups down
-    to a retention policy (session 6.3, reusing the 2.1 pattern). Never removes
-    the newest/only backup; logs a dry-run summary before deleting the S3 object
-    AND the row."""
-
-    async def run(self, ctx: JobContext) -> None:
-        from datetime import UTC, datetime
-
-        from sqlalchemy import select
-
-        from app.core import backups as bk
-        from app.core import storage as st
-        from app.models.platform_backup import PlatformBackup
-        from app.models.storage import StorageTarget
-
-        params = ctx.rendered.params_sanitized
-        keep_last = int(params["keep_last"]) if params.get("keep_last") else None
-        keep_days = int(params["keep_days"]) if params.get("keep_days") else None
-        now = datetime.now(UTC)
-
-        with ctx.step("Evaluate platform-backup retention policy"):
-            rows = list(ctx.session.scalars(select(PlatformBackup)).all())
-            keep, remove = bk.plan_retention(
-                rows, keep_last=keep_last, keep_days=keep_days, now=now
+        with ctx.step("Verify git working directory"):
+            res = await ctx.capture(
+                ["git", "rev-parse", "--is-inside-work-tree"], cwd=working_dir
             )
-            policy = (
-                ", ".join(
-                    p
-                    for p in (
-                        f"keep last {keep_last}" if keep_last is not None else None,
-                        f"keep {keep_days} day(s)" if keep_days is not None else None,
-                    )
-                    if p
+            if res.exit_code != 0 or res.stdout.strip() != "true":
+                if session is not None:
+                    session.status = "error"
+                    session.close_reason = "not_a_git_repo"
+                    ctx.session.commit()
+                raise RuntimeError(
+                    f"{working_dir!r} is not a git working tree — a scoped AI "
+                    "session needs a git repo to snapshot and diff."
                 )
-                or "keep all"
+
+        base = ""
+        snap = ""
+        with ctx.step("Record pre-change snapshot"):
+            head = await ctx.capture(["git", "rev-parse", "HEAD"], cwd=working_dir)
+            if head.exit_code != 0:
+                if session is not None:
+                    session.status = "error"
+                    session.close_reason = "no_commits"
+                    ctx.session.commit()
+                raise RuntimeError(
+                    "the working tree has no commits yet; commit an initial state "
+                    "before starting a scoped session so rollback has a base."
+                )
+            base = head.stdout.strip()
+            # `git stash create` snapshots tracked+staged changes into a commit
+            # object WITHOUT touching the working tree (empty output = clean tree).
+            stash = await ctx.capture(["git", "stash", "create"], cwd=working_dir)
+            snap = stash.stdout.strip()
+            if session is not None:
+                session.base_commit = base
+                session.snapshot_ref = snap or None
+                session.status = "ready"
+                ctx.session.commit()
+            await ctx.emit(
+                f"Pre-change snapshot recorded: base {base[:12]}…"
+                + (f", dirty-snapshot {snap[:12]}…" if snap else " (clean tree).")
             )
             await ctx.emit(
-                f"Retention policy [{policy}]: {len(keep) + len(remove)} "
-                f"successful backup(s), {len(keep)} to keep, "
-                f"{len(remove)} to remove (dry-run). The newest is always kept."
+                "SNAPSHOT_RESULT "
+                + json.dumps({"base_commit": base, "snapshot_ref": snap}),
+                stream="result",
             )
 
-        if not remove:
-            with ctx.step("No platform backups beyond retention"):
-                await ctx.emit("Nothing to prune.")
-            return
 
-        with ctx.step(f"Remove {len(remove)} expired platform backup(s)"):
-            for b in remove:
-                if b.object_key and b.storage_target_id:
-                    target = ctx.session.get(StorageTarget, b.storage_target_id)
-                    if target is not None:
-                        try:
-                            st.delete_object(target, b.object_key)
-                            await ctx.emit(f"  removed offsite object {b.object_key}")
-                        except Exception as exc:  # noqa: BLE001
-                            await ctx.emit(
-                                f"  WARN could not delete offsite object "
-                                f"{b.object_key}: {exc}"
-                            )
-                ctx.session.delete(b)
-            ctx.session.commit()
-            kept_ids = ", ".join(str(k.id) for k in keep) or "none"
+class AICaptureDiffAction(Action):
+    """`ai.capture_diff` — on session end, stage the whole jail and capture the
+    `git diff` against the pre-change base for the review screen.
+
+    For a read-only session any non-empty diff is a violation: this action
+    reverts it in the same job (reset --hard base, clean untracked, re-apply the
+    pre-existing dirty snapshot) and records a `read_only_violation`, so a
+    read-only session can never leave a kept write behind (server-side)."""
+
+    async def run(self, ctx: JobContext) -> None:
+        import json
+
+        params = ctx.rendered.params_sanitized
+        working_dir = params["working_dir"]
+        session = _load_ai_session(ctx, params["session_id"])
+        if session is None:
+            raise RuntimeError(f"AI session {params['session_id']} not found")
+        base = session.base_commit
+        if not base:
+            raise RuntimeError("session has no pre-change base commit to diff against")
+
+        await _git(
+            ctx, "ai.git_add_all", {"working_dir": working_dir}, label="Stage working tree"
+        )
+        diff_res = await _git_capture(
+            ctx,
+            "ai.git_diff_cached",
+            {"working_dir": working_dir, "base": base},
+            label="Capture git diff",
+        )
+        diff_text = diff_res.stdout
+        session.diff_text = diff_text
+        changed = bool(diff_text.strip())
+        await ctx.emit(
+            f"Captured diff vs {base[:12]}… — "
+            + ("changes present." if changed else "no changes.")
+        )
+
+        if session.read_only and changed:
+            # A read-only session must not keep any write: revert to the snapshot.
             await ctx.emit(
-                f"Pruned {len(remove)} backup(s); {len(keep)} kept (ids {kept_ids})."
+                "READ_ONLY_VIOLATION — the read-only session modified the tree; "
+                "reverting to the pre-change snapshot.",
+                stream="result",
             )
+            await _rollback_to_snapshot(ctx, working_dir, base, session.snapshot_ref)
+            session.disposition = "rolledback"
+            session.status = "rolledback"
+            session.close_reason = "read_only_violation"
+        else:
+            session.status = "reviewing"
+        ctx.session.commit()
+        await ctx.emit(
+            "DIFF_RESULT "
+            + json.dumps(
+                {
+                    "changed": changed,
+                    "bytes": len(diff_text),
+                    "read_only_violation": bool(session.read_only and changed),
+                }
+            ),
+            stream="result",
+        )
+
+
+async def _rollback_to_snapshot(
+    ctx: JobContext, working_dir: str, base: str, snapshot_ref: str | None
+) -> None:
+    """Restore the jail to its pre-change snapshot exactly: hard-reset to the base
+    commit, remove untracked (non-ignored) files, then re-apply any pre-existing
+    dirty snapshot. Shared by rollback and the read-only violation revert."""
+    code = await _git(
+        ctx, "ai.git_reset_hard", {"working_dir": working_dir, "ref": base},
+        label=f"Reset --hard to {base[:12]}…",
+    )
+    if code != 0:
+        raise RuntimeError(f"git reset --hard exited with status {code}")
+    code = await _git(
+        ctx, "ai.git_clean", {"working_dir": working_dir},
+        label="Remove untracked files",
+    )
+    if code != 0:
+        raise RuntimeError(f"git clean exited with status {code}")
+    if snapshot_ref:
+        code = await _git(
+            ctx, "ai.git_stash_apply", {"working_dir": working_dir, "ref": snapshot_ref},
+            label="Restore pre-existing changes",
+        )
+        if code != 0:
+            raise RuntimeError(f"git stash apply exited with status {code}")
+
+
+class AIApplyAction(Action):
+    """`ai.apply` — keep the agent's changes: stage everything and commit it as a
+    durable, audited commit in the jailed working dir. Refuses on a read-only
+    session (defence in depth; the API also 403s). A clean tree is a no-op."""
+
+    async def run(self, ctx: JobContext) -> None:
+        params = ctx.rendered.params_sanitized
+        working_dir = params["working_dir"]
+        message = params["message"]
+        session = _load_ai_session(ctx, params["session_id"])
+        if session is not None and session.read_only:
+            raise RuntimeError("cannot apply changes for a read-only session")
+
+        await _git(
+            ctx, "ai.git_add_all", {"working_dir": working_dir}, label="Stage changes"
+        )
+        status = await _git_capture(
+            ctx, "ai.git_status", {"working_dir": working_dir},
+            label="Check for staged changes",
+        )
+        if not status.stdout.strip():
+            await ctx.emit("No changes to apply — the working tree is clean.")
+        else:
+            code = await _git(
+                ctx,
+                "ai.git_commit",
+                {"working_dir": working_dir, "message": message},
+                label="Commit changes",
+            )
+            if code != 0:
+                raise RuntimeError(f"git commit exited with status {code}")
+            await ctx.emit("Applied — changes committed in the jailed working dir.")
+        if session is not None:
+            session.disposition = "applied"
+            session.status = "applied"
+            ctx.session.commit()
+
+
+class AIRollbackAction(Action):
+    """`ai.rollback` — discard the agent's changes and restore the pre-change
+    snapshot exactly (reset --hard base, clean untracked, re-apply pre-existing
+    dirty snapshot). Reads base/snapshot from the session row."""
+
+    async def run(self, ctx: JobContext) -> None:
+        params = ctx.rendered.params_sanitized
+        working_dir = params["working_dir"]
+        session = _load_ai_session(ctx, params["session_id"])
+        if session is None:
+            raise RuntimeError(f"AI session {params['session_id']} not found")
+        base = session.base_commit
+        if not base:
+            raise RuntimeError("session has no pre-change base commit to roll back to")
+
+        await _rollback_to_snapshot(ctx, working_dir, base, session.snapshot_ref)
+        session.disposition = "rolledback"
+        session.status = "rolledback"
+        ctx.session.commit()
+        await ctx.emit("Rolled back — working dir restored to the pre-change snapshot.")

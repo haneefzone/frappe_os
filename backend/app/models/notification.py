@@ -36,7 +36,7 @@ NOTIFICATION_EVENTS = (
     "uptime.restored",          # a site came back up (was down on last check)
     "ssl.expiry",               # SSL cert expiring ≤30 days (3.1 placeholder)
     "backup.compliance_breach", # RPO breached (3.1 placeholder)
-    "backup.check_failed",      # scheduled `restic check` found damage (4.2)
+    "restic.check_failed",      # a `restic check` integrity verification failed (4.2)
     "backup.restore_test_orphan",  # a restore-test scratch site failed to drop (3.4)
 )
 

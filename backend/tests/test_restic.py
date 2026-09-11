@@ -31,7 +31,6 @@ from app.core.jobs import CaptureResult, InMemoryJobBackend, JobRunner
 from app.core.security import get_secrets_service
 from app.db import Base
 from app.models import AuditLog, CommandJob, LogEntry, Server
-from app.models.notification import Notification
 from app.models.restic import ResticRepo
 from app.models.storage import StorageTarget
 from tests.conftest import csrf_headers, login
@@ -174,100 +173,16 @@ def test_resolve_env_requires_target_password_and_keys():
 
 
 # --------------------------------------------------------------------------- #
-# 4.2 retention + integrity pure helpers
-# --------------------------------------------------------------------------- #
-
-
-def test_forget_keep_args_builds_flags_for_every_set_dimension():
-    repo = ResticRepo(server_id=1, keep_daily=7, keep_weekly=4, keep_monthly=6)
-    assert rst.forget_keep_args(repo) == [
-        "--keep-daily", "7", "--keep-weekly", "4", "--keep-monthly", "6",
-    ]
-    # Only the set dimensions are included.
-    assert rst.forget_keep_args(ResticRepo(server_id=1, keep_daily=7)) == [
-        "--keep-daily", "7",
-    ]
-
-
-def test_forget_keep_args_refuses_with_no_policy_set():
-    """No keep dimension set at all → refuse rather than send an unpolicied
-    `forget --prune` that would delete every snapshot (golden rule 1)."""
-    with pytest.raises(rst.ResticError):
-        rst.forget_keep_args(ResticRepo(server_id=1))
-
-
-def test_forget_keep_args_rejects_sub_one_value():
-    with pytest.raises(rst.ResticError):
-        rst.forget_keep_args(ResticRepo(server_id=1, keep_daily=0))
-
-
-@pytest.mark.parametrize("subset", ["5%", "100%", "1/10", "50G", "1.5T", "500"])
-def test_validate_read_data_subset_accepts_restic_grammar(subset):
-    assert rst.validate_read_data_subset(subset) == subset
-
-
-def test_validate_read_data_subset_none_and_blank_are_structural_check():
-    assert rst.validate_read_data_subset(None) is None
-    assert rst.validate_read_data_subset("  ") is None
-    assert rst.validate_read_data_subset(" 5% ") == "5%"  # trimmed
-
-
-@pytest.mark.parametrize("bad", ["5%; rm -rf /", "$(id)", "`id`", "5% 10%", "abc"])
-def test_validate_read_data_subset_rejects_non_grammar(bad):
-    with pytest.raises(rst.ResticError):
-        rst.validate_read_data_subset(bad)
-
-
-def test_parse_check_result_clean_repo():
-    ok, msg = rst.parse_check_result("create exclusive lock\nno errors were found\n")
-    assert ok is True and msg == "no errors were found"
-
-
-def test_parse_check_result_detects_damage():
-    ok, msg = rst.parse_check_result(
-        "pack 1a2b3c4d: damaged\nCheck failed: 1 error(s)"
-    )
-    assert ok is False
-    assert "damaged" in msg.lower() or "error" in msg.lower()
-
-
-def test_parse_check_result_no_output_is_a_failure():
-    ok, msg = rst.parse_check_result("")
-    assert ok is False
-    assert "no output" in msg
-
-
-# --------------------------------------------------------------------------- #
 # Registry / render
 # --------------------------------------------------------------------------- #
 
 
 def test_templates_registered_with_server_manage_and_no_secret_params():
-    for action in (
-        "restic.install", "restic.init", "restic.backup", "restic.snapshots",
-        "restic.forget", "restic.check",
-    ):
+    for action in ("restic.install", "restic.init", "restic.backup", "restic.snapshots"):
         t = get_template(action)
         assert t.required_permission == "server:manage"
         # Secrets flow via env, never as template params (rule 6).
         assert t.secret_params == set()
-
-
-def test_forget_is_never_auto_retried_check_is():
-    """Destructive forget --prune must never auto-retry (golden rule destructive
-    policy); the read-only check is safe to retry a transient SSH blip."""
-    assert get_template("restic.forget").idempotent is False
-    assert get_template("restic.check").idempotent is True
-
-
-def test_forget_and_check_templates_render_fixed_prefix():
-    uri = "s3:https://minio.local:9000/fdm/restic/s3"
-    assert render(get_template("restic.forget"), {"repo": uri}).argv == [
-        "restic", "-r", uri, "forget", "--prune",
-    ]
-    assert render(get_template("restic.check"), {"repo": uri}).argv == [
-        "restic", "-r", uri, "check",
-    ]
 
 
 def test_backup_template_renders_tag_and_host():
@@ -309,18 +224,12 @@ class ResticExecutor:
     the staging / detect / restic subcommands with canned output."""
 
     def __init__(self, *, restic_present=False, backup_stdout=None, backup_exit=0,
-                 init_stdout="created restic repository abc", init_exit=0,
-                 forget_stdout="removed 2 snapshots\n", forget_exit=0,
-                 check_stdout="no errors were found\n", check_exit=0):
+                 init_stdout="created restic repository abc", init_exit=0):
         self.restic_present = restic_present
         self.backup_stdout = backup_stdout or "Files: 3 new\nsnapshot 1a2b3c4d saved"
         self.backup_exit = backup_exit
         self.init_stdout = init_stdout
         self.init_exit = init_exit
-        self.forget_stdout = forget_stdout
-        self.forget_exit = forget_exit
-        self.check_stdout = check_stdout
-        self.check_exit = check_exit
         self.captured: list[list[str]] = []
         self.streamed: list[list[str]] = []
         self.env_files: list[str] = []  # decoded env-file bodies staged on target
@@ -357,10 +266,6 @@ class ResticExecutor:
                 return CaptureResult(self.backup_exit, self.backup_stdout, "")
             if sub == "snapshots":
                 return CaptureResult(0, "ID  Host  Tags\n1a2b3c4d srv fdm-config-tier", "")
-            if sub == "forget":
-                return CaptureResult(self.forget_exit, self.forget_stdout, "")
-            if sub == "check":
-                return CaptureResult(self.check_exit, self.check_stdout, "")
         raise AssertionError(f"unexpected capture {argv}")
 
     async def run(self, argv, *, cwd, run_as, on_line, cancel_check):
@@ -402,16 +307,11 @@ def _target(db):
     return t.id
 
 
-def _repo(
-    db, server_id, target_id, *, initialized=False, prefix="restic/server",
-    keep_daily=None, keep_weekly=None, keep_monthly=None, check_read_data_subset=None,
-):
+def _repo(db, server_id, target_id, *, initialized=False, prefix="restic/server"):
     secrets = get_secrets_service()
     r = ResticRepo(
         server_id=server_id, storage_target_id=target_id, prefix=prefix,
         password_enc=secrets.encrypt(PASSWORD), initialized=initialized,
-        keep_daily=keep_daily, keep_weekly=keep_weekly, keep_monthly=keep_monthly,
-        check_read_data_subset=check_read_data_subset,
     )
     db.add(r)
     db.commit()
@@ -584,194 +484,6 @@ def test_install_action_installs_when_absent(sf):
 
 
 # --------------------------------------------------------------------------- #
-# 4.2 action execution: restic.forget + restic.check
-# --------------------------------------------------------------------------- #
-
-
-def test_forget_action_applies_retention_and_records_evidence(sf):
-    with sf() as db:
-        sid = _server(db)
-        tid = _target(db)
-        _repo(db, sid, tid, initialized=True, keep_daily=7, keep_weekly=4)
-    ex = ResticExecutor()
-    job_id = _run(
-        sf, action="restic.forget", server_id=sid,
-        params={"repo": "s3:https://minio.local:9000/fdm/restic/server"}, executor=ex,
-    )
-    with sf() as db:
-        assert db.get(CommandJob, job_id).status == "success"
-        repo = db.scalars(select(ResticRepo)).first()
-        assert repo.last_forget_at is not None
-    forget_argv = next(
-        a for a in ex.captured
-        if a[:3] == ["bash", "-c", _RESTIC_ENV_WRAP] and "forget" in a
-    )
-    assert "--prune" in forget_argv
-    assert forget_argv[forget_argv.index("--keep-daily") + 1] == "7"
-    assert forget_argv[forget_argv.index("--keep-weekly") + 1] == "4"
-    assert "--keep-monthly" not in forget_argv
-    _no_secret_on_any_argv(ex)
-    # runner.create() audits every job launch (rule 2) — this run is no exception.
-    with sf() as db:
-        assert db.scalars(
-            select(AuditLog).where(AuditLog.job_id == job_id)
-        ).first() is not None
-
-
-def test_forget_action_refuses_with_no_retention_policy(sf):
-    with sf() as db:
-        sid = _server(db)
-        tid = _target(db)
-        _repo(db, sid, tid, initialized=True)  # no keep_* set at all
-    ex = ResticExecutor()
-    job_id = _run(
-        sf, action="restic.forget", server_id=sid,
-        params={"repo": "s3:https://minio.local:9000/fdm/restic/server"}, executor=ex,
-    )
-    with sf() as db:
-        assert db.get(CommandJob, job_id).status == "failure"
-        assert db.scalars(select(ResticRepo)).first().last_forget_at is None
-    # The action refused before ever running restic forget on the target.
-    assert not any(
-        a[:3] == ["bash", "-c", _RESTIC_ENV_WRAP] and "forget" in a for a in ex.captured
-    )
-
-
-def test_forget_action_refuses_when_not_initialized(sf):
-    with sf() as db:
-        sid = _server(db)
-        tid = _target(db)
-        _repo(db, sid, tid, initialized=False, keep_daily=7)
-    job_id = _run(
-        sf, action="restic.forget", server_id=sid,
-        params={"repo": "s3:https://minio.local:9000/fdm/restic/server"},
-        executor=ResticExecutor(),
-    )
-    with sf() as db:
-        assert db.get(CommandJob, job_id).status == "failure"
-
-
-def test_check_action_passes_and_records_timestamp(sf):
-    with sf() as db:
-        sid = _server(db)
-        tid = _target(db)
-        _repo(db, sid, tid, initialized=True)
-    ex = ResticExecutor(check_stdout="create exclusive lock\nno errors were found\n")
-    job_id = _run(
-        sf, action="restic.check", server_id=sid,
-        params={"repo": "s3:https://minio.local:9000/fdm/restic/server"}, executor=ex,
-    )
-    with sf() as db:
-        assert db.get(CommandJob, job_id).status == "success"
-        repo = db.scalars(select(ResticRepo)).first()
-        assert repo.last_check_at is not None
-        assert repo.last_check_ok is True
-        assert repo.last_check_message == "no errors were found"
-        # No breach alert on a clean check.
-        assert db.scalars(select(Notification)).all() == []
-    _no_secret_on_any_argv(ex)
-
-
-def test_check_action_with_read_data_subset_passes_the_selector(sf):
-    with sf() as db:
-        sid = _server(db)
-        tid = _target(db)
-        _repo(db, sid, tid, initialized=True, check_read_data_subset="5%")
-    ex = ResticExecutor()
-    _run(
-        sf, action="restic.check", server_id=sid,
-        params={"repo": "s3:https://minio.local:9000/fdm/restic/server"}, executor=ex,
-    )
-    check_argv = next(
-        a for a in ex.captured
-        if a[:3] == ["bash", "-c", _RESTIC_ENV_WRAP] and "check" in a
-    )
-    assert check_argv[-2:] == ["--read-data-subset", "5%"]
-
-
-def test_check_action_failure_records_evidence_and_fires_alert(sf):
-    """An induced failed check (session 4.2 acceptance): the job fails, the
-    evidence stamps a failure, and a `backup.check_failed` alert reaches every
-    active user's in-app feed — the same 2.8 dispatch channel `config.drift`
-    already uses, not a forked alert path."""
-    with sf() as db:
-        sid = _server(db, name="prod-1")
-        tid = _target(db)
-        _repo(db, sid, tid, initialized=True)
-        from app.models.auth import Role, User
-
-        role = Role(name="Admin", permissions=["server:manage"])
-        db.add(role)
-        db.commit()
-        user = User(
-            email="ops@example.com", role_id=role.id, is_active=True,
-            password_hash="x", full_name="Ops",
-        )
-        db.add(user)
-        db.commit()
-    ex = ResticExecutor(
-        check_exit=1,
-        check_stdout="pack 1a2b3c4d: damaged\nCheck failed: 1 error(s)",
-    )
-    job_id = _run(
-        sf, action="restic.check", server_id=sid,
-        params={"repo": "s3:https://minio.local:9000/fdm/restic/server"}, executor=ex,
-    )
-    with sf() as db:
-        job = db.get(CommandJob, job_id)
-        assert job.status == "failure"
-        # A deterministic damage result is NOT auto-retried (DOO-1034): the
-        # check ran and reproduced damage, so retrying would only repeat the
-        # hours-long `--read-data-subset` re-read for the same answer.
-        assert job.retry_count == 0
-        repo = db.scalars(select(ResticRepo)).first()
-        assert repo.last_check_at is not None
-        assert repo.last_check_ok is False
-        assert "damaged" in repo.last_check_message.lower()
-        # Exactly ONE `backup.check_failed` alert per active user for the single
-        # failed event — i.e. the dispatcher fires once (one fan-out), not once
-        # per retry attempt (the pre-DOO-1034 defect re-dispatched on all 4).
-        # (The orthogonal `job.failure` alert `_to_terminal` emits is excluded.)
-        from app.models.auth import User
-
-        active_users = db.scalars(
-            select(User).where(User.is_active.is_(True))
-        ).all()
-        check_notifs = db.scalars(
-            select(Notification).where(
-                Notification.event_type == "backup.check_failed"
-            )
-        ).all()
-        assert len(check_notifs) == len(active_users)
-        notif = check_notifs[0]
-        assert notif.event_type == "backup.check_failed"
-        assert "prod-1" in notif.title
-        # The alert body names the failure reason, never raw restic output that
-        # could in principle carry a path/credential fragment.
-        assert notif.body
-    # And the expensive `restic check` itself is invoked exactly once, not 4×.
-    check_calls = [
-        a for a in ex.captured
-        if a[:3] == ["bash", "-c", _RESTIC_ENV_WRAP] and "check" in a
-    ]
-    assert len(check_calls) == 1
-
-
-def test_check_action_refuses_when_not_initialized(sf):
-    with sf() as db:
-        sid = _server(db)
-        tid = _target(db)
-        _repo(db, sid, tid, initialized=False)
-    job_id = _run(
-        sf, action="restic.check", server_id=sid,
-        params={"repo": "s3:https://minio.local:9000/fdm/restic/server"},
-        executor=ResticExecutor(),
-    )
-    with sf() as db:
-        assert db.get(CommandJob, job_id).status == "failure"
-
-
-# --------------------------------------------------------------------------- #
 # API surface (configure + job launches + RBAC)
 # --------------------------------------------------------------------------- #
 
@@ -880,7 +592,7 @@ def test_readonly_cannot_configure_or_backup(rc_client, db_session, api_env):
         json={"storage_target_id": api_env["target_id"], "password": PASSWORD}, headers=h,
     )
     assert put.status_code == 403
-    for path in ("install", "init", "backup", "snapshots", "forget", "check"):
+    for path in ("install", "init", "backup", "snapshots"):
         resp = rc_client.post(
             f"/api/servers/{api_env['server_id']}/restic-repo/{path}", headers=h
         )
@@ -895,125 +607,3 @@ def test_readonly_can_view_evidence(rc_client, db_session, api_env):
     assert resp.json()["kind"] == "config"
     lst = rc_client.get("/api/restic-repos")
     assert lst.status_code == 200 and len(lst.json()) == 1
-
-
-# --------------------------------------------------------------------------- #
-# 4.2 API surface: retention config + forget/check job launches
-# --------------------------------------------------------------------------- #
-
-
-def test_configure_persists_retention_policy_and_check_subset(rc_client, db_session, api_env):
-    login(rc_client, "developer@example.com")
-    resp = rc_client.put(
-        f"/api/servers/{api_env['server_id']}/restic-repo",
-        json={
-            "storage_target_id": api_env["target_id"],
-            "password": PASSWORD,
-            "keep_daily": 7,
-            "keep_weekly": 4,
-            "check_read_data_subset": "5%",
-        },
-        headers=csrf_headers(rc_client),
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["keep_daily"] == 7
-    assert body["keep_weekly"] == 4
-    assert body["keep_monthly"] is None
-    assert body["check_read_data_subset"] == "5%"
-    audits = db_session.scalars(
-        select(AuditLog).where(AuditLog.action == "restic.repo.configure")
-    ).all()
-    assert audits[-1].params_masked.get("keep_daily") == 7
-
-
-def test_configure_rejects_bad_read_data_subset(rc_client, db_session, api_env):
-    login(rc_client, "developer@example.com")
-    resp = rc_client.put(
-        f"/api/servers/{api_env['server_id']}/restic-repo",
-        json={
-            "storage_target_id": api_env["target_id"],
-            "password": PASSWORD,
-            "check_read_data_subset": "5%; rm -rf /",
-        },
-        headers=csrf_headers(rc_client),
-    )
-    assert resp.status_code == 422
-
-
-def test_forget_endpoint_launches_job(rc_client, db_session, api_env):
-    _repo(
-        db_session, api_env["server_id"], api_env["target_id"],
-        initialized=True, keep_daily=7, keep_weekly=4, keep_monthly=6,
-    )
-    login(rc_client, "developer@example.com")
-    resp = rc_client.post(
-        f"/api/servers/{api_env['server_id']}/restic-repo/forget",
-        headers=csrf_headers(rc_client),
-    )
-    assert resp.status_code == 201, resp.text
-    job = db_session.scalars(
-        select(CommandJob).where(CommandJob.action_name == "restic.forget")
-    ).first()
-    assert job is not None
-    # DOO-1105: the effective keep-policy is recorded alongside the repo so the
-    # forget evidence chain answers "what retention governed this prune?" from
-    # the audit alone. Rendered dims are stringified positive ints (non-secret).
-    assert set(job.params_sanitized) == {"repo", "keep_daily", "keep_weekly", "keep_monthly"}
-    assert job.params_sanitized["keep_daily"] == "7"
-    assert job.params_sanitized["keep_weekly"] == "4"
-    assert job.params_sanitized["keep_monthly"] == "6"
-    # runner.create() funnels params_sanitized straight into the AuditLog
-    # (already_masked=True), so params_masked carries the same keep dims — and
-    # mask_params never blanks them ("keep" contains no sensitive token).
-    audit = db_session.scalars(
-        select(AuditLog).where(AuditLog.job_id == job.id)
-    ).first()
-    assert audit is not None
-    assert audit.params_masked.get("keep_daily") == "7"
-    assert audit.params_masked.get("keep_weekly") == "4"
-    assert audit.params_masked.get("keep_monthly") == "6"
-
-
-def test_forget_endpoint_422_without_retention_policy(rc_client, db_session, api_env):
-    _repo(db_session, api_env["server_id"], api_env["target_id"], initialized=True)
-    login(rc_client, "developer@example.com")
-    resp = rc_client.post(
-        f"/api/servers/{api_env['server_id']}/restic-repo/forget",
-        headers=csrf_headers(rc_client),
-    )
-    assert resp.status_code == 422
-
-
-def test_forget_endpoint_422_when_not_initialized(rc_client, db_session, api_env):
-    _repo(db_session, api_env["server_id"], api_env["target_id"], initialized=False, keep_daily=7)
-    login(rc_client, "developer@example.com")
-    resp = rc_client.post(
-        f"/api/servers/{api_env['server_id']}/restic-repo/forget",
-        headers=csrf_headers(rc_client),
-    )
-    assert resp.status_code == 422
-
-
-def test_check_endpoint_launches_job(rc_client, db_session, api_env):
-    _repo(db_session, api_env["server_id"], api_env["target_id"], initialized=True)
-    login(rc_client, "developer@example.com")
-    resp = rc_client.post(
-        f"/api/servers/{api_env['server_id']}/restic-repo/check",
-        headers=csrf_headers(rc_client),
-    )
-    assert resp.status_code == 201, resp.text
-    job = db_session.scalars(
-        select(CommandJob).where(CommandJob.action_name == "restic.check")
-    ).first()
-    assert job is not None
-
-
-def test_check_endpoint_422_when_not_initialized(rc_client, db_session, api_env):
-    _repo(db_session, api_env["server_id"], api_env["target_id"], initialized=False)
-    login(rc_client, "developer@example.com")
-    resp = rc_client.post(
-        f"/api/servers/{api_env['server_id']}/restic-repo/check",
-        headers=csrf_headers(rc_client),
-    )
-    assert resp.status_code == 422

@@ -7,6 +7,8 @@
 - POST /api/servers/{id}/restic-repo/init         `restic init` -> job
 - POST /api/servers/{id}/restic-repo/backup       config-tier snapshot -> job
 - POST /api/servers/{id}/restic-repo/snapshots    evidence listing -> job
+- POST /api/servers/{id}/restic-repo/forget       retention prune -> job (4.2)
+- POST /api/servers/{id}/restic-repo/check        integrity check -> job (4.2)
 
 Reading is READ-visible so the §6 backup-evidence view can render the config
 kind/storage chip for everyone. Every mutation (configure + the three job
@@ -164,21 +166,19 @@ def configure_repo(
         repo = ResticRepo(server_id=server_id)
         db.add(repo)
 
-    try:
-        check_subset = rst.validate_read_data_subset(body.check_read_data_subset)
-    except rst.ResticError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
     repo.storage_target_id = target.id
     repo.prefix = prefix
-    repo.keep_daily = body.keep_daily
-    repo.keep_weekly = body.keep_weekly
-    repo.keep_monthly = body.keep_monthly
-    repo.check_read_data_subset = check_subset
     password_action = "unchanged"
     if body.password:
         repo.password_enc = secrets.encrypt(body.password)
         password_action = "set"
+    # Retention policy is a full replace from the body (PUT semantics): the client
+    # sends the desired keep-* set; None on a dimension clears it. All-None leaves
+    # the repo with no policy and the forget action will refuse to prune.
+    repo.retention_keep_last = body.retention_keep_last
+    repo.retention_keep_daily = body.retention_keep_daily
+    repo.retention_keep_weekly = body.retention_keep_weekly
+    repo.retention_keep_monthly = body.retention_keep_monthly
     db.commit()
     db.refresh(repo)
 
@@ -197,10 +197,7 @@ def configure_repo(
             # defensive key-name masking (any key containing "password"/"key"/
             # "secret") never blanks it — the value carries no credential.
             "credential_state": password_action,
-            "keep_daily": repo.keep_daily,
-            "keep_weekly": repo.keep_weekly,
-            "keep_monthly": repo.keep_monthly,
-            "check_read_data_subset": repo.check_read_data_subset,
+            "retention": repo.retention_summary or "none",
         },
     )
     return _out(db, repo)
@@ -352,41 +349,30 @@ def list_snapshots(server_id: int, db: DbSession, runner: Runner, user: CurrentU
     status_code=201,
     response_model=JobDetail,
 )
-def forget_prune(server_id: int, db: DbSession, runner: Runner, user: CurrentUser):
-    """Apply the repo's retention policy (`restic forget --prune`, session 4.2)
-    → returns the enqueued job. Rejected 422 up front when no keep_daily/
-    weekly/monthly dimension is set — the same guard `ResticForgetAction` itself
-    enforces, checked here too so a manual click gets an immediate, specific
-    error instead of a job that fails after enqueue."""
-    # Enforce permission before any repo/retention validation so a caller
-    # without server:manage can't distinguish repo state via a 422 vs a 403.
-    _require_action_permission(user, FORGET_ACTION)
+def forget_config(server_id: int, db: DbSession, runner: Runner, user: CurrentUser):
+    """Apply the repo's retention policy and prune (`restic forget --prune`) →
+    returns the enqueued job. DESTRUCTIVE (deletes snapshots): the action never
+    auto-retries and refuses to run when no retention policy is set. 422 here if
+    the repo is not initialised or has no policy configured."""
     _server_or_404(db, server_id)
     repo = _repo_or_404(db, server_id)
     repo_uri = _repo_uri_or_422(db, repo)
     if not repo.initialized:
         raise HTTPException(
             status_code=422,
-            detail="This restic repo is not initialised — run init before forget --prune.",
+            detail="This restic repo is not initialised — nothing to prune.",
         )
-    try:
-        rst.forget_keep_args(repo)
-    except rst.ResticError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not repo.retention_configured:
+        raise HTTPException(
+            status_code=422,
+            detail="No retention policy is configured — set at least one "
+            "keep-last/daily/weekly/monthly value before pruning.",
+        )
     return _launch(
         db, runner, user,
         server_id=server_id,
         action_name=FORGET_ACTION,
-        # Record the effective keep-policy alongside the repo so the forget
-        # audit answers "what retention governed this prune?" on its own —
-        # non-secret ints, already surfaced in restic.repo.configure; the
-        # key names don't match mask_params' sensitive tokens ("keep" ≠ "key").
-        params={
-            "repo": repo_uri,
-            "keep_daily": repo.keep_daily,
-            "keep_weekly": repo.keep_weekly,
-            "keep_monthly": repo.keep_monthly,
-        },
+        params={"repo": repo_uri},
         conflict_msg="A restic job is already running on this server.",
     )
 
@@ -396,26 +382,22 @@ def forget_prune(server_id: int, db: DbSession, runner: Runner, user: CurrentUse
     status_code=201,
     response_model=JobDetail,
 )
-def check_integrity(server_id: int, db: DbSession, runner: Runner, user: CurrentUser):
-    """Verify repo integrity (`restic check`, session 4.2) → returns the
-    enqueued job. A failed check still completes the job launch here (the
-    failure surfaces as evidence + an alert once the job runs, not at
-    launch time)."""
-    # Enforce permission before any repo/state validation so a caller without
-    # server:manage can't distinguish repo state via a 422 vs a 403.
-    _require_action_permission(user, CHECK_ACTION)
+def check_repo(server_id: int, db: DbSession, runner: Runner, user: CurrentUser):
+    """Verify repository integrity (`restic check --read-data-subset`) → returns
+    the enqueued job. The action records the result on the repo and raises a
+    breach alert on a genuine failure. 422 if the repo is not initialised."""
     _server_or_404(db, server_id)
     repo = _repo_or_404(db, server_id)
     repo_uri = _repo_uri_or_422(db, repo)
     if not repo.initialized:
         raise HTTPException(
             status_code=422,
-            detail="This restic repo is not initialised — run init before a check.",
+            detail="This restic repo is not initialised — nothing to check.",
         )
     return _launch(
         db, runner, user,
         server_id=server_id,
         action_name=CHECK_ACTION,
-        params={"repo": repo_uri},
+        params={"repo": repo_uri, "subset": rst.DEFAULT_CHECK_SUBSET},
         conflict_msg="A restic job is already running on this server.",
     )
