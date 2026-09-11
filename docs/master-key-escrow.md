@@ -246,42 +246,53 @@ Signed off by: __________________________  Date: ______________
 > backup id, its `kdf_salt`, the checksum-match line, the `pg_restore --list` entry
 > count, and the SSH-decrypt confirmation.
 
-**6.3 build cryptographic dry run — 2026-07-24, DOO-257.** Real
-`app.core.platform_backup` code path; only `pg_dump`/`pg_restore` were stubbed
-(client binaries absent in the build workspace — that leg runs on the DOO-36 live
-target). Proves the security-critical chain: a real Fernet-encrypted SSH
-credential survived backup → passphrase-encrypt → archive → download → verify →
-restore and decrypted with the *escrowed* master key.
+**Full live drill — 2026-09-11, DOO-257.** Real `pg_dump`/`pg_restore` (matching
+client/server major version), the real `platform.self_backup` /
+`platform.self_backup_verify` jobs run through `JobRunner` end to end, and the
+real local MinIO target (`fdm-backups` bucket on `127.0.0.1:9101`) named in the
+acceptance criteria — no fakes/stubs anywhere in this run. The uploaded object
+was independently re-fetched straight from MinIO (outside the job) before the
+verify job ran, and every job log line was scanned for both secret values.
 
 ```
-== 1. Self-backup: dump -> archive -> encrypt(passphrase) -> upload ==
-  encrypted sha256 : 0df00aaddcf04cd96334766e1b9f4689283b7d77c17c2298297b9b0460b3686d
-  plaintext sha256 : b3047a45d1899190c7a1fb1830e88d62d4f94101344988a11825f23ef209603d
-  kdf_salt (stored): e74423d7764708b3ba52e42d268d73bf
+== 1. Running REAL platform.self_backup job (real pg_dump + real MinIO) ==
+  job status         : success
+  backup status       : success
+  encrypted sha256    : a8d4e76593df25d0b3f3ec6f585ffce1e153962f60231f6d0c90ff9a58bd9ca2
+  plaintext sha256    : 3bbd5064e098a27602a9b0255b25973a098f0f0b33ba34ce6f7c958176d77231
+  kdf_salt            : 25ef799cabb95874ff3ab041a5f07c1b
+  object_key          : platform-backup-1/platform-backup-1.tar.gz.enc
 
-== 2. Security invariant: neither secret appears in the encrypted object ==
-  FDM_SECRET_KEY value in encrypted archive?        False
-  FDM_BACKUP_PASSPHRASE value in encrypted archive? False
+== 2. Independently fetching the uploaded object straight from MinIO ==
+  downloaded bytes    : 2212
+  FDM_SECRET_KEY value in encrypted object? False
+  FDM_BACKUP_PASSPHRASE value in encrypted object? False
 
-== 3. Verify job: download -> checksum -> decrypt(passphrase+salt) -> read TOC ==
-  verify ok: True
-  detail   : checksum matched; archive decrypted; pg_restore --list read 2 entrie(s) — structure intact
+== 3. Running REAL platform.self_backup_verify job (download+checksum+pg_restore --list) ==
+  verify job status   : success
+  verify_status       : verified
+  verified_at         : 2026-09-11 03:09:37.023626
 
-== 4. RESTORE on a 'fresh host': decrypt archive with ESCROWED passphrase, unpack dump ==
-  archive decrypted with escrowed passphrase: OK (542 byte dump recovered)
+== 4. RESTORE on a fresh scratch DB using the ESCROWED passphrase ==
+  archive decrypted with escrowed passphrase: OK (3170 byte dump recovered)
   restored .env has FDM_SECRET_KEY stripped : True
+  real pg_restore into fresh DB exit code    : 0
 
-== 5. PROOF: a real SSH credential decrypts with the ESCROWED master key ==
-  decrypt stored SSH cred with escrowed FDM_SECRET_KEY: SUCCESS
+== 5. PROOF: the SSH credential row survived pg_dump -> pg_restore and decrypts with the ESCROWED key ==
+  decrypt restored row with escrowed FDM_SECRET_KEY: SUCCESS
   recovered plaintext head: -----BEGIN OPENSSH PRIVATE KEY-----
-  wrong-key decrypt: correctly REFUSED (InvalidToken)
+  wrong-key decrypt: correctly REFUSED (SecretKeyError)
 
-== DRILL RESULT: PASS ==
+== DRILL RESULT: PASS (real pg_dump, real MinIO upload/download, real pg_restore, real decrypt) ==
 ```
 
-> **Still owed on a real host (DOO-36 live target):** the operator-facing legs that
-> need `postgresql-client` + a running platform — real `pg_dump --format=custom`,
-> real `pg_restore` into a fresh Postgres, and a live **Test Connection** green tick
-> — plus provisioning MinIO egress. Run the full Section 4 drill there and replace
-> this record with that output.
+Also grepped: the job's `LogEntry` rows (both jobs) and the raw bytes of the
+uploaded MinIO object never contain the `FDM_SECRET_KEY` or
+`FDM_BACKUP_PASSPHRASE` values — asserted in-script, not just eyeballed.
+
+> Prior record (2026-07-24, cryptographic dry run with `pg_dump`/`pg_restore`
+> stubbed — client binaries were absent in that build workspace) is superseded by
+> the full live run above. A real production host still needs a **Test
+> Connection** green tick and provisioned MinIO egress before this becomes the
+> operator's actual restore procedure; see Section 4 for the manual steps.
 
