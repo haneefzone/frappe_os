@@ -8,7 +8,7 @@ columns on the `platform_settings` singleton (`master_key_escrow_confirmed_at`
 / `_by`) driving the persistent, non-dismissable master-key escrow banner.
 
 Revision ID: d1c3b5a7e9f2
-Revises: c3d9a1f5e6b8
+Revises: b4e7c2a9d1f3
 Create Date: 2026-07-23 00:00:00.000000
 
 """
@@ -20,7 +20,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = 'd1c3b5a7e9f2'
-down_revision: str | Sequence[str] | None = 'c3d9a1f5e6b8'
+down_revision: str | Sequence[str] | None = 'b4e7c2a9d1f3'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
