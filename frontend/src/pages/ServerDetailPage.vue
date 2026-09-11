@@ -59,7 +59,28 @@
         </div>
       </div>
 
-      <div v-else-if="server" class="grid max-w-4xl gap-6 lg:grid-cols-2">
+      <div v-else-if="server">
+        <!-- Tab bar: Overview | Packages & Tools -->
+        <div role="tablist" class="mb-6 flex gap-1 border-b border-line">
+          <button
+            v-for="t in serverTabs"
+            :key="t.key"
+            role="tab"
+            type="button"
+            :aria-selected="serverTab === t.key"
+            class="fdm-focus -mb-px rounded-t px-3 py-2 text-label transition"
+            :class="
+              serverTab === t.key
+                ? 'border-b-2 border-ink-1 font-medium text-ink-1'
+                : 'text-ink-3 hover:text-ink-2'
+            "
+            @click="serverTab = t.key"
+          >
+            {{ t.label }}
+          </button>
+        </div>
+
+        <div v-show="serverTab === 'overview'" class="grid max-w-4xl gap-6 lg:grid-cols-2">
         <!-- Per-server rollup (session 2.6, B4.2): KPIs for this server only -->
         <section v-if="rollupCards.length" aria-label="Server summary" class="grid gap-4 sm:grid-cols-2 lg:col-span-2 lg:grid-cols-4">
           <KPICard
@@ -238,6 +259,12 @@
             />
           </div>
         </section>
+        </div>
+
+        <!-- Packages & Tools tab -->
+        <div v-show="serverTab === 'packages'" class="max-w-4xl">
+          <ToolsChecklist :server-id="serverId" />
+        </div>
       </div>
     </div>
 
@@ -290,6 +317,7 @@ import {
 } from '../api/servers'
 import { driftApi, type DriftBaseline } from '../api/drift'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import ToolsChecklist from '../components/ToolsChecklist.vue'
 import DriftChip from '../components/DriftChip.vue'
 import DriftDrawer from '../components/DriftDrawer.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
@@ -313,6 +341,14 @@ const jobsStore = useJobsStore()
 const canManage = auth.hasPermission('server:manage')
 
 const serverId = Number(route.params.id)
+
+// ── Server detail tabs ─────────────────────────────────────────────────────
+type ServerTabKey = 'overview' | 'packages'
+const serverTabs: { key: ServerTabKey; label: string }[] = [
+  { key: 'overview', label: 'Overview' },
+  { key: 'packages', label: 'Packages & Tools' },
+]
+const serverTab = ref<ServerTabKey>('overview')
 const launching = ref(false)
 const mariadbPassword = ref('')
 const savingDbPw = ref(false)

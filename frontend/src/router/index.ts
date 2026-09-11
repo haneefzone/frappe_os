@@ -17,6 +17,7 @@ import SecurityPage from '../pages/SecurityPage.vue'
 import SettingsPage from '../pages/SettingsPage.vue'
 import SitesPage from '../pages/SitesPage.vue'
 import TerminalPage from '../pages/TerminalPage.vue'
+import ToolsPage from '../pages/ToolsPage.vue'
 
 // Real screens replace the placeholder as each session lands one.
 const pageOverrides: Record<string, Component> = {
@@ -35,6 +36,7 @@ const pageOverrides: Record<string, Component> = {
   'audit-log': AuditPage,
   security: SecurityPage,
   settings: SettingsPage,
+  tools: ToolsPage,
 }
 
 // One route per sidebar item; unbuilt ones render the placeholder.
