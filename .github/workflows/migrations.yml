@@ -1,0 +1,56 @@
+# Regression guard for the alembic migration chain (DOO-1155).
+#
+# The DOO-1155 install failure — two migrations adding restic_repos.last_check_ok
+# after the DOO-1065/DOO-1119 reconcile linearised both migration lines — was
+# invisible to the suite because tests build schema from Base.metadata, never
+# replaying migrations. This job runs a genuine from-zero `alembic upgrade head`
+# against an empty Postgres on every change to the migration versions (or the
+# guard itself), so a from-scratch install can never silently break again.
+name: migrations
+
+on:
+  push:
+    paths:
+      - "backend/alembic/**"
+      - "backend/tests/test_migration_chain.py"
+      - ".github/workflows/migrations.yml"
+  pull_request:
+    paths:
+      - "backend/alembic/**"
+      - "backend/tests/test_migration_chain.py"
+      - ".github/workflows/migrations.yml"
+
+jobs:
+  from-zero-upgrade:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: fdm
+          POSTGRES_PASSWORD: fdm
+          POSTGRES_DB: fdm_migrations_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fdm"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Set up Python + deps
+        working-directory: backend
+        run: |
+          uv venv --python 3.12
+          uv pip install -e '.[dev]'
+      - name: Run migration-chain regression guard (static + live from-zero)
+        working-directory: backend
+        env:
+          # The live layer drops schema public on this DISPOSABLE CI database and
+          # replays the whole chain from an empty DB.
+          MIGRATION_TEST_DATABASE_URL: postgresql+psycopg://fdm:fdm@localhost:5432/fdm_migrations_ci
+        run: |
+          .venv/bin/pytest tests/test_migration_chain.py -v
