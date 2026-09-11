@@ -14,8 +14,20 @@
         <h1 class="truncate text-lg font-semibold text-ink-1">{{ server?.name ?? 'Server' }}</h1>
         <EnvironmentBadge v-if="server" :env="server.env_tag" />
       </div>
-      <div v-if="server && canManage" class="flex shrink-0 items-center gap-2">
+      <div v-if="server && (canManage || canGenerateRunbook)" class="flex shrink-0 items-center gap-2">
         <Button
+          v-if="canGenerateRunbook"
+          variant="subtle"
+          theme="gray"
+          :label="generatingRunbook ? 'Generating…' : 'Generate DR runbook'"
+          :loading="generatingRunbook"
+          title="Download a disaster-recovery runbook (PDF) for this server. Secrets are never included."
+          @click="generateRunbook"
+        >
+          <template #prefix><LucideFileText class="h-4 w-4" /></template>
+        </Button>
+        <Button
+          v-if="canManage"
           variant="subtle"
           theme="gray"
           :label="launching ? 'Starting…' : 'Run demo job'"
@@ -25,6 +37,7 @@
           <template #prefix><LucidePlay class="h-4 w-4" /></template>
         </Button>
         <Button
+          v-if="canManage"
           variant="subtle"
           theme="gray"
           :label="testing ? 'Testing…' : 'Re-test connection'"
@@ -297,9 +310,11 @@ import { Button } from 'frappe-ui'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import LucideArrowLeft from '~icons/lucide/arrow-left'
+import LucideFileText from '~icons/lucide/file-text'
 import LucideLoader2 from '~icons/lucide/loader-2'
 import LucidePlay from '~icons/lucide/play'
 import LucideRefreshCw from '~icons/lucide/refresh-cw'
+import { generateDrRunbook } from '../api/dr_runbook'
 import { jobsApi } from '../api/jobs'
 import {
   SERVICES,
@@ -339,8 +354,27 @@ const router = useRouter()
 const auth = useAuthStore()
 const jobsStore = useJobsStore()
 const canManage = auth.hasPermission('server:manage')
+// DR runbook generation is a sensitive, escrow-adjacent export — Admin/Developer
+// only (report:generate). The server also enforces this; the button just hides it.
+const canGenerateRunbook = auth.hasPermission('report:generate')
 
 const serverId = Number(route.params.id)
+const generatingRunbook = ref(false)
+
+// Generate + download this server's disaster-recovery runbook (PDF). The runbook
+// masks all secrets and only references the SecretsService escrow by name.
+async function generateRunbook() {
+  if (generatingRunbook.value) return
+  generatingRunbook.value = true
+  try {
+    const { filename } = await generateDrRunbook({ format: 'pdf', server_id: serverId })
+    toast.success(`DR runbook downloaded: ${filename}`)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : 'Could not generate the DR runbook.')
+  } finally {
+    generatingRunbook.value = false
+  }
+}
 
 // ── Server detail tabs ─────────────────────────────────────────────────────
 type ServerTabKey = 'overview' | 'packages'

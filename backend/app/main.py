@@ -21,6 +21,7 @@ from app.api.routes.compliance import router as compliance_router
 from app.api.routes.compliance_reports import router as compliance_reports_router
 from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.domains import router as domains_router
+from app.api.routes.dr_runbook import router as dr_runbook_router
 from app.api.routes.drift import router as drift_router
 from app.api.routes.job_logs import router as job_logs_router
 from app.api.routes.jobs import router as jobs_router
@@ -172,6 +173,7 @@ def create_app() -> FastAPI:
     app.include_router(schedules_router)
     app.include_router(compliance_router)
     app.include_router(compliance_reports_router)
+    app.include_router(dr_runbook_router)
     app.include_router(dashboard_router)
     app.include_router(settings_router)
     app.include_router(storage_targets_router)
