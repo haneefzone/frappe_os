@@ -705,6 +705,7 @@ register(
         requires_lock=True,
         required_permission=BENCH_OPERATE,
         run_as=None,
+        danger_class="update",
     )
 )
 
@@ -899,6 +900,7 @@ register(
         requires_lock=True,
         required_permission=BACKUP_RESTORE,
         run_as=None,
+        danger_class="restore",
         secret_sources={
             # Supplied by the operator (new_site mode), carried encrypted on the job.
             "admin_pw": "job",
@@ -1031,6 +1033,7 @@ register(
         requires_lock=True,
         required_permission=BACKUP_RESTORE,
         run_as=None,
+        danger_class="update",
         secret_sources={
             "admin_pw": "job",
             "db_root_pw": "server:mariadb_root_password_enc",
@@ -1078,6 +1081,7 @@ register(
             ParamSpec("pipeline_id", regex=PIPELINE_ID, required=False),
         ),
         action_class=PromoteUpdateAction,
+        danger_class="update",
         idempotent=False,
         requires_lock=True,
         required_permission=BACKUP_RESTORE,
@@ -1159,6 +1163,7 @@ register(
         requires_lock=True,
         required_permission=BACKUP_RESTORE,
         run_as=None,
+        danger_class="restore",
         secret_sources={
             "admin_pw": "job",
             "db_root_pw": "server:mariadb_root_password_enc",
@@ -1259,6 +1264,7 @@ register(
         requires_lock=True,
         required_permission=BENCH_OPERATE,
         run_as=None,
+        danger_class="production_setup",
         # Production conversion regenerates the root nginx + supervisor config —
         # move those (reduced-fidelity) baselines with the managed change.
         writes_config=("nginx.conf", "supervisor.conf", "supervisor.confd"),
