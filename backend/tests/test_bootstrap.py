@@ -281,3 +281,57 @@ def test_preflight_returns_410_after_setup(fresh_client):
     fresh_client.post("/api/bootstrap/complete", json=COMPLETE_PAYLOAD)
     r = fresh_client.post("/api/bootstrap/preflight")
     assert r.status_code == 410
+
+
+# ---------------------------------------------------------------------------
+# DOO-1076 / ISO A.8.12: unauthenticated preflight must not leak internal
+# config (redis:// URLs with credentials) or raw exception text.
+# ---------------------------------------------------------------------------
+
+def test_redis_host_display_strips_credentials():
+    from app.api.routes.bootstrap import _redis_host_display
+
+    display = _redis_host_display("redis://user:s3cret@redis.internal:6380/0")
+    assert display == "redis.internal:6380"
+    assert "s3cret" not in display
+    assert "user" not in display
+    assert "redis://" not in display
+
+
+def test_redis_host_display_defaults_host_and_port():
+    from app.api.routes.bootstrap import _redis_host_display
+
+    assert _redis_host_display("redis://") == "localhost:6379"
+
+
+def test_check_redis_failure_masks_url_and_exception(monkeypatch):
+    from app.api.routes import bootstrap
+    from app.config import Settings
+
+    def boom(*args, **kwargs):
+        raise ConnectionError("redis://user:s3cret@redis.internal:6379 refused")
+
+    monkeypatch.setattr(bootstrap.redis_lib, "from_url", boom)
+    settings = Settings(redis_url="redis://user:s3cret@redis.internal:6379/0")
+    check = bootstrap._check_redis(settings)
+
+    assert check.ok is False
+    blob = f"{check.detail} {check.hint}"
+    assert "s3cret" not in blob
+    assert "redis://" not in blob
+    assert "refused" not in blob  # no raw exception text
+    assert "redis.internal:6379" in blob  # operator-useful host survives
+
+
+def test_check_db_failure_returns_static_detail():
+    from app.api.routes import bootstrap
+
+    class BoomSession:
+        def execute(self, *args, **kwargs):
+            raise RuntimeError("postgresql://u:p@db.internal/fdm connection failed")
+
+    check = bootstrap._check_db(BoomSession())
+    assert check.ok is False
+    assert check.detail == "Cannot reach database"
+    assert "postgresql://" not in check.detail
+    assert "p@db.internal" not in f"{check.detail} {check.hint}"
