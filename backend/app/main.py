@@ -10,13 +10,13 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app import __version__
 from app.api.routes.ai_settings import router as ai_settings_router
-from app.api.routes.bootstrap import router as bootstrap_router
 from app.api.routes.alerts import router as alerts_router
 from app.api.routes.apps import router as apps_router
 from app.api.routes.audit import router as audit_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.backups import router as backups_router
 from app.api.routes.benches import router as benches_router
+from app.api.routes.bootstrap import router as bootstrap_router
 from app.api.routes.compliance import router as compliance_router
 from app.api.routes.compliance_reports import router as compliance_reports_router
 from app.api.routes.dashboard import router as dashboard_router
