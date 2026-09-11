@@ -816,6 +816,25 @@ def test_node_major_is_resolved_server_side_from_the_matrix(api, db_session, ser
     assert job.params_sanitized["node_major"] == "24"  # the v16 row
 
 
+def test_node_major_reaches_the_rendered_argv_not_just_the_stored_param():
+    """Regression (DOO-1067): the resolved major must actually reach the shell.
+
+    The stored `params_sanitized["node_major"]` being right is NOT enough — the
+    script has to reference the substituted value, not an unset `$NODE_MAJOR`
+    shell var (which `set -u` would abort on, failing every install). Assert the
+    literal major appears in the rendered argv and no NODE_MAJOR shell var
+    survives.
+    """
+    from app.core.commands import get_template
+    from app.core.commands.templates import render
+
+    rendered = render(get_template("tool.install_node"), {"node_major": "24"})
+    script = " ".join(rendered.argv)
+    assert "nvm install \"24\"" in script
+    assert "nvm alias default \"24\"" in script
+    assert "NODE_MAJOR" not in script  # no unset shell var left behind
+
+
 def test_node_install_422s_when_there_is_no_bench_to_resolve_against(api, db_session):
     sid = _seed_server(db_session, benches=0)
     login(api, "admin@example.com")

@@ -1494,9 +1494,11 @@ register(
 #
 # USERSPACE INSTALLS run as the bench-owner SSH user with no sudo at all. They
 # need a shell for pipes and `$HOME`, so they use `bash -lc` with a *fixed,
-# developer-authored* script constant. Note these scripts must not contain `{}`
-# braces: every argv token goes through `_substitute`'s `.format()`, so `$HOME`
-# is written bare, never `${HOME}`.
+# developer-authored* script constant. Every argv token goes through
+# `_substitute`'s `.format()`, so the only braces allowed are intentional
+# `{param}` placeholders for declared, enum-validated params (see install_node's
+# `{node_major}`); a shell brace like `${HOME}` must be written bare (`$HOME`),
+# or `.format()` would raise KeyError.
 
 # Node major versions the matrix can ask for. An enum, so the only values that
 # can reach `nvm install` are the four the CLAUDE.md matrix names. The API
@@ -1570,7 +1572,11 @@ _userspace_tool(
 
 # Node via nvm, per-user. Deliberately does NOT touch the system Node: a bench
 # needs a specific major, and replacing /usr/bin/node would break anything else
-# on the box. The major is an enum-validated argv element.
+# on the box. The major is an enum-validated `{node_major}` placeholder that
+# `render()` substitutes into the script token — NOT the shell var `$NODE_MAJOR`,
+# which nothing sets (there is no env-injection path in render/JobRunner/SSH),
+# so `set -u` would abort. enum=NODE_MAJORS bounds it to bare digits, so the
+# substitution is injection-safe.
 _userspace_tool(
     "tool.install_node",
     "set -euo pipefail; "
@@ -1579,7 +1585,7 @@ _userspace_tool(
     "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash; "
     "fi; "
     ". \"$NVM_DIR/nvm.sh\"; "
-    "nvm install \"$NODE_MAJOR\" && nvm alias default \"$NODE_MAJOR\"",
+    "nvm install \"{node_major}\" && nvm alias default \"{node_major}\"",
     params=(ParamSpec("node_major", enum=NODE_MAJORS),),
 )
 
