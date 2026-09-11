@@ -14,6 +14,7 @@ from app.models.compliance import (
 from app.models.domain import Domain
 from app.models.drift import ConfigBaseline
 from app.models.job import CommandJob, CommandStep, LogEntry
+from app.models.maintenance_window import MaintenanceWindow
 from app.models.mfa import (
     LoginAttempt,
     RecoveryCode,
@@ -26,7 +27,6 @@ from app.models.notification import Notification, NotificationPreference
 from app.models.platform_backup import PlatformBackup
 from app.models.report_run import ReportRun
 from app.models.restic import ResticRepo
-from app.models.maintenance_window import MaintenanceWindow
 from app.models.schedule import Schedule
 from app.models.server import Server, SSHCredential
 from app.models.server_tool import ServerTool
