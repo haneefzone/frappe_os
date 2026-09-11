@@ -113,6 +113,17 @@ class Backup(Base):
     # endpoint ({"database": "prefix/backup-42/…-database.sql.gz", ...}).
     object_keys: Mapped[dict] = mapped_column(ArtifactsJSON, default=dict)
 
+    # --- Cross-server move (session 2.6) ----------------------------------- #
+    # Provenance for a backup copied to this server from another one: the backup
+    # it was moved from and the server that copy came off. Both SET NULL so the
+    # moved copy survives a purge of the source. NULL for an ordinary backup.
+    moved_from_backup_id: Mapped[int | None] = mapped_column(
+        ForeignKey("backups.id", ondelete="SET NULL"), index=True
+    )
+    source_server_id: Mapped[int | None] = mapped_column(
+        ForeignKey("servers.id", ondelete="SET NULL"), index=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

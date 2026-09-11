@@ -23,9 +23,12 @@ dependencies = [
     # app/core/ai.py so the package is only needed when the platform actually
     # calls out; unit tests run against a mocked client.
     "anthropic>=0.69",
+    # PDF generation for compliance report exports (session 4.4).
+    "reportlab>=4.2",
     "argon2-cffi>=23.1",
     "pyjwt>=2.10",
     "email-validator>=2.2",
+    "reportlab>=5.0.0",
 ]
 
 [project.optional-dependencies]
@@ -51,3 +54,8 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

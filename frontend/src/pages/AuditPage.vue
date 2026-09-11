@@ -11,6 +11,9 @@
     </header>
 
     <div class="min-h-0 flex-1 overflow-y-auto p-8">
+      <!-- Compliance report generator (FDM 4.4) — shown to users with report:generate -->
+      <ComplianceReportGenerator v-if="authStore.hasPermission('report:generate')" class="mb-6" />
+
       <!-- Filters -->
       <div class="mb-4 flex flex-wrap items-end gap-3">
         <div>
@@ -117,11 +120,15 @@ import { RouterLink } from 'vue-router'
 import LucideDownload from '~icons/lucide/download'
 import LucideScrollText from '~icons/lucide/scroll-text'
 import { type AuditEntry, type AuditFilters, auditApi } from '../api/audit'
+import ComplianceReportGenerator from '../components/ComplianceReportGenerator.vue'
 import EmptyState from '../components/EmptyState.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { toast } from '../components/toast'
 import type { Status } from '../components/types'
 import { absoluteTime, relativeTime } from '../lib/servers'
+import { useAuthStore } from '../stores/auth'
+
+const authStore = useAuthStore()
 
 const inputAttrs = {
   class:

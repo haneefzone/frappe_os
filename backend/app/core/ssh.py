@@ -17,11 +17,13 @@ from __future__ import annotations
 import asyncio
 import hmac
 import shlex
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 import asyncssh
 
+from app.config import get_settings
 from app.core.security import SecretsService
 from app.models import Server, SSHCredential
 
@@ -44,6 +46,16 @@ class HostKeyMismatch(Exception):
     """The server presented a host key that differs from the pinned one."""
 
 
+class SessionPoolTimeout(Exception):
+    """No SSH session slot became free on a server within the configured wait.
+
+    This is backpressure, not a crash: the host is at its concurrent-session cap
+    and the caller waited (queued) up to the acquire timeout without a slot
+    freeing. Raising here fails one operation cleanly instead of piling more
+    channels onto an already-saturated host or hanging forever.
+    """
+
+
 @dataclass
 class CommandOutput:
     exit_status: int
@@ -63,6 +75,12 @@ class ConnectionCheck:
     tools: dict[str, str | None] = field(default_factory=dict)
     host_key: str | None = None
     error: str | None = None
+
+
+@asynccontextmanager
+async def _null_slot():
+    """A no-op session slot for connections opened outside server accounting."""
+    yield
 
 
 def normalize_host_key(openssh_line: str) -> str:
@@ -89,10 +107,84 @@ class SSHService:
         self,
         secrets: SecretsService,
         connector: Callable[..., Awaitable[asyncssh.SSHClientConnection]] = asyncssh.connect,
+        *,
+        max_sessions_per_server: int | None = None,
+        acquire_timeout: float | None = None,
     ) -> None:
         self._secrets = secrets
         self._connector = connector
         self._pool: dict[int, asyncssh.SSHClientConnection] = {}
+        settings = get_settings()
+        self._default_limit = (
+            max_sessions_per_server
+            if max_sessions_per_server is not None
+            else settings.ssh_max_sessions_per_server
+        )
+        self._acquire_timeout = (
+            acquire_timeout
+            if acquire_timeout is not None
+            else settings.ssh_session_acquire_timeout_seconds
+        )
+        # Per-server session accounting (session 2.6). The semaphore caps how many
+        # AsyncSSH channels run at once on one host; `_active`/`_peak` expose the
+        # live/high-water counts for the per-server dashboard + tests.
+        self._sems: dict[int, asyncio.Semaphore] = {}
+        self._limits: dict[int, int] = {}
+        self._active: dict[int, int] = {}
+        self._peak: dict[int, int] = {}
+
+    # -- connection-pool limits (session 2.6) --------------------------------
+
+    def pool_stats(self, server_id: int) -> dict[str, int]:
+        """Live pool accounting for one server: the cap, the number of sessions
+        in flight right now, and the high-water mark seen. Used by the per-server
+        dashboard rollup and asserted in the pool-limit tests."""
+        return {
+            "limit": self._limits.get(server_id, self._default_limit),
+            "active": self._active.get(server_id, 0),
+            "peak": self._peak.get(server_id, 0),
+        }
+
+    @asynccontextmanager
+    async def limit_sessions(self, server_id: int, limit: int | None = None):
+        """Acquire one session slot on `server_id`, queuing (waiting) if the host
+        is at its cap and raising SessionPoolTimeout only if no slot frees within
+        the acquire timeout. The semaphore is created lazily on first use and its
+        size is fixed for the service's lifetime (a later per-server override
+        takes effect on the next fresh SSHService)."""
+        sem = self._sems.get(server_id)
+        if sem is None:
+            effective = self._default_limit if limit is None else limit
+            effective = max(1, int(effective))
+            sem = asyncio.Semaphore(effective)
+            self._sems[server_id] = sem
+            self._limits[server_id] = effective
+        try:
+            await asyncio.wait_for(sem.acquire(), timeout=self._acquire_timeout)
+        except TimeoutError as exc:
+            raise SessionPoolTimeout(
+                f"No free SSH session slot on server {server_id} within "
+                f"{self._acquire_timeout:.0f}s (cap {self._limits[server_id]}). "
+                "The host is at its concurrent-session limit; the operation was "
+                "not run — retry once current work drains."
+            ) from exc
+        self._active[server_id] = self._active.get(server_id, 0) + 1
+        self._peak[server_id] = max(self._peak.get(server_id, 0), self._active[server_id])
+        try:
+            yield
+        finally:
+            self._active[server_id] -= 1
+            sem.release()
+
+    def _session_slot(self, conn: asyncssh.SSHClientConnection):
+        """Session-slot context for a pooled connection, keyed on the server id
+        stashed at open time. A bare connection with no id (e.g. a hand-built
+        test conn) runs unmetered."""
+        server_id = getattr(conn, "_fdm_server_id", None)
+        if server_id is None:
+            return _null_slot()
+        limit = getattr(conn, "_fdm_session_limit", None)
+        return self.limit_sessions(server_id, limit)
 
     # -- connection management ------------------------------------------------
 
@@ -132,6 +224,10 @@ class SSHService:
                 )
         # Stash what we saw so the caller can pin it on first connect.
         conn._fdm_host_key = presented  # type: ignore[attr-defined]
+        # Stash the server identity + its session cap so every session opened on
+        # this connection is metered against the right per-server semaphore (2.6).
+        conn._fdm_server_id = server.id  # type: ignore[attr-defined]
+        conn._fdm_session_limit = server.ssh_pool_limit or self._default_limit  # type: ignore[attr-defined]
         return conn
 
     async def connect(self, server: Server, cred: SSHCredential) -> asyncssh.SSHClientConnection:
@@ -155,7 +251,8 @@ class SSHService:
         command = shlex.join(argv)
         if cwd is not None:
             command = f"cd {shlex.quote(cwd)} && {command}"
-        result = await conn.run(command, check=False, timeout=timeout)
+        async with self._session_slot(conn):
+            result = await conn.run(command, check=False, timeout=timeout)
         return CommandOutput(
             exit_status=result.exit_status if result.exit_status is not None else -1,
             stdout=(result.stdout or "") if isinstance(result.stdout, str) else "",
@@ -178,13 +275,14 @@ class SSHService:
         conn = await self._open(server, cred)
         self._pool[server.id] = conn
         command = f"cat -- {shlex.quote(path)}"
-        async with conn.create_process(command, encoding=None) as process:
-            while True:
-                chunk = await process.stdout.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
-            await process.wait()
+        async with self._session_slot(conn):
+            async with conn.create_process(command, encoding=None) as process:
+                while True:
+                    chunk = await process.stdout.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+                await process.wait()
 
     @staticmethod
     def _wrap_command(argv: list[str], cwd: str | None, run_as: str | None) -> str:
@@ -228,13 +326,54 @@ class SSHService:
                     process.terminate()
                     return
 
-        async with conn.create_process(command) as process:
-            await asyncio.wait_for(
-                asyncio.gather(pump(process.stdout, "stdout"), pump(process.stderr, "stderr")),
-                timeout=timeout,
-            )
-            await process.wait()
-            return process.exit_status if process.exit_status is not None else -1
+        async with self._session_slot(conn):
+            async with conn.create_process(command) as process:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        pump(process.stdout, "stdout"), pump(process.stderr, "stderr")
+                    ),
+                    timeout=timeout,
+                )
+                await process.wait()
+                return process.exit_status if process.exit_status is not None else -1
+
+    async def read_file(
+        self, conn: asyncssh.SSHClientConnection, path: str, *, chunk_size: int = 65536
+    ) -> AsyncIterator[bytes]:
+        """Yield a remote file's raw bytes over an already-open pooled connection
+        (`cat`, binary-safe), metered against the server's session cap. Used by
+        the offsite upload (2.2) and cross-server move (2.6) read paths."""
+        command = f"cat -- {shlex.quote(path)}"
+        async with self._session_slot(conn):
+            async with conn.create_process(command, encoding=None) as process:
+                while True:
+                    chunk = await process.stdout.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+                await process.wait()
+
+    async def write_file(
+        self,
+        conn: asyncssh.SSHClientConnection,
+        path: str,
+        chunks: AsyncIterator[bytes],
+    ) -> int:
+        """Stream `chunks` into a remote file (`cat > path`, binary-safe) over an
+        open pooled connection, metered against the server's session cap. The
+        destination is shell-quoted as its own argument (rule 1); the platform
+        chooses it, never the user's shell. Returns the process exit status; a
+        non-zero status means the write failed (e.g. permission denied) and the
+        caller must refuse to register the transfer (session 2.6)."""
+        command = f"cat > {shlex.quote(path)}"
+        async with self._session_slot(conn):
+            async with conn.create_process(command, encoding=None) as process:
+                async for chunk in chunks:
+                    process.stdin.write(chunk)
+                    await process.stdin.drain()
+                process.stdin.write_eof()
+                await process.wait()
+                return process.exit_status if process.exit_status is not None else -1
 
     async def check_connection(
         self, server: Server, cred: SSHCredential, emit: Emit | None = None

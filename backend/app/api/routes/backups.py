@@ -45,6 +45,7 @@ from app.schemas.backup import (
     BackupOut,
     CompatibilityOut,
     CreateBackupRequest,
+    MoveBackupRequest,
     RestoreRequest,
 )
 from app.schemas.job import JobDetail
@@ -61,6 +62,7 @@ Secrets = Annotated[SecretsService, Depends(get_secrets_service)]
 BACKUP_ACTION = "site.backup"
 VALIDATE_ACTION = "backup.validate"
 RESTORE_ACTION = "site.restore"
+MOVE_ACTION = "backup.move_across_servers"
 
 RESTORE_MODES = ("same_site", "new_site", "different_bench")
 
@@ -197,6 +199,101 @@ def create_backup(
 
     row.taken_by_job_id = job.id
     db.commit()
+    db.refresh(job)
+    return JobDetail.from_model(job)
+
+
+# --------------------------------------------------------------------------- #
+# Move a backup across servers (session 2.6)
+# --------------------------------------------------------------------------- #
+
+
+@router.post("/backups/{backup_id}/move", status_code=201, response_model=JobDetail)
+def move_backup(
+    backup_id: int,
+    body: MoveBackupRequest,
+    db: DbSession,
+    runner: Runner,
+    user: CurrentUser,
+):
+    """Move an offsite backup onto another server (Developer+, `backup:transfer`).
+
+    The artifacts stream from the backup's S3 target down onto the destination
+    bench's server, each sha256 re-verified on arrival, then a moved Backup copy
+    is registered there. Preconditions (S3 is the cross-server transit medium):
+    the source backup must be a successful, fully-offsite backup. The destination
+    site must already exist on the target bench."""
+    _require_action_permission(user, MOVE_ACTION)
+
+    source = db.get(Backup, backup_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Backup not found.")
+    if source.status != "success":
+        raise HTTPException(
+            status_code=422,
+            detail="Only a successful backup can be moved.",
+        )
+    if source.storage_state != "offsite" or not (source.object_keys and source.storage_target_id):
+        raise HTTPException(
+            status_code=422,
+            detail="This backup is not offsite yet. A cross-server move streams "
+            "the artifacts through the backup's S3 target — push it offsite "
+            "first (Backups → upload to storage), then move it.",
+        )
+
+    source_bench = db.get(Bench, source.bench_id)
+    if source_bench is None:  # pragma: no cover - FK-guaranteed
+        raise HTTPException(status_code=404, detail="Source backup's bench is missing.")
+
+    dest_bench = db.get(Bench, body.target_bench_id)
+    if dest_bench is None:
+        raise HTTPException(status_code=404, detail="Destination bench not found.")
+    if dest_bench.server_id == source_bench.server_id:
+        raise HTTPException(
+            status_code=422,
+            detail="The backup is already on that server. Pick a bench on a "
+            "different server to move it across.",
+        )
+
+    source_site = db.get(Site, source.site_id)
+    site_name = body.target_site or (source_site.name if source_site else None)
+    if not site_name:  # pragma: no cover - source site FK-guaranteed
+        raise HTTPException(status_code=422, detail="Could not determine the target site name.")
+    dest_site = db.scalars(
+        select(Site).where(Site.bench_id == dest_bench.id, Site.name == site_name)
+    ).first()
+    if dest_site is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Site {site_name!r} does not exist on the destination bench "
+            f"{dest_bench.name!r}. Create it there first, then move the backup onto it.",
+        )
+
+    dest_dir = posixpath.join(dest_bench.path, "sites", dest_site.name, "private", "backups")
+    try:
+        job = runner.create(
+            db,
+            action_name=MOVE_ACTION,
+            server_id=dest_bench.server_id,
+            target_type="site",
+            target_id=f"{dest_bench.path}::{dest_site.name}",
+            params={
+                "backup_id": str(source.id),
+                "storage_target_id": str(source.storage_target_id),
+                "dest_dir": dest_dir,
+                "target_site": dest_site.name,
+                "target_bench_id": str(dest_bench.id),
+            },
+            priority=body.priority,
+            created_by=user.id,
+        )
+    except RenderError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LockConflict as exc:
+        return _conflict(
+            exc, f"A job is already running on site {dest_site.name!r} on the destination."
+        )
+
     db.refresh(job)
     return JobDetail.from_model(job)
 

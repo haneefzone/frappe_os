@@ -1,4 +1,4 @@
-"""Operator-editable platform settings (session 1.12 Settings page).
+"""Operator-editable platform settings (session 1.12 Settings page, extended 6.6).
 
 A single row (`id == 1`) holds the white-label + defaults layer that the UI reads
 at runtime: the product name and logo that replace the sidebar branding, the
@@ -6,6 +6,10 @@ default timezone, and the defaults the Create-Bench wizard pre-fills (bench base
 path, port range). These are distinct from `app.config.Settings` (env-driven
 secrets/infra, immutable at runtime) — this row is the handful of values a
 non-technical operator changes from the UI without touching the environment.
+
+Session 6.6 extends the brand layer with: dark-theme logo variant, favicon,
+accent colour, support link, and footer text. Status colours are always fixed —
+a brand may not repaint ok/warn/err/info (uiux-spec B1.5).
 
 `get_or_create(db)` returns the singleton, materialising it with shipped defaults
 on first read so the app works before anyone visits Settings.
@@ -30,12 +34,36 @@ class PlatformSettings(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, default=SINGLETON_ID)
 
-    # White-label layer (General tab). product_name replaces the sidebar title;
-    # logo_path is a server-relative URL under the uploads dir (NULL = wordmark).
+    # ------------------------------------------------------------------
+    # Brand token layer (6.6, uiux-spec A1.7 / B4.17)
+    # ------------------------------------------------------------------
+
+    # product_name replaces the sidebar title, tab title, and login wordmark.
     product_name: Mapped[str] = mapped_column(String(80), default="FDM Platform")
+
+    # Light-theme logo: server-relative API URL (NULL = wordmark fallback).
     logo_path: Mapped[str | None] = mapped_column(String(300))
 
+    # Dark-theme logo variant (NULL = fall back to logo_path, then wordmark).
+    logo_dark_path: Mapped[str | None] = mapped_column(String(300))
+
+    # Uploaded favicon: server-relative API URL (NULL = browser default).
+    favicon_path: Mapped[str | None] = mapped_column(String(300))
+
+    # Optional brand accent override — a hex colour (#RRGGBB / #RGB).
+    # Status colours (ok/warn/err/info) are NEVER overridden by this value.
+    # NULL means use the design-system default (white in dark mode).
+    accent_hex: Mapped[str | None] = mapped_column(String(7))
+
+    # Optional operator-visible contact/support URL.
+    support_link: Mapped[str | None] = mapped_column(String(500))
+
+    # Optional one-line footer shown at the bottom of the sidebar.
+    footer_line: Mapped[str | None] = mapped_column(String(200))
+
+    # ------------------------------------------------------------------
     # Default timezone for rendering timestamps (CLAUDE.md rule 8 default).
+    # ------------------------------------------------------------------
     default_tz: Mapped[str] = mapped_column(String(64), default="Asia/Dubai")
 
     # Defaults tab: what the Create-Bench wizard pre-fills.

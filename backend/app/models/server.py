@@ -38,6 +38,11 @@ class Server(Base):
     # NULL until an operator sets it on the server's settings. Never returned in
     # plaintext — the API exposes only a "is it set" boolean.
     mariadb_root_password_enc: Mapped[str | None] = mapped_column(Text)
+    # Per-server override for the SSH connection-pool cap (session 2.6): the max
+    # concurrent AsyncSSH sessions the platform opens to this host at once. NULL
+    # = use the platform default (Settings.ssh_max_sessions_per_server). Lower it
+    # for a small/shared host, raise it for a beefy build server.
+    ssh_pool_limit: Mapped[int | None] = mapped_column(Integer)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

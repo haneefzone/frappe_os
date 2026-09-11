@@ -13,6 +13,7 @@ SITE_OPERATE = "site:operate"  # create site, migrate, cache ops, install apps
 APP_MANAGE = "app:manage"  # get-app, app upgrades
 BACKUP_CREATE = "backup:create"
 BACKUP_RESTORE = "backup:restore"
+BACKUP_TRANSFER = "backup:transfer"  # move a backup across servers (session 2.6)
 JOB_MANAGE = "job:manage"  # retry/cancel jobs
 TERMINAL_ACCESS = "terminal:access"
 SERVER_MANAGE = "server:manage"  # register servers, SSH credentials
@@ -25,6 +26,14 @@ SSL_MANAGE = "ssl:manage"  # manage site domains, nginx vhosts, TLS certificates
 # M5): only Admin + Developer hold them; Operator/Read-only never do.
 AI_MANAGE = "ai:manage"  # register/edit/delete scoped AI agent configs
 AI_OPERATE = "ai:operate"  # start a scoped agent session; apply/rollback its diff
+ALERT_MANAGE = "alert:manage"  # create/edit/enable/disable metric AlertRules (session 3.1)
+REPORT_GENERATE = "report:generate"  # generate compliance / audit report exports (session 4.4)
+# Session 6.2. Non-sensitive reports are gated on plain READ so Read-only can
+# view them; the two ISO-facing exports that expose per-user activity and
+# backup evidence require this separate class, which by design NO role below
+# Admin holds (Admin has it via the wildcard). Deliberately absent from
+# Developer/Operator in DEFAULT_ROLES — those reports are Admin-only.
+REPORT_SENSITIVE = "report:sensitive"
 
 # name -> permissions. Admin gets the wildcard; Read-only can never mutate
 # (CLAUDE.md golden rule 7).
@@ -38,12 +47,15 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         APP_MANAGE,
         BACKUP_CREATE,
         BACKUP_RESTORE,
+        BACKUP_TRANSFER,
         JOB_MANAGE,
         TERMINAL_ACCESS,
         SCHEDULE_MANAGE,
         SSL_MANAGE,
         AI_MANAGE,
         AI_OPERATE,
+        ALERT_MANAGE,
+        REPORT_GENERATE,
     ],
     "Operator": [
         READ,
@@ -51,6 +63,7 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         BACKUP_CREATE,
         JOB_MANAGE,
         SSL_MANAGE,
+        ALERT_MANAGE,
     ],
     "Read-only": [READ],
 }

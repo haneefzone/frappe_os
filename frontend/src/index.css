@@ -17,6 +17,15 @@
   --status-warn: #f59e0b;
   --status-err: #ef4444;
   --status-info: #3b82f6;
+
+  /*
+   * Brand token layer (session 6.6, uiux-spec A1.7).
+   * --brand-accent is the one operator-configurable colour token. It defaults to
+   * --text-primary (white in dark mode) which matches the existing accent = white
+   * design decision. Status colours are NEVER overridden by the brand layer.
+   * The settings store writes --brand-accent at runtime when accentHex is set.
+   */
+  --brand-accent: var(--text-primary);
 }
 
 /* Light mode inverts the neutral scale; status colors stay unchanged. */
@@ -29,6 +38,8 @@ html.light {
   --text-primary: #18181b;
   --text-secondary: #52525b;
   --text-muted: #8e8e99;
+  /* In light mode the brand accent also defaults to the primary text colour. */
+  --brand-accent: var(--text-primary);
 }
 
 html,

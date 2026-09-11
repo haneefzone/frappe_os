@@ -9,6 +9,7 @@ keeps all execution/persistence concerns in `app/core/jobs.py`.
 
 from __future__ import annotations
 
+import re
 from contextlib import AbstractContextManager
 from typing import Protocol
 
@@ -57,9 +58,19 @@ class JobContext(Protocol):
         """Write a synthetic (runner-generated) log line."""
         ...
 
+    def register_secret(self, value: str) -> None:
+        """Register a plaintext secret resolved during the run (e.g. a restic
+        repo password) so the log redactor masks it in every line (4.1)."""
+        ...
+
     def read_file(self, path: str, *, chunk_size: int = ...):
         """Yield a remote file's raw bytes over SSH in chunks — for streaming a
         backup artifact to offsite storage without buffering it whole (2.2)."""
+        ...
+
+    async def write_file(self, path: str, chunks) -> int:
+        """Stream bytes into a remote file over SSH (binary-safe), returning the
+        exit status — the write side of a cross-server backup move (2.6)."""
         ...
 
 
@@ -1282,6 +1293,183 @@ async def _upload_backup_offsite(ctx: JobContext, row, storage_target_id: int) -
         )
 
 
+async def _download_with_digest(client, cfg, key: str, digest):
+    """Stream one S3 object, folding each chunk into `digest` as it passes so the
+    caller learns the artifact's sha256 the moment the write finishes (2.6)."""
+    from app.core import storage as st
+
+    async for chunk in st.download_object(client, cfg, key):
+        digest.update(chunk)
+        yield chunk
+
+
+def _resolve_target_site_id(ctx: JobContext, bench_id: int, site_name: str) -> int:
+    """The Site row for `site_name` on the destination bench — the moved copy is
+    registered against it so it shows up under that site's Backups and is ready
+    to restore. The API validates existence; this re-checks under the job."""
+    from sqlalchemy import select
+
+    from app.models.site import Site
+
+    site = ctx.session.scalars(
+        select(Site).where(Site.bench_id == bench_id, Site.name == site_name)
+    ).first()
+    if site is None:
+        raise RuntimeError(
+            f"site {site_name!r} does not exist on the destination bench "
+            f"(#{bench_id}); create it there before moving a backup onto it"
+        )
+    return site.id
+
+
+def _source_server_id(ctx: JobContext, source_backup) -> int | None:
+    """The server the source backup's artifacts came off (via its bench), for the
+    moved copy's provenance. None if the source bench is gone."""
+    from app.models.bench import Bench
+
+    bench = ctx.session.get(Bench, source_backup.bench_id)
+    return bench.server_id if bench is not None else None
+
+
+class MoveBackupAction(Action):
+    """`backup.move_across_servers` — copy a backup's artifacts from their offsite
+    S3 target down onto another managed server, re-verifying each artifact's
+    sha256 on arrival, then registering the moved copy as a first-class Backup on
+    the destination (session 2.6).
+
+    S3 is the transit medium on purpose: an agentless control plane has no direct
+    A→B trust, so a cross-server move streams each object out of the shared
+    StorageTarget straight into the destination server's file over SSH (never
+    buffered whole), computing the sha256 in flight AND re-running `sha256sum` on
+    the landed file. A mismatch on either check refuses the move — a corrupt or
+    truncated copy must never register as a good backup (rule 5 spirit). The
+    source backup must already be offsite (session 2.2); the API enforces it and
+    passes the source's own storage target so the keys are read server-side.
+    """
+
+    async def run(self, ctx: JobContext) -> None:
+        import hashlib
+        import posixpath
+
+        from app.core import storage as st
+        from app.models.backup import Backup
+        from app.models.storage import StorageTarget
+
+        params = ctx.rendered.params_sanitized
+        source_backup_id = int(params["backup_id"])
+        storage_target_id = int(params["storage_target_id"])
+        dest_dir = params["dest_dir"]
+        target_site = params["target_site"]
+        target_bench_id = int(params["target_bench_id"])
+
+        source = ctx.session.get(Backup, source_backup_id)
+        if source is None:
+            raise RuntimeError(f"source backup #{source_backup_id} no longer exists")
+        target = ctx.session.get(StorageTarget, storage_target_id)
+        if target is None or not target.enabled:
+            raise RuntimeError(
+                f"storage target #{storage_target_id} is unavailable (deleted or "
+                "disabled); the artifacts live there in transit — cannot move"
+            )
+
+        cfg = st.S3Config.from_target(target)  # decrypts keys in memory only
+        client = st.build_client(cfg)
+        object_keys = source.object_keys or {}
+        await ctx.emit(
+            f"Moving backup #{source.id} from {target.name!r} onto "
+            f"{target_site} (bench #{target_bench_id}) at {dest_dir}"
+        )
+
+        moved_artifacts: list[dict] = []
+        by_kind_path: dict[str, str] = {}
+        total = 0
+        for art in source.artifacts or []:
+            kind = art.get("kind", "?")
+            src_path = art.get("path", "")
+            expected = art.get("checksum_sha256", "")
+            key = object_keys.get(kind)
+            if not src_path or not expected or not key:
+                await ctx.emit(f"Skipping {kind}: no offsite object recorded.")
+                continue
+            dest = posixpath.join(dest_dir, posixpath.basename(src_path))
+
+            with ctx.step(f"Transfer {kind} → {dest}"):
+                digest = hashlib.sha256()
+                code = await ctx.write_file(
+                    dest, _download_with_digest(client, cfg, key, digest)
+                )
+                if code != 0:
+                    raise RuntimeError(
+                        f"writing {kind} to {dest} failed (exit {code}); check the "
+                        "destination directory exists and is writable by the bench user"
+                    )
+                in_flight = digest.hexdigest()
+                if in_flight != expected:
+                    raise RuntimeError(
+                        f"{kind} checksum changed in transit (expected "
+                        f"{expected[:12]}…, got {in_flight[:12]}…) — move refused"
+                    )
+
+            with ctx.step(f"Verify {kind} on arrival"):
+                res = await ctx.capture(["sha256sum", "--", dest])
+                if res.exit_code != 0:
+                    raise RuntimeError(
+                        f"could not read back {dest} to verify (exit {res.exit_code})"
+                    )
+                on_disk = (res.stdout.split() or [""])[0]
+                if on_disk != expected:
+                    raise RuntimeError(
+                        f"{kind} checksum on the destination does not match "
+                        f"(expected {expected[:12]}…, got {on_disk[:12]}…) — move refused"
+                    )
+                size = int(art.get("size_bytes") or 0)
+                total += size
+                moved_artifacts.append(
+                    {
+                        "kind": kind,
+                        "path": dest,
+                        "size_bytes": size,
+                        "checksum_sha256": expected,
+                    }
+                )
+                by_kind_path[kind] = dest
+                await ctx.emit(
+                    f"  ✓ {kind}: {size / (1024 * 1024):.1f} MB, sha256 re-verified "
+                    f"on arrival ({expected[:12]}…)"
+                )
+
+        if not moved_artifacts:
+            raise RuntimeError(
+                "no offsite artifacts to move — the source backup has no recorded "
+                "object keys (push it offsite first, session 2.2)"
+            )
+
+        with ctx.step("Register moved copy"):
+            moved = Backup(
+                site_id=_resolve_target_site_id(ctx, target_bench_id, target_site),
+                bench_id=target_bench_id,
+                type=source.type,
+                db_path=by_kind_path.get("database"),
+                public_files_path=by_kind_path.get("public_files"),
+                private_files_path=by_kind_path.get("private_files"),
+                config_path=by_kind_path.get("config"),
+                size_bytes=total,
+                artifacts=moved_artifacts,
+                status="success",
+                frappe_version=source.frappe_version,
+                taken_by_job_id=ctx.job_id,
+                storage_state="local",
+                moved_from_backup_id=source.id,
+                source_server_id=_source_server_id(ctx, source),
+            )
+            ctx.session.add(moved)
+            ctx.session.commit()
+            await ctx.emit(
+                f"Registered moved backup #{moved.id}: {len(moved_artifacts)} "
+                f"artifact(s), {total / (1024 * 1024):.1f} MB, all checksums verified."
+            )
+
+
 class BackupAction(Action):
     """`site.backup` — the full backup engine (session 1.11) + offsite upload (2.2).
 
@@ -1563,6 +1751,496 @@ class RestoreAction(Action):
                     )
         finally:
             if started_redis:
+                await _stop_dev_redis(ctx, queue_port, cache_port)
+
+
+# --------------------------------------------------------------------------- #
+# Safe update pipeline (session 3.3): clone -> staging -> verify -> promote.
+# --------------------------------------------------------------------------- #
+
+
+def _load_pipeline(ctx: JobContext, pipeline_id):
+    """Load the UpdatePipeline row a 3.3 job threads its progress onto, or None
+    when the job runs without one (e.g. a standalone verify)."""
+    if not pipeline_id:
+        return None
+    from app.models.update_pipeline import UpdatePipeline
+
+    return ctx.session.get(UpdatePipeline, int(pipeline_id))
+
+
+async def _restore_artifacts_into_site(
+    ctx: JobContext,
+    *,
+    site: str,
+    bench_path: str,
+    bench,
+    db_path: str,
+    public_files: str | None,
+    private_files: str | None,
+    config_path: str | None,
+    create: bool,
+    admin_pw: str | None = None,
+    db_root_pw: str | None = None,
+) -> None:
+    """Restore a set of backup artifacts into ``site`` on ``bench``, reusing the
+    exact 1.11 restore sequence (gotcha #7): (optionally) create the target site,
+    `bench --force restore` (db [+ files]), copy the source encryption_key into
+    the target site_config, then `bench migrate`. Shared by the clone-to-staging
+    job (create=True) and the promote job's rollback (create=False, restore over
+    the existing prod site). The caller owns the dev-bench Redis dance."""
+    from app.core import backups as bk
+    from app.core.commands import get_template, render
+    from app.models.backup import Backup  # noqa: F401  (kept parallel to RestoreAction)
+
+    if create:
+        if not admin_pw or not db_root_pw:
+            raise RuntimeError(
+                "creating the target site needs an admin password and the "
+                "server's MariaDB root password"
+            )
+        new_site = render(
+            get_template("site.new"),
+            {
+                "site": site,
+                "db_root_pw": db_root_pw,
+                "admin_pw": admin_pw,
+                "bench_path": bench_path,
+            },
+        )
+        with ctx.step("Create target site (bench new-site)"):
+            await ctx.emit(f"$ {new_site.display}")
+            code = await ctx.stream(new_site.argv, cwd=new_site.cwd)
+            if code != 0:
+                raise RuntimeError(f"bench new-site exited with status {code}")
+
+    with_files = bool(public_files and private_files)
+    if with_files:
+        rst = render(
+            get_template("site.restore_files"),
+            {
+                "site": site,
+                "bench_path": bench_path,
+                "db_path": db_path,
+                "public_files": public_files,
+                "private_files": private_files,
+            },
+        )
+        restore_label = "Restore database + files"
+    else:
+        rst = render(
+            get_template("site.restore_db"),
+            {"site": site, "bench_path": bench_path, "db_path": db_path},
+        )
+        restore_label = "Restore database"
+    with ctx.step(restore_label):
+        await ctx.emit(f"$ {rst.display}")
+        code = await ctx.stream(rst.argv, cwd=rst.cwd)
+        if code != 0:
+            raise RuntimeError(f"bench restore exited with status {code}")
+
+    with ctx.step("Copy encryption_key into target site_config (gotcha #7)"):
+        if not config_path:
+            await ctx.emit(
+                "No config artifact in this backup — skipping the encryption_key "
+                "copy (the source site had none)."
+            )
+        else:
+            res = await ctx.capture(["cat", config_path])
+            key = bk.parse_encryption_key(res.stdout)
+            if not key:
+                await ctx.emit("Source config backup carried no encryption_key.")
+            else:
+                setcfg = render(
+                    get_template("site.set_encryption_key"),
+                    {"site": site, "bench_path": bench_path, "key": key},
+                )
+                await ctx.emit(f"$ {setcfg.display}")
+                code = await ctx.stream(setcfg.argv, cwd=setcfg.cwd)
+                if code != 0:
+                    raise RuntimeError(
+                        f"set-config encryption_key exited with status {code}"
+                    )
+
+    mig = render(get_template("site.migrate"), {"site": site, "bench_path": bench_path})
+    with ctx.step("Migrate restored site (bench migrate)"):
+        await ctx.emit(f"$ {mig.display}")
+        code = await ctx.stream(mig.argv, cwd=mig.cwd)
+        if code != 0:
+            raise RuntimeError(f"bench migrate exited with status {code}")
+
+
+class CloneToStagingAction(Action):
+    """`site.clone_to_staging` — clone a (prod) site onto a staging bench (3.3).
+
+    Reuses the 1.11 backup + restore machinery end to end: (1) take a with-files
+    backup of the source site, (2) create a fresh staging site and restore the
+    backup into it (db + files + encryption_key + migrate), (3) run an optional
+    data-scrub hook to mask PII for prod→dev copies (uiux §8), (4) register the
+    staging site tagged `environment="staging"`. One non-idempotent job locked on
+    the staging target — a clone is never auto-retried on top of a half-clone."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import discovery
+        from app.core.commands import get_template, render
+
+        params = ctx.rendered.params_sanitized
+        secrets = ctx.rendered.secret_map
+        source_site = params["source_site"]
+        source_bench_path = params["source_bench_path"]
+        staging_site = params["site"]
+        staging_bench_path = params["bench_path"]
+        scrub_method = params.get("scrub_method")
+        pipeline = _load_pipeline(ctx, params.get("pipeline_id"))
+
+        source_bench = _load_bench(ctx, source_bench_path)
+        staging_bench = _load_bench(ctx, staging_bench_path)
+
+        # 1) Back up the source site (with files) — the artifacts we clone from.
+        s_queue, s_cache = _redis_ports(source_bench)
+        src_is_dev = await _detect_bench_mode(ctx, source_bench_path)
+        started = False
+        try:
+            if src_is_dev:
+                await _start_dev_redis(ctx, source_bench_path)
+                started = True
+            row = await _run_backup(
+                ctx,
+                site=source_site,
+                bench_path=source_bench_path,
+                bench=source_bench,
+                with_files=True,
+                step_label=f"Back up source site {source_site} (with files)",
+            )
+        finally:
+            if started:
+                await _stop_dev_redis(ctx, s_queue, s_cache)
+        if row is None or row.status != "success" or not row.db_path:
+            raise RuntimeError(
+                "source backup did not produce a usable database artifact; "
+                "not cloning"
+            )
+
+        # 2) Restore into a fresh staging site, then (3) optional PII scrub.
+        t_queue, t_cache = _redis_ports(staging_bench)
+        tgt_is_dev = await _detect_bench_mode(ctx, staging_bench_path)
+        started = False
+        try:
+            if tgt_is_dev:
+                await _start_dev_redis(ctx, staging_bench_path)
+                started = True
+            await _restore_artifacts_into_site(
+                ctx,
+                site=staging_site,
+                bench_path=staging_bench_path,
+                bench=staging_bench,
+                db_path=row.db_path,
+                public_files=row.public_files_path,
+                private_files=row.private_files_path,
+                config_path=row.config_path,
+                create=True,
+                admin_pw=secrets.get("admin_pw"),
+                db_root_pw=secrets.get("db_root_pw"),
+            )
+            if scrub_method:
+                scrub = render(
+                    get_template("site.scrub"),
+                    {
+                        "site": staging_site,
+                        "bench_path": staging_bench_path,
+                        "method": scrub_method,
+                    },
+                )
+                with ctx.step(f"Scrub PII on the clone ({scrub_method})"):
+                    await ctx.emit(f"$ {scrub.display}")
+                    code = await ctx.stream(scrub.argv, cwd=scrub.cwd)
+                    if code != 0:
+                        raise RuntimeError(f"data scrub exited with status {code}")
+        finally:
+            if started:
+                await _stop_dev_redis(ctx, t_queue, t_cache)
+
+        # 4) Register the staging site tagged as a staging environment.
+        with ctx.step("Register staging site"):
+            if staging_bench is not None:
+                site_row = discovery.upsert_site_one(
+                    ctx.session, staging_bench.id, staging_site
+                )
+                site_row.environment = "staging"
+                if pipeline is not None:
+                    pipeline.staging_site_id = site_row.id
+                    pipeline.phase = "cloned"
+                ctx.session.commit()
+                await ctx.emit(
+                    f"Staging site #{site_row.id} ({staging_site}) is ready "
+                    "(environment=staging)."
+                )
+            else:
+                await ctx.emit(
+                    "Staging bench not in inventory — run a discovery to track "
+                    "the clone."
+                )
+
+
+_INT_TOKEN = re.compile(r"-?\d+")
+
+
+def _parse_row_count(stdout: str | None) -> int | None:
+    """Extract the doctype row count from `bench execute get_count` stdout.
+
+    `bench execute` prints the return value (an int) on its own line, but log /
+    deprecation lines and version strings can precede it. Scan lines bottom-up
+    and return the integer from the last line that carries one, so stray digits
+    earlier in the stream (e.g. "frappe 16.24") can't be concatenated in.
+    """
+    for line in reversed((stdout or "").splitlines()):
+        tokens = _INT_TOKEN.findall(line)
+        if tokens:
+            return int(tokens[-1])
+    return None
+
+
+class VerifyChecklistAction(Action):
+    """`site.verify_checklist` — the pre-promote verification gate (uiux §5, 3.3).
+
+    Runs four read-mostly probes against the (staging) site and emits a
+    machine-readable `CHECKLIST_RESULT <json>` line the UI renders as the
+    all-green gate: (1) the site boots (`frappe.ping`), (2) migrations are clean
+    (`bench migrate` is a no-op exit 0), (3) the scheduler is enabled, (4) a
+    row-count sanity check vs the source site shows no gross data loss. The
+    verdict + all-green flag are persisted onto the UpdatePipeline row so the
+    promote endpoint can enforce "verified before promote" server-side."""
+
+    async def run(self, ctx: JobContext) -> None:
+        import json
+
+        from app.core.commands import get_template, render
+
+        params = ctx.rendered.params_sanitized
+        site = params["site"]
+        bench_path = params["bench_path"]
+        source_site = params.get("source_site")
+        source_bench_path = params.get("source_bench_path")
+        pipeline = _load_pipeline(ctx, params.get("pipeline_id"))
+
+        bench = _load_bench(ctx, bench_path)
+        queue_port, cache_port = _redis_ports(bench)
+        is_dev = await _detect_bench_mode(ctx, bench_path)
+
+        checks: list[dict] = []
+
+        async def _count(target_site: str, target_bench: str) -> int | None:
+            cmd = render(
+                get_template("site.count_doctype"),
+                {"site": target_site, "bench_path": target_bench, "doctype": "User"},
+            )
+            res = await ctx.capture(cmd.argv, cwd=cmd.cwd)
+            return _parse_row_count(res.stdout)
+
+        started = False
+        try:
+            if is_dev:
+                await _start_dev_redis(ctx, bench_path)
+                started = True
+
+            # (1) Site boots.
+            with ctx.step("Check: site boots (frappe.ping)"):
+                ping = render(
+                    get_template("site.ping"), {"site": site, "bench_path": bench_path}
+                )
+                res = await ctx.capture(ping.argv, cwd=ping.cwd)
+                boots = res.exit_code == 0 and "pong" in (res.stdout or "").lower()
+                checks.append(
+                    {"key": "boots", "label": "Site boots", "ok": boots,
+                     "detail": "frappe.ping returned pong" if boots else "site did not boot"}
+                )
+
+            # (2) Migrations clean (idempotent bench migrate exits 0).
+            with ctx.step("Check: migrations clean (bench migrate)"):
+                mig = render(
+                    get_template("site.migrate"), {"site": site, "bench_path": bench_path}
+                )
+                await ctx.emit(f"$ {mig.display}")
+                code = await ctx.stream(mig.argv, cwd=mig.cwd)
+                clean = code == 0
+                checks.append(
+                    {"key": "migrations", "label": "Migrations clean", "ok": clean,
+                     "detail": "bench migrate exited 0" if clean else f"migrate exited {code}"}
+                )
+
+            # (3) Scheduler / workers up.
+            with ctx.step("Check: scheduler enabled"):
+                sched = render(
+                    get_template("site.scheduler_status"),
+                    {"site": site, "bench_path": bench_path},
+                )
+                res = await ctx.capture(sched.argv, cwd=sched.cwd)
+                up = res.exit_code == 0 and "enabled" in (res.stdout or "").lower()
+                checks.append(
+                    {"key": "scheduler", "label": "Scheduler/workers up", "ok": up,
+                     "detail": "scheduler enabled" if up else "scheduler not enabled"}
+                )
+
+            # (4) Row-count sanity vs the source site (no gross data loss).
+            with ctx.step("Check: row-count sanity vs source"):
+                staging_n = await _count(site, bench_path)
+                source_n = (
+                    await _count(source_site, source_bench_path)
+                    if source_site and source_bench_path
+                    else None
+                )
+                if staging_n is None:
+                    ok = False
+                    detail = "could not read a row count on the clone"
+                elif source_n is None:
+                    ok = staging_n >= 1
+                    detail = f"clone has {staging_n} User rows (no source baseline)"
+                else:
+                    # Clone should carry ~all of source; allow growth from migrate,
+                    # flag a gross loss (more than half the rows gone).
+                    ok = staging_n * 2 >= source_n
+                    detail = f"clone {staging_n} vs source {source_n} User rows"
+                checks.append(
+                    {"key": "row_count", "label": "Row-count sanity", "ok": ok,
+                     "detail": detail}
+                )
+        finally:
+            if started:
+                await _stop_dev_redis(ctx, queue_port, cache_port)
+
+        all_ok = all(c["ok"] for c in checks)
+        result = {"all_ok": all_ok, "checks": checks}
+        await ctx.emit("CHECKLIST_RESULT " + json.dumps(result), stream="result")
+        if pipeline is not None:
+            pipeline.checklist = result
+            pipeline.checklist_ok = all_ok
+            pipeline.phase = "verified" if all_ok else "verify_failed"
+            ctx.session.commit()
+        await ctx.emit(
+            "Verification checklist all-green — safe to promote."
+            if all_ok
+            else "Verification checklist has RED items — promote is blocked."
+        )
+
+
+class PromoteUpdateAction(Action):
+    """`site.promote_update` — apply the update to production, safely (3.3).
+
+    Ordered, non-idempotent, never auto-retried:
+      1. MANDATORY pre-update backup of prod (with files) FIRST — the gate. If it
+         fails the job aborts and prod is never touched.
+      2. `bench update` on the production bench.
+      3. Post-update check (`frappe.ping`).
+    If step 2 or 3 fails, an in-job ROLLBACK restores the pre-update backup over
+    prod (db + files + encryption_key + migrate) and the pipeline is marked
+    `rolled_back`; the job then fails loudly so the operator sees the update did
+    not land. The rollback path is exercised by test_updates.py."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core.commands import get_template, render
+
+        params = ctx.rendered.params_sanitized
+        site = params["site"]
+        bench_path = params["bench_path"]
+        pipeline = _load_pipeline(ctx, params.get("pipeline_id"))
+
+        bench = _load_bench(ctx, bench_path)
+        queue_port, cache_port = _redis_ports(bench)
+        is_dev = await _detect_bench_mode(ctx, bench_path)
+        if pipeline is not None:
+            pipeline.phase = "promoting"
+            ctx.session.commit()
+
+        started = False
+        try:
+            if is_dev:
+                await _start_dev_redis(ctx, bench_path)
+                started = True
+
+            # 1) The pre-update backup GATE — before any prod mutation.
+            try:
+                pre = await _run_backup(
+                    ctx,
+                    site=site,
+                    bench_path=bench_path,
+                    bench=bench,
+                    with_files=True,
+                    step_label="Pre-update backup of production (mandatory gate)",
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"pre-update backup failed ({exc}); production was NOT touched"
+                ) from exc
+            if pre is None or pre.status != "success" or not pre.db_path:
+                raise RuntimeError(
+                    "pre-update backup produced no usable artifact; production "
+                    "was NOT touched"
+                )
+            if pipeline is not None:
+                pipeline.pre_backup_id = pre.id
+                ctx.session.commit()
+            await ctx.emit(
+                f"Pre-update backup #{pre.id} captured — prod is now recoverable; "
+                "proceeding with the update."
+            )
+
+            # 2) Apply the update to production.
+            update_failed: Exception | None = None
+            update = render(get_template("bench.update"), {"bench_path": bench_path})
+            try:
+                with ctx.step("Apply update to production (bench update)"):
+                    await ctx.emit(f"$ {update.display}")
+                    code = await ctx.stream(update.argv, cwd=update.cwd)
+                    if code != 0:
+                        raise RuntimeError(f"bench update exited with status {code}")
+
+                # 3) Post-update check.
+                with ctx.step("Post-update check (frappe.ping)"):
+                    ping = render(
+                        get_template("site.ping"),
+                        {"site": site, "bench_path": bench_path},
+                    )
+                    res = await ctx.capture(ping.argv, cwd=ping.cwd)
+                    if res.exit_code != 0 or "pong" not in (res.stdout or "").lower():
+                        raise RuntimeError(
+                            "post-update check failed: site did not boot after update"
+                        )
+            except Exception as exc:  # noqa: BLE001
+                update_failed = exc
+
+            if update_failed is not None:
+                # ROLLBACK: restore the pre-update backup over prod.
+                await ctx.emit(
+                    f"Update failed ({update_failed}) — rolling back by restoring "
+                    f"pre-update backup #{pre.id}."
+                )
+                await _restore_artifacts_into_site(
+                    ctx,
+                    site=site,
+                    bench_path=bench_path,
+                    bench=bench,
+                    db_path=pre.db_path,
+                    public_files=pre.public_files_path,
+                    private_files=pre.private_files_path,
+                    config_path=pre.config_path,
+                    create=False,
+                )
+                if pipeline is not None:
+                    pipeline.phase = "rolled_back"
+                    pipeline.rollback_job_id = ctx.job_id
+                    pipeline.note = f"promote failed, rolled back: {update_failed}"
+                    ctx.session.commit()
+                raise RuntimeError(
+                    f"update failed and was rolled back to pre-update backup "
+                    f"#{pre.id}: {update_failed}"
+                )
+
+            if pipeline is not None:
+                pipeline.phase = "promoted"
+                ctx.session.commit()
+            await ctx.emit("Production update promoted and verified.")
+        finally:
+            if started:
                 await _stop_dev_redis(ctx, queue_port, cache_port)
 
 
@@ -2317,6 +2995,325 @@ class SslExpiryScanAction(Action):
             for row in rows:
                 when = row.cert_expires_at.isoformat() if row.cert_expires_at else "no cert"
                 await ctx.emit(f"  {row.domain}: {when}")
+
+
+class DriftCheckAction(Action):
+    """`server.drift_check` — re-hash every tracked config artefact on the server
+    and diff each against its stored baseline (session 6.7, uiux-spec A2.16).
+
+    Strictly **read-only** on the managed server: it only `cat`s/`find`s files
+    (root ones via the fixed `sudo -n` allowlist lines). It never writes,
+    reloads, or reverts config. Drifted artefacts flip their baseline row to
+    `drifted`, fire one `config.drift` notification, and surface on the Dashboard
+    "Needs attention" row. No auto-remediation."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import drift
+
+        with ctx.step("Read + hash tracked config artefacts"):
+            results = await drift.run_drift_check(ctx)
+
+        drifted = [r for r in results if r.drifted]
+        with ctx.step("Evaluate drift vs baseline"):
+            await ctx.emit(
+                f"checked {len(results)} artefact(s); {len(drifted)} drifted"
+            )
+            for r in drifted:
+                # Names + reason only — never artefact content (rule 6).
+                await ctx.emit(
+                    f"DRIFT [{r.reason}] {r.artifact_key} at {r.path}", stream="stderr"
+                )
+            if drifted:
+                from app.core.notifications import dispatch_config_drift
+                from app.models.server import Server
+
+                server = ctx.session.get(Server, ctx.server_id)
+                dispatch_config_drift(
+                    ctx.session,
+                    server_id=ctx.server_id,
+                    server_name=server.name if server else str(ctx.server_id),
+                    artifact_keys=[r.artifact_key for r in drifted],
+                )
+# --------------------------------------------------------------------------- #
+# restic config-tier DR backups (session 4.1)
+#
+# Each managed server has one `ResticRepo` (its OS/config tier), stored inside an
+# existing 2.2 StorageTarget bucket. restic dedups + encrypts client-side. The
+# repo password + the target's S3 keys are secrets: they reach restic ONLY via
+# its process environment — a 0600 env file staged on the target and sourced for
+# the single command (`set -a; . file; exec restic …`). They are NEVER placed on
+# an argv element, logged, or persisted in the clear (golden rule 6); the action
+# also registers them with the log redactor as belt-and-suspenders.
+# --------------------------------------------------------------------------- #
+
+# Source the staged 0600 env file (RESTIC_PASSWORD, AWS_*) then exec the restic
+# argv passed as positional parameters. $1 is the env-file path (shifted away);
+# $@ afterward is the fixed restic argv — nothing is interpolated into the script.
+_RESTIC_ENV_WRAP = 'set -a; . "$1"; shift; exec "$@"'
+
+# Detect the tier's readable config dirs (only existing paths are backed up so a
+# server without e.g. supervisor doesn't fail the snapshot) and stage the
+# `dpkg --get-selections` manifest inside the same tree. Emits one existing path
+# per line on stdout so the action can parse the real source set.
+_RESTIC_STAGE_SCRIPT = r'''
+set -e
+stage="$HOME/.fdm-restic-stage"
+rm -rf "$stage"
+mkdir -p "$stage"
+dpkg --get-selections > "$stage/dpkg-selections.txt"
+echo "$stage/dpkg-selections.txt"
+for p in "$@"; do
+  if [ -e "$p" ]; then echo "$p"; fi
+done
+'''
+
+# Install a pinned restic to the SSH user's ~/.local/bin when none is on PATH.
+# $1 is the fixed release URL (a deterministic constant — never user input).
+_RESTIC_INSTALL_SCRIPT = r'''
+set -e
+url="$1"
+dest="$HOME/.local/bin/restic"
+mkdir -p "$HOME/.local/bin"
+tmp="$(mktemp)"
+curl -fsSL "$url" -o "$tmp.bz2"
+bunzip2 -f "$tmp.bz2"
+mv "$tmp" "$dest"
+chmod 755 "$dest"
+"$dest" version
+'''
+
+
+async def _restic_prepare(ctx: JobContext):
+    """Load this server's ResticRepo + its StorageTarget, resolve the restic env
+    (repo URI + decrypted secrets), and register the secrets with the log
+    redactor. Returns (repo_row, ResticEnv). Raises ResticError if unconfigured."""
+    from sqlalchemy import select
+
+    from app.core import restic as rst
+    from app.models.restic import ResticRepo
+    from app.models.storage import StorageTarget
+
+    repo = ctx.session.scalars(
+        select(ResticRepo).where(ResticRepo.server_id == ctx.server_id)
+    ).first()
+    if repo is None:
+        raise rst.ResticError("this server has no restic repo configured")
+    target = (
+        ctx.session.get(StorageTarget, repo.storage_target_id)
+        if repo.storage_target_id
+        else None
+    )
+    env = rst.resolve_env(repo, target)
+    # Redact the decrypted secrets from every subsequent log line (rule 6).
+    for secret in env.secret_values:
+        ctx.register_secret(secret)
+    return repo, env
+
+
+async def _stage_restic_env(ctx: JobContext, env) -> str:
+    """Write the restic env file (RESTIC_PASSWORD, AWS_*) to a 0600 temp file on
+    the target via base64 (never streamed), returning its path. The plaintext is
+    only ever inside this 0600 file; it is removed by the caller's `finally`."""
+    import base64
+    from secrets import token_hex
+
+    env_path = f"/tmp/fdm-restic-env-{token_hex(8)}"
+    b64 = base64.b64encode(env.env_file_content().encode()).decode()
+    res = await ctx.capture(["bash", "-c", _WRITE_KEY_SCRIPT, "_", b64, env_path])
+    if res.exit_code != 0:
+        raise RuntimeError("failed to stage restic env file on the target")
+    return env_path
+
+
+def _restic_wrap(env_path: str, restic_argv: list[str]) -> list[str]:
+    """Wrap a rendered restic argv so it runs with the staged env file sourced."""
+    return ["bash", "-c", _RESTIC_ENV_WRAP, "_", env_path, *restic_argv]
+
+
+class ResticInstallAction(Action):
+    """`restic.install` — ensure a pinned restic is available on the target.
+
+    Detects `restic version`; if restic is already present it just reports the
+    version (idempotent). Otherwise it downloads the pinned release for the
+    server's architecture into `~/.local/bin/restic` (no root / no sudo) and
+    verifies it. Touches no repo and no secret."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import restic as rst
+
+        with ctx.step("Detect restic"):
+            res = await ctx.capture(["bash", "-lc", "restic version || true"])
+            version = rst.parse_installed_version(res.stdout)
+            if version:
+                await ctx.emit(f"restic already installed: {version}")
+                return
+            await ctx.emit("restic not found on PATH — installing the pinned release.")
+
+        with ctx.step("Detect architecture"):
+            arch_res = await ctx.capture(["uname", "-m"])
+            arch = (arch_res.stdout or "").strip()
+            url = rst.install_url(arch)  # ResticError on an unsupported arch
+            await ctx.emit(f"Architecture {arch}; fetching {url}")
+
+        with ctx.step(f"Install restic {rst.RESTIC_VERSION}"):
+            code = await ctx.stream(["bash", "-c", _RESTIC_INSTALL_SCRIPT, "_", url])
+            if code != 0:
+                raise RuntimeError(f"restic install exited with status {code}")
+            await ctx.emit(
+                "restic installed to ~/.local/bin/restic — ensure ~/.local/bin is "
+                "on the PATH for scheduled runs."
+            )
+
+
+class ResticInitAction(Action):
+    """`restic.init` — create the server's restic repository in its S3 bucket.
+
+    Resolves the repo + S3 secrets (in memory), stages the 0600 env file, runs
+    `restic init`, and flips `initialized` true. Re-running against an existing
+    repo is a no-op restic reports as an error ("already initialized"); we treat
+    that specific case as success so init stays idempotent."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import restic as rst
+        from app.core.commands import get_template, render
+
+        repo, env = await _restic_prepare(ctx)
+        cmd = render(get_template("restic.init"), {"repo": env.repository})
+        env_path = await _stage_restic_env(ctx, env)
+        try:
+            with ctx.step("Initialise restic repository"):
+                await ctx.emit(f"$ restic -r {rst.redacted_repository(env.repository)} init")
+                res = await ctx.capture(_restic_wrap(env_path, list(cmd.argv)))
+                combined = f"{res.stdout}\n{res.stderr}"
+                for line in combined.splitlines():
+                    if line.strip():
+                        await ctx.emit(line)
+                already = "already initialized" in combined or "already exists" in combined
+                if res.exit_code != 0 and not already:
+                    raise RuntimeError(f"restic init exited with status {res.exit_code}")
+                repo.initialized = True
+                ctx.session.commit()
+                await ctx.emit(
+                    "Repository ready."
+                    if not already
+                    else "Repository was already initialised — nothing to do."
+                )
+        finally:
+            await ctx.capture(["rm", "-f", env_path])
+
+
+class ResticBackupAction(Action):
+    """`restic.backup` — snapshot the server's OS/config tier to its restic repo.
+
+    Steps: resolve repo + secrets → stage the config set (existing config dirs +
+    the `dpkg --get-selections` manifest) → stage the 0600 env file → run
+    `restic backup` over that set → parse the snapshot id and record the evidence
+    timestamps on the ResticRepo row. The env file + staging dir are always
+    removed in `finally`. Non-idempotent (one snapshot per run)."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import restic as rst
+        from app.core.commands import get_template, render
+
+        repo, env = await _restic_prepare(ctx)
+        if not repo.initialized:
+            raise rst.ResticError(
+                "restic repository is not initialised — run init before a backup"
+            )
+        server = ctx.session.get(_server_model(), ctx.server_id)
+        host = (server.hostname or server.name) if server else "server"
+
+        env_path = await _stage_restic_env(ctx, env)
+        try:
+            with ctx.step("Stage config set + package manifest"):
+                res = await ctx.capture(
+                    ["bash", "-c", _RESTIC_STAGE_SCRIPT, "_", *rst.CONFIG_PATHS]
+                )
+                if res.exit_code != 0:
+                    raise RuntimeError("failed to stage config set on the target")
+                sources = [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]
+                if not sources:
+                    raise RuntimeError("no config sources found to back up")
+                await ctx.emit("Backing up: " + ", ".join(sources))
+
+            cmd = render(
+                get_template("restic.backup"),
+                {"repo": env.repository, "host": host},
+            )
+            restic_argv = [*cmd.argv, *sources]
+            with ctx.step("restic backup (config tier)"):
+                await ctx.emit(
+                    f"$ restic -r {rst.redacted_repository(env.repository)} backup "
+                    f"--tag {rst.CONFIG_TAG} --host {host} [config set]"
+                )
+                res = await ctx.capture(_restic_wrap(env_path, restic_argv), timeout=3600)
+                combined = f"{res.stdout}\n{res.stderr}"
+                for line in combined.splitlines():
+                    if line.strip():
+                        await ctx.emit(line)
+                # restic exit 3 = snapshot created but some files were unreadable
+                # (root-only config as the non-sudo SSH user); still a valid
+                # config snapshot, so 0 and 3 are both success.
+                if res.exit_code not in (0, 3):
+                    raise RuntimeError(f"restic backup exited with status {res.exit_code}")
+                snap = rst.parse_snapshot_id(combined)
+                repo.last_backup_at = _now_utc()
+                if snap:
+                    repo.last_snapshot_id = snap
+                ctx.session.commit()
+                await ctx.emit(
+                    f"Config snapshot saved: {snap or '(id not parsed)'}"
+                    + (" — some root-only files were skipped." if res.exit_code == 3 else "")
+                )
+        finally:
+            await ctx.capture(["rm", "-f", env_path])
+            await ctx.capture(["bash", "-c", 'rm -rf "$HOME/.fdm-restic-stage"'])
+
+
+class ResticSnapshotsAction(Action):
+    """`restic.snapshots` — list the config-tier snapshots in the repo (evidence).
+
+    Read-only; resolves secrets, stages the env file, runs `restic snapshots`
+    filtered to the config tag, and streams the listing. Idempotent."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from app.core import restic as rst
+        from app.core.commands import get_template, render
+
+        repo, env = await _restic_prepare(ctx)
+        cmd = render(get_template("restic.snapshots"), {"repo": env.repository})
+        env_path = await _stage_restic_env(ctx, env)
+        try:
+            with ctx.step("List config snapshots"):
+                await ctx.emit(
+                    f"$ restic -r {rst.redacted_repository(env.repository)} "
+                    f"snapshots --tag {rst.CONFIG_TAG}"
+                )
+                res = await ctx.capture(_restic_wrap(env_path, list(cmd.argv)))
+                combined = f"{res.stdout}\n{res.stderr}"
+                for line in combined.splitlines():
+                    if line.strip():
+                        await ctx.emit(line)
+                if res.exit_code != 0:
+                    raise RuntimeError(
+                        f"restic snapshots exited with status {res.exit_code}"
+                    )
+        finally:
+            await ctx.capture(["rm", "-f", env_path])
+
+
+def _server_model():
+    from app.models.server import Server
+
+    return Server
+
+
+def _now_utc():
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC)
+
+
 
 
 # --------------------------------------------------------------------------- #

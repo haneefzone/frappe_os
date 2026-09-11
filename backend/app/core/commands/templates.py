@@ -100,12 +100,24 @@ class CommandTemplate:
     required_permission: str
     # OS user to run the command as (via `sudo -u`); None = the SSH login user.
     run_as: str | None = None
+    # Platform-local action (session 6.2): the work runs inside the platform
+    # process itself (report rendering) rather than over SSH against a managed
+    # server. The runner skips SSH executor setup entirely and the job's
+    # `server_id` is NULL. `argv` is nominal for such a template — the Action
+    # class drives all the work and never calls ctx.stream/ctx.capture.
+    local: bool = False
     # Where each secret param's plaintext is resolved at execution time
     # (session 1.8; see app/core/secrets_resolve.py). "job" = the user-supplied
     # value carried encrypted on the job; "server:<column>" = a Fernet token on
     # the Server row. A secret param NOT listed here is left unresolved, so the
     # `from_sanitized` tripwire in render() still fails it loud.
     secret_sources: dict[str, str] = field(default_factory=dict)
+    # Drift detection (session 6.7): the tracked config artefacts this action
+    # writes. After such a job succeeds, the JobRunner re-hashes these artefacts
+    # and moves their drift baseline forward (app.core.drift.capture_baselines),
+    # so a managed change never registers as drift. Empty = writes no tracked
+    # config. Values are keys from app.core.drift.ARTIFACTS.
+    writes_config: tuple[str, ...] = ()
 
     @property
     def secret_params(self) -> set[str]:

@@ -190,6 +190,13 @@ class LogWriter:
         )
         self._seq = int(existing or 0)
 
+    def add_secret(self, value: str) -> None:
+        """Register a plaintext secret resolved at run time (e.g. a restic repo
+        password decrypted by an action) so every subsequent log line redacts it
+        (rule 6). Idempotent; empty values are ignored."""
+        if value and value not in self._secrets:
+            self._secrets.append(value)
+
     def _redact(self, content: str) -> str:
         from app.core.commands import MASK
 
@@ -264,6 +271,46 @@ class RemoteExecutor(Protocol):
         whole file (session 2.2)."""
         ...
 
+    async def write_file(self, path: str, chunks: AsyncIterator[bytes]) -> int:
+        """Stream `chunks` into a remote file over SSH (binary-safe), returning
+        the exit status — the write side of a cross-server backup move (2.6)."""
+        ...
+
+
+class LocalExecutor:
+    """Executor stand-in for a platform-local job (session 6.2).
+
+    A local template's Action does all its work in-process (query the DB, render
+    a PDF) and must never reach a managed server. Handing it this executor makes
+    that contract enforceable: an accidental ctx.stream/ctx.capture raises
+    loudly instead of silently opening an SSH connection to nothing.
+    """
+
+    async def __aenter__(self) -> LocalExecutor:
+        return self
+
+    async def __aexit__(self, *exc_info) -> bool:
+        return False
+
+    def _refuse(self, what: str):
+        raise RuntimeError(
+            f"platform-local job attempted a remote {what}; local actions run "
+            "in-process and have no server to execute against"
+        )
+
+    async def stream(self, *args, **kwargs):
+        self._refuse("stream")
+
+    async def capture(self, *args, **kwargs):
+        self._refuse("capture")
+
+    def read_file(self, *args, **kwargs):
+        self._refuse("read_file")
+
+
+def _local_executor_factory(_server) -> LocalExecutor:
+    return LocalExecutor()
+
 
 class JobContextImpl:
     """Concrete `JobContext` (see app/core/commands/actions.py). Owns step
@@ -300,7 +347,8 @@ class JobContextImpl:
         return self._db
 
     @property
-    def server_id(self) -> int:
+    def server_id(self) -> int | None:
+        """None for a platform-local job (6.2) — it targets no managed server."""
         return self._job.server_id
 
     @property
@@ -364,8 +412,17 @@ class JobContextImpl:
     def read_file(self, path: str, *, chunk_size: int = 65536) -> AsyncIterator[bytes]:
         return self._executor.read_file(path, chunk_size=chunk_size)
 
+    async def write_file(self, path: str, chunks: AsyncIterator[bytes]) -> int:
+        return await self._executor.write_file(path, chunks)
+
     async def emit(self, text: str, stream: str = "system") -> None:
         self._log.append(stream, text)
+
+    def register_secret(self, value: str) -> None:
+        """Register a run-time-resolved secret with the log redactor (rule 6).
+        Used by actions that decrypt a credential mid-run (e.g. the restic repo
+        password) so it can never leak into a streamed/captured log line."""
+        self._log.add_secret(value)
 
 
 # --------------------------------------------------------------------------- #
@@ -418,17 +475,17 @@ class SSHRemoteExecutor:
 
     async def read_file(self, path: str, *, chunk_size: int = 65536):
         """Stream a remote file's bytes over the job's pooled SSH connection
-        (`cat`, binary-safe). Used by the 2.2 offsite upload step."""
-        import shlex
+        (`cat`, binary-safe). Used by the 2.2 offsite upload step. Delegates to
+        the SSHService so the read is metered against the server's session cap
+        (2.6)."""
+        async for chunk in self._ssh.read_file(self._conn, path, chunk_size=chunk_size):
+            yield chunk
 
-        command = f"cat -- {shlex.quote(path)}"
-        async with self._conn.create_process(command, encoding=None) as process:
-            while True:
-                chunk = await process.stdout.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
-            await process.wait()
+    async def write_file(self, path: str, chunks) -> int:
+        """Stream bytes into a remote file over the job's pooled SSH connection,
+        metered against the server's session cap. The write side of a
+        cross-server backup move (2.6)."""
+        return await self._ssh.write_file(self._conn, path, chunks)
 
 
 @dataclass
@@ -470,17 +527,22 @@ class JobRunner:
     # -- creation ------------------------------------------------------------ #
 
     @staticmethod
-    def _lock_key(server_id: int, target_type: str, target_id: str | None, action: str) -> str:
+    def _lock_key(
+        server_id: int | None, target_type: str, target_id: str | None, action: str
+    ) -> str:
         # rule 4: keyed on the target + action so two dangerous ops on the same
         # target can never run at once. Uses action_name as the action class.
-        return f"{server_id}:{target_type}:{target_id or '-'}:{action}"
+        # A platform-local job (6.2) has no server; "local" keeps the key shape
+        # stable and scopes such a lock to the platform rather than a server.
+        scope = server_id if server_id is not None else "local"
+        return f"{scope}:{target_type}:{target_id or '-'}:{action}"
 
     def create(
         self,
         db: Session,
         *,
         action_name: str,
-        server_id: int,
+        server_id: int | None,
         target_type: str,
         target_id: str | None,
         params: dict,
@@ -753,6 +815,12 @@ class JobRunner:
     def _run_once(self, db, job, server, rendered, action, log_writer, factory) -> None:
         import asyncio
 
+        # Session 6.2: a platform-local template (report rendering) has no server
+        # to reach, so never build an SSH executor for it — `server` is None and
+        # any ctx.stream/capture call is a programming error, not a runtime one.
+        if get_template(job.action_name).local:
+            factory = _local_executor_factory
+
         async def _amain() -> None:
             async with factory(server) as executor:
                 ctx = JobContextImpl(
@@ -763,6 +831,25 @@ class JobRunner:
                     attempt=job.retry_count + 1,
                 )
                 await action.run(ctx)
+                # Drift baseline capture (session 6.7): a managed change to a
+                # tracked config artefact must MOVE the baseline (not register as
+                # drift). Runs inside the still-open SSH session, attributed to
+                # this job. Never fails the job — a capture error is logged and
+                # the job still succeeds.
+                template = get_template(job.action_name)
+                if template.writes_config:
+                    try:
+                        from app.core.drift import capture_baselines
+
+                        moved = await capture_baselines(ctx, template.writes_config)
+                        if moved:
+                            await ctx.emit(f"drift baseline updated: {', '.join(moved)}")
+                    except Exception:  # noqa: BLE001 — capture must not fail the job
+                        import logging
+
+                        logging.getLogger("app.jobs").exception(
+                            "drift baseline capture failed for job %s", job.id
+                        )
 
         asyncio.run(_amain())
 

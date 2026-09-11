@@ -19,6 +19,7 @@ from app.api.deps import require
 from app.audit import Audit
 from app.core.permissions import READ, SERVER_MANAGE
 from app.core.security import SecretsService, generate_ed25519_keypair, get_secrets_service
+from app.core.server_rollup import server_dashboard
 from app.core.ssh import ConnectionCheck, SSHService, get_ssh_service
 from app.db import get_db
 from app.models import Server, SSHCredential
@@ -26,6 +27,7 @@ from app.schemas.server import (
     CredentialIn,
     ServerCreate,
     ServerCreated,
+    ServerDashboardOut,
     ServerOut,
     ServerUpdate,
 )
@@ -89,6 +91,17 @@ def get_server(
     server_id: int, db: DbSession, _: Annotated[object, Depends(require(READ))]
 ) -> ServerOut:
     return ServerOut.from_model(_get_server(db, server_id))
+
+
+@router.get("/{server_id}/dashboard", response_model=ServerDashboardOut)
+def server_dashboard_endpoint(
+    server_id: int, db: DbSession, _: Annotated[object, Depends(require(READ))]
+) -> ServerDashboardOut:
+    """Per-server rollup for the Server Overview (session 2.6, B4.2): capacity +
+    service health, bench/site counts, site up/down, 24h job outcomes, and the
+    backup footprint — read-only, derived from live inventory."""
+    server = _get_server(db, server_id)
+    return ServerDashboardOut.model_validate(server_dashboard(db, server))
 
 
 @router.post("", response_model=ServerCreated, status_code=201)

@@ -7,7 +7,7 @@ as booleans ("a key is set") — never as plaintext or Fernet tokens.
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models import Server, SSHCredential
 
@@ -138,3 +138,67 @@ class ServerCreated(ServerOut):
     server-generated public key is returned, for the user to install."""
 
     generated_public_key: str | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Per-server dashboard rollup (session 2.6) — B4.2 Server Overview.
+# --------------------------------------------------------------------------- #
+
+
+class _Rollup(BaseModel):
+    """Base for the rollup shapes: validate straight from the core dataclasses."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CapacityRollupOut(_Rollup):
+    ok: bool
+    cpu_pct: float | None
+    mem_pct: float | None
+    disk_pct: float | None
+    mem_used_mb: int | None
+    mem_total_mb: int | None
+    disk_used_gb: float | None
+    disk_total_gb: float | None
+    load1: float | None
+    services: dict[str, str]
+    sampled_at: datetime | None
+    error: str | None
+
+
+class SitesRollupOut(_Rollup):
+    total: int
+    up: int
+    down: int
+    unknown: int
+
+
+class JobsRollupOut(_Rollup):
+    total: int
+    success: int
+    failure: int
+    running: int
+
+
+class BackupsRollupOut(_Rollup):
+    count: int
+    total_size_bytes: int
+    last_backup_at: datetime | None
+
+
+class ServerDashboardOut(_Rollup):
+    """The per-server Overview rollup: identity + capacity/health + inventory
+    counts + 24h job outcomes + backup footprint."""
+
+    server_id: int
+    name: str
+    hostname: str
+    env_tag: str
+    status: str
+    last_seen: datetime | None
+    benches: int
+    capacity: CapacityRollupOut | None
+    sites: SitesRollupOut
+    jobs_24h: JobsRollupOut
+    backups: BackupsRollupOut
+    generated_at: datetime

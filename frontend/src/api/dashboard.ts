@@ -54,6 +54,24 @@ export interface DashboardRunningJob {
   created_at: string
 }
 
+export interface DriftArtifactEntry {
+  id: number
+  server_id: number
+  artifact_key: string
+  path: string
+  drift_detected_at: string | null
+}
+
+export interface NeedsAttentionConfigDrift {
+  count: number
+  server_ids: number[]
+  artifacts: DriftArtifactEntry[]
+}
+
+export interface DashboardNeedsAttention {
+  config_drift: NeedsAttentionConfigDrift
+}
+
 export interface Dashboard {
   generated_at: string
   onboarding: DashboardOnboarding
@@ -63,6 +81,7 @@ export interface Dashboard {
   /** 7 entries, oldest → newest. */
   backup_grid: BackupGridDay[]
   running_jobs: DashboardRunningJob[]
+  needs_attention: DashboardNeedsAttention
 }
 
 export const dashboardApi = {

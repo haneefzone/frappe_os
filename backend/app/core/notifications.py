@@ -72,8 +72,12 @@ def _prune_old(db: Session, user_id: int) -> None:
 
     subq = (
         select(Notification.id)
+        # id.desc() breaks created_at ties deterministically: on SQLite
+        # server_default now() has 1-second resolution, so a burst of inserts
+        # shares a timestamp — without the id tie-break the "newest 200" set is
+        # arbitrary and prune can delete a row it just inserted.
         .where(Notification.user_id == user_id)
-        .order_by(Notification.created_at.desc())
+        .order_by(Notification.created_at.desc(), Notification.id.desc())
         .limit(_MAX_PER_USER)
         .subquery()
     )
@@ -156,7 +160,7 @@ def _dispatch_to_user(
 
     if pref.channel_email and user.email:
         try:
-            _send_email(user.email, title, body)
+            _send_email(user.email, title, body, db=db)
         except Exception:
             logger.exception("email notification failed for user %s", user.id)
 
@@ -186,6 +190,26 @@ def dispatch_job_event(db: Session, *, job_id: int, action_name: str, status: st
         body=f"Job #{job_id} ({action_name}) {verb}.",
         entity_type="job",
         entity_id=job_id,
+    )
+
+
+def dispatch_config_drift(
+    db: Session, *, server_id: int, server_name: str, artifact_keys: list[str]
+) -> None:
+    """Emit config.drift when a `server.drift_check` finds out-of-band edits.
+
+    Names only the artefact *keys* that drifted (never their content), so no
+    secret can reach a notification channel (golden rule 6)."""
+    if not artifact_keys:
+        return
+    keys = ", ".join(sorted(set(artifact_keys)))
+    dispatch_event(
+        db,
+        event_type="config.drift",
+        title=f"Config drift on {server_name}",
+        body=f"Out-of-band config changes detected on {server_name}: {keys}.",
+        entity_type="server",
+        entity_id=server_id,
     )
 
 
@@ -227,16 +251,92 @@ def _platform_webhook_url() -> str | None:
         return None
 
 
-def _send_email(to_address: str, subject: str, body: str) -> None:
+def _get_product_name(db: Session) -> str:
+    """Return the configured product name (falls back to default if not set)."""
+    try:
+        from app.models.settings import PlatformSettings
+        row = PlatformSettings.get_or_create(db)
+        return row.product_name or "FDM Platform"
+    except Exception:
+        return "FDM Platform"
+
+
+def _email_html(product_name: str, subject: str, body: str) -> str:
+    """Minimal branded HTML email template (no external resources)."""
+    import html as _html
+
+    n = _html.escape(product_name)
+    s = _html.escape(subject)
+    b = _html.escape(body).replace("\n", "<br>")
+    # fmt: off — HTML template; line lengths intentional.
+    bg = "background:#0a0a0b"
+    card_style = "background:#111113;border:1px solid #232326;border-radius:8px"  # noqa: E501
+    body_font = (
+        "margin:0;padding:0;"
+        f"{bg};"
+        "color:#f4f4f5;"
+        "font-family:ui-sans-serif,system-ui,sans-serif"
+    )
+    return (
+        "<!DOCTYPE html>"
+        '<html lang="en">'
+        f"<head><meta charset=\"UTF-8\"><title>{s}</title></head>"
+        f'<body style="{body_font}">'
+        f'<table width="100%" cellpadding="0" cellspacing="0" style="{bg}">'
+        '<tr><td align="center" style="padding:32px 16px">'
+        f'<table width="480" cellpadding="0" cellspacing="0" style="{card_style}">'
+        '<tr><td style="padding:20px 24px;border-bottom:1px solid #232326">'
+        f'<span style="font-size:14px;font-weight:600;color:#f4f4f5">{n}</span>'
+        "</td></tr>"
+        '<tr><td style="padding:24px">'
+        f'<p style="margin:0 0 8px;font-size:15px;font-weight:600;color:#f4f4f5">{s}</p>'
+        f'<p style="margin:0;font-size:14px;color:#a1a1aa;line-height:1.5">{b}</p>'
+        "</td></tr>"
+        '<tr><td style="padding:16px 24px;border-top:1px solid #232326">'
+        f'<span style="font-size:12px;color:#6b6b74">Sent by {n}</span>'
+        "</td></tr>"
+        "</table>"
+        "</td></tr>"
+        "</table>"
+        "</body>"
+        "</html>"
+    )
+
+
+def _send_email(
+    to_address: str,
+    subject: str,
+    body: str,
+    *,
+    db: Session | None = None,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+) -> None:
+    """Send one email — branded HTML alternative + optional attachments.
+
+    `db`, when provided, resolves the white-label product name for the branded
+    HTML alternative (session 6.6). `attachments` is a list of
+    (filename, payload, mime_subtype) — used by the 6.2 report delivery to
+    attach the generated artifact. Kept on this one sender so every outbound
+    email goes through the same SMTP configuration and the same "no SMTP host
+    means silently no-op" contract.
+    """
     from app.config import get_settings
     cfg = get_settings()
     if not cfg.smtp_host:
         return
+    product_name = _get_product_name(db) if db is not None else "FDM Platform"
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = cfg.smtp_from or "noreply@fdm.local"
     msg["To"] = to_address
+    # Plain-text fallback first, then attach HTML alternative.
     msg.set_content(body)
+    msg.add_alternative(_email_html(product_name, subject, body), subtype="html")
+    for filename, payload, subtype in attachments or []:
+        maintype, _, sub = subtype.partition("/")
+        if not sub:
+            maintype, sub = "application", subtype
+        msg.add_attachment(payload, maintype=maintype, subtype=sub, filename=filename)
 
     context = ssl.create_default_context()
     with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port or 587) as smtp:
@@ -246,6 +346,20 @@ def _send_email(to_address: str, subject: str, body: str) -> None:
             smtp.login(cfg.smtp_user, cfg.smtp_password)
         smtp.send_message(msg)
     logger.debug("email notification sent to %s: %s", to_address, subject)
+
+
+def send_email_with_attachment(
+    to_address: str,
+    subject: str,
+    body: str,
+    *,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+) -> None:
+    """Public entry point for a direct (non-notification) email with files —
+    the 6.2 scheduled report delivery. Notification-driven mail still goes
+    through `dispatch_event`, which honours per-user channel preferences; a
+    report schedule addresses an explicit recipient list instead."""
+    _send_email(to_address, subject, body, attachments=attachments)
 
 
 def _send_webhook(

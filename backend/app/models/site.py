@@ -27,6 +27,13 @@ from app.db import Base
 SITE_STATUSES = ("active", "missing")
 # Health is a placeholder until the monitoring session pings the site over HTTP.
 SITE_HEALTH = ("unknown", "ok", "warn", "err")
+# Deployment environment (session 3.3). Drives the EnvironmentBadge (PROD red /
+# STAGING amber / DEV grey) and the stricter prod-update guardrails: a `prod`
+# site can only be mutated by the safe update pipeline with a mandatory
+# pre-backup and a typed-name confirm. New/discovered sites default to `dev`;
+# an operator classifies a site as `prod` once it serves real users, and the
+# clone-to-staging job marks the clones it creates as `staging`.
+SITE_ENVIRONMENTS = ("dev", "staging", "prod")
 
 
 class Site(Base):
@@ -58,6 +65,12 @@ class Site(Base):
     # unknown | ok | warn | err — driven by the external HTTP uptime checker
     # (session 2.7): a passing check sets "ok", a failing one "err".
     health: Mapped[str] = mapped_column(String(20), default="unknown")
+
+    # dev | staging | prod (session 3.3, see SITE_ENVIRONMENTS). Drives the
+    # EnvironmentBadge and the safe-update guardrails: promoting an update to a
+    # `prod` site requires a mandatory pre-backup + typed-name confirm. New and
+    # discovered sites are `dev` until an operator classifies them.
+    environment: Mapped[str] = mapped_column(String(20), default="dev", index=True)
 
     # External HTTP(S) uptime checking (session 2.7). When enabled the checker
     # probes this site every ~60s and records an UptimeSample. Operators can

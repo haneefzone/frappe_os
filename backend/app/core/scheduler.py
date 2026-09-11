@@ -125,14 +125,63 @@ def _resolve_site_target(db: Session, schedule: Schedule):
     return site, bench, bench.server_id
 
 
-def _build_fire(db: Session, schedule: Schedule) -> tuple[int, str, dict, object | None]:
+def _build_report_fire(schedule: Schedule) -> tuple[None, str, dict, None]:
+    """Params for a `report.generate` fire (session 6.2).
+
+    A report schedule has no row target — its configuration lives entirely in
+    `Schedule.params` (report id, format, recipients, and the report's own
+    parameters). `server_id` is None: this is a platform-local job.
+    """
+    config = dict(schedule.params or {})
+    report_id = config.get("report_id")
+    if not report_id:
+        raise ScheduleError("report schedule has no report_id")
+
+    params = {
+        "report_id": str(report_id),
+        "format": str(config.get("format") or "csv"),
+    }
+    recipients = config.get("recipients") or []
+    if isinstance(recipients, list):
+        recipients = ",".join(str(address) for address in recipients)
+    if recipients:
+        params["recipients"] = str(recipients)
+    # Only forward the report parameters the template declares; anything else
+    # would fail render() as an unknown parameter.
+    for key in ("range_days", "within_days", "status"):
+        if config.get(key) not in (None, ""):
+            params[key] = str(config[key])
+    if schedule.created_by is not None:
+        params["requested_by"] = str(schedule.created_by)
+    return None, str(report_id), params, None
+
+
+def _build_fire(
+    db: Session, schedule: Schedule
+) -> tuple[int | None, str, dict, object | None]:
     """Return (server_id, target_id_str, params, side_row) for the job the
     schedule fires, pre-creating any side rows the action needs.
 
     For `site.backup` a `pending` Backup row is created up front (mirroring the
     manual backup endpoint) so a failed scheduled backup still leaves a visible
     failed record, and its id is threaded into the job params.
+
+    `server_id` is None for a platform-local action (6.2 report delivery).
     """
+    # server.drift_check is server-targeted: no site/bench resolution, no params.
+    if schedule.action_name == "server.drift_check":
+        if schedule.target_type != "server":
+            raise ScheduleError("server.drift_check requires target_type 'server'")
+        from app.models.server import Server
+
+        server = db.get(Server, schedule.target_id)
+        if server is None:
+            raise ScheduleError(f"server {schedule.target_id} no longer exists")
+        return server.id, None, {}, None
+
+    if schedule.action_name == "report.generate":
+        return _build_report_fire(schedule)
+
     site, bench, server_id = _resolve_site_target(db, schedule)
     target_id = f"{bench.path}::{site.name}"
 

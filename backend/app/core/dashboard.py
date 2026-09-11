@@ -34,7 +34,15 @@ from sqlalchemy.orm import Session
 
 from app.core.compliance import compliance_counts
 from app.core.uptime import fleet_uptime_fraction
-from app.models import Backup, CommandJob, Domain, MonitoringSample, Server, Site
+from app.models import (
+    Backup,
+    CommandJob,
+    ConfigBaseline,
+    Domain,
+    MonitoringSample,
+    Server,
+    Site,
+)
 
 # Fleet Health component weights (must sum to 100).
 HEALTH_W_UPTIME = 40  # real (session 2.7 — external HTTP checks)
@@ -192,6 +200,14 @@ def build_dashboard(db: Session) -> dict:
         ).all()
     )
 
+    # Config drift (session 6.7, B4.1 row 4 "Needs attention"): tracked config
+    # artefacts a `server.drift_check` found manually edited out of band.
+    drifted = list(
+        db.scalars(
+            select(ConfigBaseline).where(ConfigBaseline.status == "drifted")
+        ).all()
+    )
+
     servers_strip = []
     for s in servers:
         sample = latest.get(s.id)
@@ -235,6 +251,26 @@ def build_dashboard(db: Session) -> dict:
             failed_jobs_24h=int(failed_jobs_24h),
         ),
         "servers": servers_strip,
+        # "Needs attention" row (B4.1 row 4). Config drift lands here; updates
+        # available / failed restore tests join it in their own sessions.
+        "needs_attention": {
+            "config_drift": {
+                "count": len(drifted),
+                "server_ids": sorted({r.server_id for r in drifted}),
+                "artifacts": [
+                    {
+                        "id": r.id,
+                        "server_id": r.server_id,
+                        "artifact_key": r.artifact_key,
+                        "path": r.path,
+                        "drift_detected_at": r.drift_detected_at.isoformat()
+                        if r.drift_detected_at
+                        else None,
+                    }
+                    for r in drifted[:25]
+                ],
+            },
+        },
         "backup_grid": _backup_grid(db),
         "running_jobs": [
             {

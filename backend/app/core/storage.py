@@ -266,6 +266,31 @@ async def upload_artifact(
 
 
 # --------------------------------------------------------------------------- #
+# Streaming download (S3 -> caller), for the cross-server move (session 2.6)
+# --------------------------------------------------------------------------- #
+
+
+async def download_object(client, cfg: S3Config, key: str, *, chunk_size: int = 65536):
+    """Yield the bytes of one object from the target bucket in chunks — the read
+    side of a cross-server backup move (2.6): the artifact is streamed straight
+    from S3 into the destination server's file over SSH, never buffered whole.
+
+    boto3's StreamingBody is synchronous; reading it inside this async generator
+    briefly blocks the loop, which is fine in the single-job-per-worker model
+    (mirrors how `upload_artifact` calls `client.upload_fileobj` synchronously)."""
+    obj = client.get_object(Bucket=cfg.bucket, Key=key)
+    body = obj["Body"]
+    try:
+        while True:
+            chunk = body.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        body.close()
+
+
+# --------------------------------------------------------------------------- #
 # Presigned download
 # --------------------------------------------------------------------------- #
 

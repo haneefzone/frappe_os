@@ -60,6 +60,18 @@
       </div>
 
       <div v-else-if="server" class="grid max-w-4xl gap-6 lg:grid-cols-2">
+        <!-- Per-server rollup (session 2.6, B4.2): KPIs for this server only -->
+        <section v-if="rollupCards.length" aria-label="Server summary" class="grid gap-4 sm:grid-cols-2 lg:col-span-2 lg:grid-cols-4">
+          <KPICard
+            v-for="card in rollupCards"
+            :key="card.label"
+            :label="card.label"
+            :value="card.value"
+            :status="card.status"
+            :sublabel="card.sublabel"
+          />
+        </section>
+
         <!-- Specs -->
         <section class="rounded-lg border border-line bg-surface">
           <h2 class="border-b border-line px-4 py-2.5 text-label font-semibold text-ink-1">Overview</h2>
@@ -191,8 +203,49 @@
           </ul>
           <p v-if="testError" class="px-4 pb-3 text-label text-err" role="alert">{{ testError }}</p>
         </section>
+
+        <!-- Config drift (session 6.7) -->
+        <section class="rounded-lg border border-line bg-surface lg:col-span-2">
+          <div class="flex items-center justify-between border-b border-line px-4 py-2.5">
+            <h2 class="text-label font-semibold text-ink-1">Config drift</h2>
+            <div class="flex items-center gap-2">
+              <span v-if="driftBaselines.length" class="text-meta text-ink-3">
+                {{ driftedCount }} drifted of {{ driftBaselines.length }}
+              </span>
+              <Button
+                v-if="canManage"
+                variant="subtle"
+                theme="gray"
+                size="sm"
+                :label="runningDriftCheck ? 'Starting…' : 'Run check now'"
+                :loading="runningDriftCheck"
+                @click="triggerDriftCheck"
+              />
+            </div>
+          </div>
+          <div v-if="driftLoading" class="flex flex-wrap gap-2 p-4">
+            <div v-for="i in 4" :key="i" class="h-6 w-28 animate-pulse rounded-full bg-raised" />
+          </div>
+          <div v-else-if="driftBaselines.length === 0" class="px-4 py-3 text-label text-ink-3">
+            No config baselines tracked yet. Baselines are captured by managed jobs (install, configure).
+          </div>
+          <div v-else class="flex flex-wrap gap-2 p-4">
+            <DriftChip
+              v-for="b in driftBaselines"
+              :key="b.id"
+              :baseline="b"
+              @click="activeDriftId = b.id"
+            />
+          </div>
+        </section>
       </div>
     </div>
+
+  <DriftDrawer
+    :baseline-id="activeDriftId"
+    @close="activeDriftId = null"
+    @accepted="loadDrift"
+  />
 
     <!-- Restart confirmation: a service restart is disruptive (spec B5). -->
     <ConfirmModal
@@ -228,9 +281,19 @@ import {
   type ServiceName,
   type ServiceState,
 } from '../api/monitoring'
-import { serversApi, streamServerTest, type CheckEvent, type Server } from '../api/servers'
+import {
+  serversApi,
+  streamServerTest,
+  type CheckEvent,
+  type Server,
+  type ServerDashboard,
+} from '../api/servers'
+import { driftApi, type DriftBaseline } from '../api/drift'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import DriftChip from '../components/DriftChip.vue'
+import DriftDrawer from '../components/DriftDrawer.vue'
 import EnvironmentBadge from '../components/EnvironmentBadge.vue'
+import KPICard from '../components/KPICard.vue'
 import ResourceGauge from '../components/ResourceGauge.vue'
 import StatusDot from '../components/StatusDot.vue'
 import { toast } from '../components/toast'
@@ -257,7 +320,105 @@ const server = ref<Server | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 
-const TOOL_KEYS = ['git', 'python3', 'uv', 'node', 'mariadb', 'redis-server', 'wkhtmltopdf', 'bench']
+// -- Config drift (session 6.7) -----------------------------------------------
+const driftBaselines = ref<DriftBaseline[]>([])
+const driftLoading = ref(false)
+const activeDriftId = ref<number | null>(null)
+const runningDriftCheck = ref(false)
+
+const driftedCount = computed(() => driftBaselines.value.filter((b) => b.status === 'drifted').length)
+
+async function loadDrift() {
+  driftLoading.value = true
+  try {
+    driftBaselines.value = await driftApi.list({ server_id: serverId })
+  } catch {
+    // Non-fatal — drift section shows empty state
+  } finally {
+    driftLoading.value = false
+  }
+}
+
+async function triggerDriftCheck() {
+  if (runningDriftCheck.value) return
+  runningDriftCheck.value = true
+  try {
+    const { job_id } = await driftApi.runCheck(serverId)
+    router.push(`/jobs/${job_id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'A drift check is already running on this server.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not start drift check.'
+    toast.error(message)
+  } finally {
+    runningDriftCheck.value = false
+  }
+}
+
+// -- Per-server rollup (session 2.6, B4.2) -----------------------------------
+const dashboard = ref<ServerDashboard | null>(null)
+
+async function loadDashboard() {
+  try {
+    dashboard.value = await serversApi.dashboard(serverId)
+  } catch {
+    dashboard.value = null // the rollup strip simply hides on error
+  }
+}
+
+function fmtBytes(n: number): string {
+  if (!n) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)))
+  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`
+}
+
+const rollupCards = computed(() => {
+  const d = dashboard.value
+  if (!d) return []
+  const capacityStatus =
+    d.capacity == null
+      ? 'muted'
+      : !d.capacity.ok
+        ? 'err'
+        : (d.capacity.disk_pct ?? 0) >= 90 || (d.capacity.mem_pct ?? 0) >= 90
+          ? 'warn'
+          : 'ok'
+  return [
+    {
+      label: 'Sites up',
+      value: `${d.sites.up}/${d.sites.total}`,
+      status: (d.sites.down > 0 ? 'warn' : 'ok') as Status,
+      sublabel: `${d.benches} bench${d.benches === 1 ? '' : 'es'}`,
+    },
+    {
+      label: 'Capacity',
+      value: d.capacity?.cpu_pct != null ? `${Math.round(d.capacity.cpu_pct)}% CPU` : 'No data',
+      status: capacityStatus as Status,
+      sublabel:
+        d.capacity?.mem_pct != null && d.capacity?.disk_pct != null
+          ? `RAM ${Math.round(d.capacity.mem_pct)}% · Disk ${Math.round(d.capacity.disk_pct)}%`
+          : 'Awaiting a poll',
+    },
+    {
+      label: 'Jobs (24h)',
+      value: String(d.jobs_24h.total),
+      status: (d.jobs_24h.failure > 0 ? 'err' : 'ok') as Status,
+      sublabel: `${d.jobs_24h.success} ok · ${d.jobs_24h.failure} failed`,
+    },
+    {
+      label: 'Backups',
+      value: String(d.backups.count),
+      status: 'ok' as Status,
+      sublabel: `${fmtBytes(d.backups.total_size_bytes)}${d.backups.last_backup_at ? ` · last ${relativeTime(d.backups.last_backup_at)}` : ''}`,
+    },
+  ]
+})
+
+const TOOL_KEYS =['git', 'python3', 'uv', 'node', 'mariadb', 'redis-server', 'wkhtmltopdf', 'bench']
 const coreRows = reactive<{ key: string; label: string; status: RowStatus; value: string | null }[]>([])
 const toolRows = reactive<{ key: string; label: string; status: RowStatus; value: string | null }[]>([])
 
@@ -446,6 +607,7 @@ async function load() {
   try {
     server.value = await serversApi.get(serverId)
     seedRows()
+    void loadDashboard()
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : 'Could not load this server.'
   } finally {
@@ -456,6 +618,7 @@ async function load() {
 onMounted(() => {
   void load()
   void loadMonitoring(true)
+  void loadDrift()
   monTimer = setInterval(() => void loadMonitoring(), MON_POLL_MS)
 })
 

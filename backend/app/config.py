@@ -109,6 +109,35 @@ class Settings(BaseSettings):
     # measured in hours, so minute-level precision buys nothing. SET via
     # COMPLIANCE_TICK_SECONDS.
     compliance_tick_seconds: int = 3600
+    # AlertRule evaluation (session 3.1): the scheduler process registers a
+    # recurring sweep that evaluates every enabled AlertRule against the latest
+    # monitoring samples at this cadence and dispatches breaches over email /
+    # signed webhook (dedup by per-rule cooldown). Aligned with the monitoring
+    # poll (~60s) so a breach is caught within a poll. SET via ALERTS_TICK_SECONDS.
+    alerts_tick_seconds: int = 60
+
+    # Reports (session 6.2). Generated artifacts land here, one file per
+    # ReportRun; the path resolves from the backend working directory like
+    # uploads_dir. Retention prunes artifacts (and their rows' paths) after this
+    # many days — evidence exports are re-generatable, so keeping them forever
+    # only grows disk. Set via REPORTS_DIR / REPORTS_RETENTION_DAYS.
+    reports_dir: str = "reports"
+    reports_retention_days: int = 90
+    # A synchronous CSV run is allowed only when the generator's row count stays
+    # under this; anything larger must go through the job queue (golden rule 3).
+    reports_sync_max_rows: int = 5000
+    # SSH connection-pool limits (session 2.6): cap concurrent AsyncSSH sessions
+    # (channels) opened per managed server so a burst of work — a fan-out job or
+    # many parallel operations on one host — cannot exhaust the host's sshd
+    # MaxSessions/MaxStartups and knock other work offline. Beyond the cap,
+    # callers QUEUE (wait) for a free slot rather than failing; only if no slot
+    # frees within ssh_session_acquire_timeout_seconds does the operation fail
+    # cleanly with backpressure (SessionPoolTimeout) instead of hanging. A
+    # per-server override lives on Server.ssh_pool_limit. The cap must be >= the
+    # most sessions a single job holds at once on one host (normal actions hold 1)
+    # so a job can never deadlock waiting on itself.
+    ssh_max_sessions_per_server: int = 5
+    ssh_session_acquire_timeout_seconds: float = 30.0
 
     # Notifications (session 2.8): minimal SMTP + signed webhook channels.
     # SMTP: set SMTP_HOST to enable email. TLS defaults on (STARTTLS).

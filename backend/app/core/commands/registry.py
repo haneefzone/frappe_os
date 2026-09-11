@@ -9,6 +9,7 @@ Starter templates (session 1.3):
 from __future__ import annotations
 
 from app.core.commands.actions import (
+    Action,
     BackupAction,
     BenchBuildAction,
     BenchPreflightAction,
@@ -16,16 +17,20 @@ from app.core.commands.actions import (
     BenchUpdateAction,
     CertbotIssueAction,
     CertbotRenewAction,
+    CloneToStagingAction,
     CreateBenchAction,
     CreateSiteAction,
     DetectToolsAction,
     DiscoverBenchesAction,
     DnsCheckAction,
+    DriftCheckAction,
     EchoDemoAction,
     GetAppAction,
     InstallAppOnSiteAction,
     ListBranchesAction,
     MigrateAllSitesAction,
+    MoveBackupAction,
+    PromoteUpdateAction,
     RenderVhostAction,
     RestartServiceAction,
     RestoreAction,
@@ -37,6 +42,7 @@ from app.core.commands.actions import (
     SslExpiryScanAction,
     UninstallAppAction,
     ValidateBackupAction,
+    VerifyChecklistAction,
 )
 from app.core.commands.templates import (
     CommandTemplate,
@@ -47,8 +53,10 @@ from app.core.permissions import (
     APP_MANAGE,
     BACKUP_CREATE,
     BACKUP_RESTORE,
+    BACKUP_TRANSFER,
     BENCH_OPERATE,
     DANGER,
+    READ,
     SERVER_MANAGE,
     SITE_OPERATE,
     SSL_MANAGE,
@@ -311,6 +319,9 @@ register(
         requires_lock=True,
         required_permission=SITE_OPERATE,
         run_as=None,
+        # Creating a site writes its site_config.json and may touch the bench's
+        # common_site_config.json — capture both as the new baseline.
+        writes_config=("site_config", "common_site_config"),
         secret_sources={
             # Pulled from the server settings, server-side, never the browser.
             "db_root_pw": "server:mariadb_root_password_enc",
@@ -338,6 +349,9 @@ register(
         requires_lock=True,
         required_permission=SITE_OPERATE,
         run_as=None,
+        # Writes the scheduler flag into the site's site_config.json (session 6.7
+        # drift baseline moves with this managed change).
+        writes_config=("site_config",),
     )
 )
 
@@ -356,6 +370,7 @@ register(
         requires_lock=True,
         required_permission=SITE_OPERATE,
         run_as=None,
+        writes_config=("site_config",),
     )
 )
 
@@ -751,6 +766,34 @@ register(
     )
 )
 
+# `backup.move_across_servers` — copy an offsite backup down onto another server,
+# re-verifying each artifact's sha256 on arrival, and register the moved copy
+# (session 2.6). Runs on the DESTINATION server; the source backup must already
+# be offsite (its keys/target are passed in). Locked on the destination site so a
+# move can't race a backup/restore of the same site. Non-idempotent (creates one
+# Backup row), so it must never auto-retry into a duplicate.
+register(
+    CommandTemplate(
+        action_name="backup.move_across_servers",
+        argv=("true",),  # nominal; MoveBackupAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("backup_id", regex=BACKUP_ID),
+            ParamSpec("storage_target_id", regex=BACKUP_ID),
+            # Absolute destination directory on the target server (the site's
+            # backups dir); the platform computes it, never the user's shell.
+            ParamSpec("dest_dir", regex=ABS_PATH, is_path=True),
+            ParamSpec("target_site", regex=SITE_NAME),
+            ParamSpec("target_bench_id", regex=BACKUP_ID),
+        ),
+        action_class=MoveBackupAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BACKUP_TRANSFER,
+        run_as=None,
+    )
+)
+
 # Internal restore sub-commands, rendered by RestoreAction (never launched on
 # their own path). `--force` per gotcha #7; paths are absolute artifact paths.
 register(
@@ -858,6 +901,184 @@ register(
     )
 )
 
+# --- Safe update pipeline (session 3.3) --------------------------------- #
+
+# A Frappe doctype name for the row-count probe. Letters + spaces only (e.g.
+# "User", "Sales Invoice"); passed as its own argv element inside a fixed
+# `["{doctype}"]` --args token (execve, no shell) — no metacharacters can pass.
+DOCTYPE = r"[A-Za-z][A-Za-z ]{1,60}"
+
+# A dotted Python path for the optional data-scrub hook (uiux §8): the method
+# `bench --site X execute <method>` runs to mask PII on a prod→dev clone. Only
+# word chars and dots — no shell metacharacters, no arguments. The operator
+# configures which shipped method performs the masking; NULL skips the scrub.
+DOTTED_METHOD = r"[a-zA-Z_][a-zA-Z0-9_.]{1,120}"
+
+# A UpdatePipeline row id threaded onto a 3.3 job so the action can persist its
+# progress (clone -> staging_site_id, verify -> checklist, promote -> pre_backup).
+PIPELINE_ID = r"[0-9]{1,12}"
+
+# `bench --site X execute frappe.ping` — the boot probe (read-only). Rendered as
+# a sub-step by the verify/promote actions; runnable standalone.
+register(
+    CommandTemplate(
+        action_name="site.ping",
+        argv=("bench", "--site", "{site}", "execute", "frappe.ping"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=Action,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=READ,
+        run_as=None,
+    )
+)
+
+# `bench --site X scheduler status` — read-only scheduler/workers probe.
+register(
+    CommandTemplate(
+        action_name="site.scheduler_status",
+        argv=("bench", "--site", "{site}", "scheduler", "status"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+        ),
+        action_class=Action,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=READ,
+        run_as=None,
+    )
+)
+
+# `bench --site X execute frappe.client.get_count --args '["<Doctype>"]'` — the
+# row-count sanity probe. The doctype is validated (letters/spaces) and inserted
+# into a fixed JSON --args token as its own argv element (execve, no shell).
+register(
+    CommandTemplate(
+        action_name="site.count_doctype",
+        argv=(
+            "bench", "--site", "{site}", "execute", "frappe.client.get_count",
+            "--args", '["{doctype}"]',
+        ),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("doctype", regex=DOCTYPE),
+        ),
+        action_class=Action,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=READ,
+        run_as=None,
+    )
+)
+
+# `bench --site X execute <method>` — the optional PII data-scrub hook. The
+# method is an operator-configured shipped dotted path (no arguments); rendered
+# only as a sub-step of the clone job.
+register(
+    CommandTemplate(
+        action_name="site.scrub",
+        argv=("bench", "--site", "{site}", "execute", "{method}"),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("method", regex=DOTTED_METHOD),
+        ),
+        action_class=Action,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SITE_OPERATE,
+        run_as=None,
+    )
+)
+
+# The clone-to-staging orchestrator POST /api/update-pipelines launches: back up
+# the source site (with files), create + restore into a fresh staging site, run
+# the optional PII scrub, and tag the clone `environment=staging`. Locked on the
+# staging target site. Reuses backup:restore machinery -> BACKUP_RESTORE.
+register(
+    CommandTemplate(
+        action_name="site.clone_to_staging",
+        argv=("true",),  # nominal; CloneToStagingAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("source_site", regex=SITE_NAME),
+            ParamSpec("source_bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("site", regex=SITE_NAME),  # the staging site to create
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),  # staging bench
+            ParamSpec("scrub_method", regex=DOTTED_METHOD, required=False),
+            ParamSpec("pipeline_id", regex=PIPELINE_ID, required=False),
+            ParamSpec("admin_pw", regex=SECRET_TEXT, secret=True, required=False),
+            ParamSpec("db_root_pw", regex=SECRET_TEXT, secret=True, required=False),
+        ),
+        action_class=CloneToStagingAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BACKUP_RESTORE,
+        run_as=None,
+        secret_sources={
+            "admin_pw": "job",
+            "db_root_pw": "server:mariadb_root_password_enc",
+        },
+    )
+)
+
+# The verification-checklist job POST /api/update-pipelines/{id}/verify launches:
+# boot / migrations / scheduler / row-count probes on the staging clone, emitting
+# CHECKLIST_RESULT and persisting the verdict onto the pipeline. Runs `bench
+# migrate` (a mutation) -> SITE_OPERATE, locked on the staging site.
+register(
+    CommandTemplate(
+        action_name="site.verify_checklist",
+        argv=("true",),  # nominal; VerifyChecklistAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("source_site", regex=SITE_NAME, required=False),
+            ParamSpec("source_bench_path", regex=ABS_PATH, is_path=True, required=False),
+            ParamSpec("pipeline_id", regex=PIPELINE_ID, required=False),
+        ),
+        action_class=VerifyChecklistAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SITE_OPERATE,
+        run_as=None,
+    )
+)
+
+# The promote job POST /api/update-pipelines/{id}/promote launches: a MANDATORY
+# pre-update backup of prod FIRST (the gate), then `bench update`, then a
+# post-check; a failed update rolls back by restoring the pre-update backup.
+# BACKUP_RESTORE launches it; the destructive prod mutation also requires the
+# `danger` perm + typed-site-name confirm + a green checklist, enforced in the API.
+register(
+    CommandTemplate(
+        action_name="site.promote_update",
+        argv=("true",),  # nominal; PromoteUpdateAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("pipeline_id", regex=PIPELINE_ID, required=False),
+        ),
+        action_class=PromoteUpdateAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BACKUP_RESTORE,
+        run_as=None,
+    )
+)
+
+
 # --- Monitoring: restart a managed service (session 1.12) ---------------- #
 
 # The four services the monitoring grid shows and can restart. Passed as its own
@@ -950,6 +1171,9 @@ register(
         requires_lock=True,
         required_permission=BENCH_OPERATE,
         run_as=None,
+        # Production conversion regenerates the root nginx + supervisor config —
+        # move those (reduced-fidelity) baselines with the managed change.
+        writes_config=("nginx.conf", "supervisor.conf", "supervisor.confd"),
     )
 )
 
@@ -1044,6 +1268,9 @@ register(
         requires_lock=True,
         required_permission=SSL_MANAGE,
         run_as=None,
+        # Regenerates the bench's platform-managed nginx vhost dir — capture it
+        # as the new baseline so a managed vhost change is not flagged as drift.
+        writes_config=("nginx_vhosts",),
     )
 )
 
@@ -1100,6 +1327,146 @@ register(
         run_as=None,
     )
 )
+
+
+# Drift detection (session 6.7): re-hash every tracked config artefact on a
+# server and diff against baseline. Read-only (cat/find only), so idempotent and
+# safe to auto-retry. Per-server lock so two checks never race. Server-scoped:
+# no params, target_type "server". Requires server:manage to launch (it may
+# establish first-sight baselines); schedulable via the 2.1 Schedule model.
+register(
+    CommandTemplate(
+        action_name="server.drift_check",
+        argv=("true",),  # nominal; DriftCheckAction reads + hashes the artefacts.
+        cwd=None,
+        params=(),
+        action_class=DriftCheckAction,
+        idempotent=True,
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
+# --------------------------------------------------------------------------- #
+# restic config-tier DR backups (session 4.1)
+#
+# Each managed server has one restic repository (its OS/config tier) inside an
+# existing 2.2 StorageTarget bucket. The repo password + S3 keys are secrets that
+# reach restic ONLY via its process environment (a 0600 env file the action
+# stages + sources), never on an argv element and never logged (golden rule 6) —
+# so these templates declare NO secret params: their argv is entirely non-secret
+# (the repo URI, the fixed config tag, the snapshot host). `restic.install`
+# needs no repo; init/backup/snapshots take a per-server lock so two restic ops
+# on the same server can't race the repo. All gated on server:manage
+# (Admin/Developer manage; Operator/Read-only cannot — golden rule 7).
+# Imported locally to keep concurrent-session edits to this file collision-free.
+# --------------------------------------------------------------------------- #
+from app.core.commands.actions import (  # noqa: E402
+    ResticBackupAction as _ResticBackupAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    ResticInitAction as _ResticInitAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    ResticInstallAction as _ResticInstallAction,
+)
+from app.core.commands.actions import (  # noqa: E402
+    ResticSnapshotsAction as _ResticSnapshotsAction,
+)
+from app.core.restic import CONFIG_TAG as _CONFIG_TAG  # noqa: E402
+
+# A restic S3 repository URI: `s3:<endpoint-or-host>/<bucket>[/<prefix>]`. Built
+# server-side from the 2.2 StorageTarget (never fresh user input on this path),
+# but validated as its own argv element anyway: a shell-safe whitelist (no
+# spaces, no ; ` $ ( ) & | < > \ or quotes) so it can never break out of its
+# argv slot even inside the env-file wrapper.
+RESTIC_REPO_URI = r"s3:[A-Za-z0-9._:/-]{1,300}"
+
+# The --host label restic stamps on a snapshot: the managed server's hostname (or
+# name). Shell-safe hostname whitelist; its own argv element.
+RESTIC_HOST = r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}"
+
+# `restic.install` — detect restic; install the pinned release to ~/.local/bin
+# when absent (no root). Read-only-ish (never touches the repo/secrets); no lock.
+register(
+    CommandTemplate(
+        action_name="restic.install",
+        argv=("true",),  # nominal; ResticInstallAction drives detect + install.
+        cwd=None,
+        params=(),
+        action_class=_ResticInstallAction,
+        idempotent=True,  # detect-or-install is safely repeatable.
+        requires_lock=False,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
+# `restic init` — create the repository in the bucket. The action wraps this
+# rendered argv in the env-file sourcing wrapper so RESTIC_PASSWORD/AWS_* reach
+# restic via env, never argv. Non-idempotent at the template level; the action
+# treats "already initialized" as success. Per-server lock.
+register(
+    CommandTemplate(
+        action_name="restic.init",
+        argv=("restic", "-r", "{repo}", "init"),
+        cwd=None,
+        params=(ParamSpec("repo", regex=RESTIC_REPO_URI),),
+        action_class=_ResticInitAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
+# Session 6.2: the platform-local `report.generate` template lives in its own
+# module because it depends on the reports package (nothing else in the registry
+# does) and because a local, non-SSH template deserves to be visibly separate
+# from the remote-command catalogue above. Imported last, for the side effect of
+# registering itself — `register` is already defined by this point.
+from app.core.commands import report_actions as _report_actions  # noqa: E402,F401
+
+# `restic backup` — snapshot the OS/config tier. The action appends the (constant)
+# config source paths + the staged dpkg manifest to this rendered prefix and wraps
+# it in the env-file wrapper. One snapshot per run, so non-idempotent. Per-server
+# lock so a backup and an init/snapshots can't race the repo.
+register(
+    CommandTemplate(
+        action_name="restic.backup",
+        argv=("restic", "-r", "{repo}", "backup", "--tag", _CONFIG_TAG, "--host", "{host}"),
+        cwd=None,
+        params=(
+            ParamSpec("repo", regex=RESTIC_REPO_URI),
+            ParamSpec("host", regex=RESTIC_HOST),
+        ),
+        action_class=_ResticBackupAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
+# `restic snapshots` — read-only evidence listing of the config-tier snapshots.
+# Idempotent (safe to retry). Per-server lock kept off so it never blocks/510s a
+# concurrent read; the action only reads.
+register(
+    CommandTemplate(
+        action_name="restic.snapshots",
+        argv=("restic", "-r", "{repo}", "snapshots", "--tag", _CONFIG_TAG),
+        cwd=None,
+        params=(ParamSpec("repo", regex=RESTIC_REPO_URI),),
+        action_class=_ResticSnapshotsAction,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=SERVER_MANAGE,
+        run_as=None,
+    )
+)
+
+
 
 
 # --- AI Agents module (session 5.1) ------------------------------------- #

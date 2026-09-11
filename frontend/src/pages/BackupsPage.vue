@@ -103,6 +103,13 @@
                   <span class="font-medium text-ink-1">{{ b.site_name }}</span>
                 </div>
                 <span class="text-meta text-ink-3">{{ b.bench_name }}</span>
+                <StatusBadge
+                  v-if="b.moved_from_backup_id"
+                  class="ml-1"
+                  status="muted"
+                  label="Moved"
+                  :title="`Moved from backup #${b.moved_from_backup_id} on another server`"
+                />
               </td>
               <td class="px-4 py-2.5">
                 <StatusBadge :status="b.type === 'with-files' ? 'ok' : 'muted'" :label="typeLabel(b.type)" />
@@ -168,6 +175,16 @@
                     @click="validate(b)"
                   />
                   <Button
+                    v-if="canMove && b.status === 'success' && b.storage_state === 'offsite'"
+                    variant="subtle"
+                    theme="gray"
+                    size="sm"
+                    label="Move"
+                    title="Move this backup onto another server (via its offsite copy)"
+                    :aria-label="`Move ${b.site_name} backup to another server`"
+                    @click="openMove(b)"
+                  />
+                  <Button
                     v-if="canRestore && b.status === 'success'"
                     variant="subtle"
                     theme="gray"
@@ -176,6 +193,81 @@
                     @click="router.push(`/restore?backup=${b.id}`)"
                   />
                 </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Config repos tab (4.1) -->
+    <div v-else-if="activeTab === 'config-repos'" class="min-h-0 flex-1 overflow-y-auto p-8">
+      <div class="mb-4">
+        <h2 class="text-section font-semibold text-ink-1">Config-tier repos</h2>
+        <p class="text-label text-ink-3">
+          Per-server restic repos capturing OS/config snapshots. Read-only evidence view.
+        </p>
+      </div>
+
+      <p v-if="loadError" class="mb-3 text-label text-err" role="alert">{{ loadError }}</p>
+
+      <div v-if="loading" class="rounded-lg border border-line bg-surface">
+        <div v-for="i in 3" :key="i" class="flex items-center gap-6 border-b border-line px-4 py-3 last:border-0">
+          <div class="h-3.5 w-40 animate-pulse rounded bg-raised" />
+          <div class="h-3.5 w-16 animate-pulse rounded bg-raised" />
+          <div class="h-3.5 w-24 animate-pulse rounded bg-raised" />
+        </div>
+      </div>
+
+      <EmptyState
+        v-else-if="resticRepos.length === 0"
+        :icon="LucideShieldCheck"
+        title="No config repos"
+        message="Configure a restic repo on a server to start capturing config-tier snapshots."
+      />
+
+      <div v-else class="overflow-hidden rounded-lg border border-line bg-surface">
+        <table class="w-full text-left">
+          <thead>
+            <tr class="border-b border-line text-meta uppercase tracking-wide text-ink-3">
+              <th class="px-4 py-2 font-medium">Server</th>
+              <th class="px-4 py-2 font-medium">Kind</th>
+              <th class="px-4 py-2 font-medium">Storage</th>
+              <th class="px-4 py-2 font-medium">Initialized</th>
+              <th class="px-4 py-2 font-medium">Last backup</th>
+              <th class="px-4 py-2 font-medium">Snapshot</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-line text-label">
+            <tr v-for="repo in resticRepos" :key="repo.id">
+              <td class="px-4 py-2.5">
+                <span class="font-medium text-ink-1">{{ serverName(repo.server_id) }}</span>
+                <div v-if="repo.prefix" class="truncate font-mono text-meta text-ink-3">{{ repo.prefix }}</div>
+              </td>
+              <td class="px-4 py-2.5">
+                <StatusBadge
+                  :status="kindChip(repo.kind).status"
+                  :label="kindChip(repo.kind).label"
+                />
+              </td>
+              <td class="px-4 py-2.5">
+                <StatusBadge
+                  :status="resticStorageChip(repo.storage_target_name).status"
+                  :label="resticStorageChip(repo.storage_target_name).label"
+                />
+              </td>
+              <td class="px-4 py-2.5">
+                <StatusBadge v-if="repo.initialized" status="ok" label="Yes" />
+                <span v-else class="text-ink-3">No</span>
+              </td>
+              <td
+                class="px-4 py-2.5 text-ink-3"
+                :title="repo.last_backup_at ? absoluteTime(repo.last_backup_at) : undefined"
+              >
+                {{ repo.last_backup_at ? relativeTime(repo.last_backup_at) : '—' }}
+              </td>
+              <td class="px-4 py-2.5 font-mono text-meta text-ink-3" :title="repo.last_snapshot_id ?? undefined">
+                {{ repo.last_snapshot_id ? repo.last_snapshot_id.slice(0, 8) : '—' }}
               </td>
             </tr>
           </tbody>
@@ -372,6 +464,75 @@
         </div>
       </Transition>
     </Teleport>
+
+    <!-- Move backup modal (session 2.6) -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-150 ease-out"
+        enter-from-class="opacity-0"
+        leave-active-class="transition duration-150 ease-out"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="moveOpen"
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          @click.self="closeMove"
+        >
+          <div
+            ref="movePanel"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Move backup to another server"
+            tabindex="-1"
+            class="fdm-focus w-full max-w-md rounded-lg border border-line bg-raised"
+            @keydown.esc="closeMove"
+            @keydown.tab="trapMoveFocus"
+          >
+            <div class="border-b border-line px-5 py-4">
+              <h2 class="text-section font-semibold text-ink-1">Move to another server</h2>
+              <p class="mt-0.5 text-label text-ink-2">
+                Copy <span class="font-medium text-ink-1">{{ moveSource?.site_name }}</span>'s
+                backup onto another server. Its artifacts stream from offsite storage, each
+                checksum is re-verified on arrival, and the moved copy is registered there.
+              </p>
+            </div>
+            <div class="space-y-4 px-5 py-4">
+              <div v-if="moveTargetBenches.length">
+                <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2" for="move-bench">
+                  Destination bench
+                </label>
+                <select id="move-bench" v-model="moveForm.benchId" v-bind="modalInput">
+                  <option v-for="bn in moveTargetBenches" :key="bn.id" :value="bn.id">
+                    {{ serverName(bn.server_id) }} — {{ bn.name }}
+                  </option>
+                </select>
+                <p class="mt-1 text-meta text-ink-3">
+                  Only benches on a different server are listed. The destination site
+                  (<span class="font-medium text-ink-2">{{ moveSource?.site_name }}</span>) must
+                  already exist there.
+                </p>
+              </div>
+              <p v-else class="text-label text-ink-3">
+                No eligible destination. Register a second server with a bench that already
+                hosts a site named
+                <span class="font-medium text-ink-2">{{ moveSource?.site_name }}</span>.
+              </p>
+            </div>
+            <div class="flex justify-end gap-2 border-t border-line px-5 py-3.5">
+              <Button variant="subtle" theme="gray" label="Cancel" :disabled="busy" @click="closeMove" />
+              <Button
+                variant="solid"
+                theme="gray"
+                label="Move backup"
+                :loading="busy"
+                :disabled="!moveTargetBenches.length"
+                @click="submitMove"
+              />
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -386,6 +547,7 @@ import LucideHistory from '~icons/lucide/history'
 import LucideRefreshCw from '~icons/lucide/refresh-cw'
 import LucideShieldCheck from '~icons/lucide/shield-check'
 import { backupsApi, type Backup } from '../api/backups'
+import { benchesApi, type Bench } from '../api/benches'
 import { ApiError } from '../api/client'
 import {
   complianceApi,
@@ -394,6 +556,8 @@ import {
   type ComplianceStatus,
   type ComplianceSummary,
 } from '../api/compliance'
+import { resticApi, type ResticRepo } from '../api/restic'
+import { serversApi, type Server } from '../api/servers'
 import { sitesApi, type Site } from '../api/sites'
 import { storageApi, type StorageTarget } from '../api/storage'
 import EmptyState from '../components/EmptyState.vue'
@@ -408,6 +572,8 @@ import {
   BACKUP_TYPE_LABEL,
   backupStatusDot as statusDot,
   formatBytes,
+  kindChip,
+  resticStorageChip,
   storageChip,
   totalSize,
 } from '../lib/backups'
@@ -420,23 +586,29 @@ const canBackup = auth.hasPermission('backup:create')
 const canRestore = auth.hasPermission('backup:restore')
 const canDownload = auth.hasPermission('backup:restore')
 const canManagePolicy = auth.hasPermission('schedule:manage')
+const canMove = auth.hasPermission('backup:transfer')
 
 const backups = ref<Backup[]>([])
 const sites = ref<Site[]>([])
+const benches = ref<Bench[]>([])
+const servers = ref<Server[]>([])
 const storageTargets = ref<StorageTarget[]>([])
 const summary = ref<ComplianceSummary | null>(null)
 const policies = ref<Record<number, BackupPolicy>>({})
+const resticRepos = ref<ResticRepo[]>([])
+const configReposLoaded = ref(false)
 const loading = ref(true)
 const loadError = ref('')
 const busy = ref(false)
 const offsiteBusy = ref('')
 const evaluating = ref(false)
 
-// -- Tabs (B4.6) -------------------------------------------------------------
-type TabKey = 'backups' | 'policies'
+// -- Tabs (B4.6 + 4.1) -------------------------------------------------------
+type TabKey = 'backups' | 'policies' | 'config-repos'
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'backups', label: 'Backups' },
   { key: 'policies', label: 'Policies' },
+  { key: 'config-repos', label: 'Config repos' },
 ]
 const activeTab = ref<TabKey>('backups')
 
@@ -444,6 +616,9 @@ function switchTab(key: TabKey) {
   activeTab.value = key
   if (key === 'policies' && Object.keys(policies.value).length === 0) {
     void loadPolicies()
+  }
+  if (key === 'config-repos' && !configReposLoaded.value) {
+    void loadConfigRepos()
   }
 }
 
@@ -548,6 +723,8 @@ async function load() {
     void loadStorageTargets()
     // Fleet compliance summary drives the KPI card + Policies tab ticks.
     void loadSummary()
+    // Benches + servers drive the cross-server Move picker (Developer+ only).
+    if (canMove) void loadMoveTargets()
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : 'Could not load backups.'
   } finally {
@@ -581,6 +758,22 @@ async function loadPolicies() {
   policies.value = next
 }
 
+// Config repos (4.1) — loaded lazily when the Config repos tab is first opened.
+async function loadConfigRepos() {
+  configReposLoaded.value = true
+  try {
+    const [repos, srvs] = await Promise.all([resticApi.list(), serversApi.list()])
+    resticRepos.value = repos
+    servers.value = srvs
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : 'Could not load config repos.'
+  }
+}
+
+function serverName(serverId: number): string {
+  return servers.value.find((s) => s.id === serverId)?.name ?? `Server #${serverId}`
+}
+
 async function evaluateNow() {
   if (evaluating.value) return
   evaluating.value = true
@@ -600,6 +793,93 @@ async function loadStorageTargets() {
   } catch {
     // 403 for non-Admin operators: no selector, backend auto-selects offsite.
     storageTargets.value = []
+  }
+}
+
+async function loadMoveTargets() {
+  try {
+    const [bn, sv] = await Promise.all([benchesApi.list(), serversApi.list()])
+    benches.value = bn
+    servers.value = sv
+  } catch {
+    benches.value = []
+    servers.value = []
+  }
+}
+
+// -- Move to another server (session 2.6) ------------------------------------
+const moveOpen = ref(false)
+const movePanel = ref<HTMLElement | null>(null)
+const moveSource = ref<Backup | null>(null)
+const moveForm = reactive({ benchId: null as number | null })
+
+// Benches on a DIFFERENT server than the source backup that already host a site
+// with the same name (the destination the moved copy registers against).
+const moveTargetBenches = computed(() => {
+  const src = moveSource.value
+  if (!src) return []
+  const siteName = src.site_name
+  const benchIdsWithSite = new Set(
+    sites.value.filter((s) => s.name === siteName).map((s) => s.bench_id),
+  )
+  return benches.value.filter(
+    (bn) => bn.server_id !== src.server_id && benchIdsWithSite.has(bn.id),
+  )
+})
+
+function openMove(b: Backup) {
+  moveSource.value = b
+  moveForm.benchId = moveTargetBenches.value[0]?.id ?? null
+  moveOpen.value = true
+}
+
+function closeMove() {
+  if (!busy.value) moveOpen.value = false
+}
+
+watch(moveOpen, (open) => {
+  if (open) nextTick(() => movePanel.value?.focus())
+})
+
+function trapMoveFocus(event: KeyboardEvent) {
+  const panel = movePanel.value
+  if (!panel) return
+  const focusable = Array.from(
+    panel.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  )
+  if (focusable.length === 0) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey) {
+    if (document.activeElement === first || document.activeElement === panel) {
+      event.preventDefault()
+      last.focus()
+    }
+  } else if (document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+async function submitMove() {
+  if (busy.value || moveForm.benchId == null || !moveSource.value) return
+  busy.value = true
+  try {
+    const job = await backupsApi.move(moveSource.value.id, { target_bench_id: moveForm.benchId })
+    moveOpen.value = false
+    router.push(`/jobs/${job.id}`)
+  } catch (error) {
+    const message =
+      error instanceof ApiError && error.status === 409
+        ? 'A job is already running on the destination site.'
+        : error instanceof Error
+          ? error.message
+          : 'Could not start the move.'
+    toast.error(message)
+  } finally {
+    busy.value = false
   }
 }
 

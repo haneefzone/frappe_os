@@ -42,6 +42,9 @@ class BackupOut(BaseModel):
     storage_target_id: int | None
     # Artifact kinds present offsite (drive the presigned-download menu).
     offsite_artifacts: list[str]
+    # Set when this backup is a cross-server moved copy (session 2.6): the source
+    # backup id it was transferred from. Drives the "moved" chip in the table.
+    moved_from_backup_id: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -75,6 +78,7 @@ class BackupOut(BaseModel):
             storage_state=backup.storage_state or "local",
             storage_target_id=backup.storage_target_id,
             offsite_artifacts=sorted((backup.object_keys or {}).keys()),
+            moved_from_backup_id=backup.moved_from_backup_id,
             created_at=backup.created_at,
             updated_at=backup.updated_at,
         )
@@ -91,6 +95,21 @@ class CreateBackupRequest(BaseModel):
     # to let the API auto-select the single enabled target, or send 0/-1 to force
     # a local-only backup even when a target exists.
     storage_target_id: int | None = None
+
+
+class MoveBackupRequest(BaseModel):
+    """Move a backup onto another server (session 2.6). The artifacts are streamed
+    from the backup's offsite S3 target down onto `target_bench_id`'s server,
+    re-verified on arrival, and registered against `target_site` there.
+
+    The source backup must already be offsite (session 2.2) — S3 is the transit
+    medium between two bare-metal servers. `target_site` defaults to the source
+    backup's own site name if omitted; it must already exist on the destination
+    bench (moving a backup positions it to restore onto that site)."""
+
+    target_bench_id: int
+    target_site: str | None = None
+    priority: str = "default"
 
 
 class RestoreRequest(BaseModel):

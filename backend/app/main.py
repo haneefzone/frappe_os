@@ -11,6 +11,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from app import __version__
 from app.api.routes.ai_agents import router as ai_agents_router
 from app.api.routes.ai_settings import router as ai_settings_router
+from app.api.routes.alerts import router as alerts_router
 from app.api.routes.apps import router as apps_router
 from app.api.routes.audit import router as audit_router
 from app.api.routes.auth import router as auth_router
@@ -18,12 +19,16 @@ from app.api.routes.backups import router as backups_router
 from app.api.routes.benches import router as benches_router
 from app.api.routes.compliance import router as compliance_router
 from app.api.routes.copilot import router as copilot_router
+from app.api.routes.compliance_reports import router as compliance_reports_router
 from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.domains import router as domains_router
+from app.api.routes.drift import router as drift_router
 from app.api.routes.job_logs import router as job_logs_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.monitoring import router as monitoring_router
 from app.api.routes.notifications import router as notifications_router
+from app.api.routes.reports import router as reports_router
+from app.api.routes.restic import router as restic_router
 from app.api.routes.schedules import router as schedules_router
 from app.api.routes.search import router as search_router
 from app.api.routes.servers import router as servers_router
@@ -31,6 +36,7 @@ from app.api.routes.settings import router as settings_router
 from app.api.routes.sites import router as sites_router
 from app.api.routes.storage_targets import router as storage_targets_router
 from app.api.routes.terminal import router as terminal_router
+from app.api.routes.updates import router as updates_router
 from app.config import get_settings
 from app.core.logging import configure_logging
 from app.errors import register_exception_handlers
@@ -154,6 +160,7 @@ def create_app() -> FastAPI:
     app.include_router(benches_router)
     app.include_router(sites_router)
     app.include_router(domains_router)
+    app.include_router(drift_router)
     app.include_router(apps_router)
     app.include_router(backups_router)
     app.include_router(jobs_router)
@@ -163,14 +170,19 @@ def create_app() -> FastAPI:
     app.include_router(monitoring_router)
     app.include_router(schedules_router)
     app.include_router(compliance_router)
+    app.include_router(compliance_reports_router)
     app.include_router(dashboard_router)
     app.include_router(settings_router)
     app.include_router(storage_targets_router)
     app.include_router(ai_agents_router)
+    app.include_router(restic_router)
     app.include_router(ai_settings_router)
+    app.include_router(alerts_router)
     app.include_router(audit_router)
+    app.include_router(reports_router)
     app.include_router(notifications_router)
     app.include_router(search_router)
+    app.include_router(updates_router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
