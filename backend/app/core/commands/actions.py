@@ -2247,6 +2247,283 @@ class PromoteUpdateAction(Action):
                 await _stop_dev_redis(ctx, queue_port, cache_port)
 
 
+def _parse_df_avail_kb(stdout: str | None) -> int | None:
+    """Parse `df -Pk <path>` output → available 1K-blocks on the filesystem.
+
+    POSIX `-P` guarantees a single data line whose columns are
+    ``Filesystem 1024-blocks Used Available Capacity Mounted-on`` — the 4th
+    field is what we want. Scan for the first line with ≥6 whitespace fields
+    whose available column is an integer, so a wrapped Filesystem name (df can
+    still wrap under -P for very long device names on some coreutils) can't
+    shift the column we read."""
+    for line in (stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 6 and parts[3].isdigit():
+            return int(parts[3])
+    return None
+
+
+async def _drop_scratch_site(
+    ctx: JobContext, *, site: str, bench_path: str, db_root_pw: str | None
+) -> None:
+    """Destroy an ephemeral restore-test scratch site: `bench drop-site --force
+    --no-backup`, which drops its database and removes its site directory. Best
+    effort and idempotent (`--force` never prompts and tolerates a half-created
+    site), so it is safe to call from the restore-test job's `finally` even when
+    `bench new-site` failed partway — the scratch is *always* torn down."""
+    from app.core.commands import get_template, render
+
+    drop = render(
+        get_template("site.drop"),
+        {"site": site, "bench_path": bench_path, "db_root_pw": db_root_pw},
+    )
+    with ctx.step(f"Destroy scratch site {site}"):
+        await ctx.emit(f"$ {drop.display}")
+        code = await ctx.stream(drop.argv, cwd=drop.cwd)
+        if code != 0:
+            # A non-zero drop is a warning, not a job-failer: we surface it so an
+            # operator can reap a stuck scratch, but we never mask the real
+            # restore-test verdict behind a cleanup hiccup.
+            await ctx.emit(
+                f"WARNING: dropping scratch site {site} exited {code}; it may need "
+                "manual cleanup (bench drop-site)."
+            )
+        else:
+            await ctx.emit(f"Scratch site {site} destroyed.")
+
+
+class RestoreTestAction(Action):
+    """`backup.restore_test` — scheduled proof-of-restorability (session 3.4).
+
+    Restore a site's newest backup into an **ephemeral scratch site**, verify it
+    boots + its scheduler responds + its row count is sane vs the source, then
+    **always destroy the scratch site** (finally), and stamp the source backup's
+    `restore_tested` badge with the verdict + timestamp.
+
+    Guardrails (issue constraints):
+      - the scratch site is created fresh and **always destroyed even on
+        failure** — the drop runs in `finally`, and is armed the instant before
+        `bench new-site` so a half-created scratch is still reaped (no orphans);
+      - the **source site is never mutated** — only a read-only row-count probe
+        touches it, exactly as 3.3's verify checklist does;
+      - a disk-space **preflight** refuses to start when free space can't hold
+        ~3× the backup, so a restore-test never fills the disk;
+      - reuses 3.3's `_restore_artifacts_into_site` (create=True) end to end —
+        the restore-to-fresh-site machinery is not reimplemented.
+
+    Non-idempotent + locked on a per-source restore-test key: never auto-retried
+    (a half-restore is never re-attempted on top of itself) and two restore-tests
+    of the same site can't overlap, while never colliding with the source site's
+    own backup/restore lock."""
+
+    async def run(self, ctx: JobContext) -> None:
+        from sqlalchemy import select
+
+        from app.core import restore_tests as rt
+        from app.models.backup import Backup
+
+        params = ctx.rendered.params_sanitized
+        secrets = ctx.rendered.secret_map
+        source_site = params["site"]
+        source_bench_path = params["bench_path"]
+        backup_id = params.get("backup_id")
+        scratch_site = params.get("scratch_site") or f"rt-{ctx.job_id}.restoretest.localhost"
+        admin_pw = secrets.get("admin_pw")
+        db_root_pw = secrets.get("db_root_pw")
+
+        # Never let a caller point the scratch at the live site (defence in depth
+        # against a mis-built param — the source must never be touched).
+        if scratch_site == source_site:
+            raise RuntimeError(
+                "restore-test scratch site must differ from the source site"
+            )
+
+        bench = _load_bench(ctx, source_bench_path)
+
+        # Resolve the backup to prove: an explicit id, else the newest success.
+        backup = ctx.session.get(Backup, int(backup_id)) if backup_id else None
+        if backup is None:
+            site_row = _load_site(ctx, bench, source_site)
+            if site_row is not None:
+                backup = ctx.session.scalars(
+                    select(Backup)
+                    .where(
+                        Backup.site_id == site_row.id,
+                        Backup.status == "success",
+                        Backup.db_path.is_not(None),
+                    )
+                    .order_by(Backup.created_at.desc())
+                ).first()
+        if backup is None or not backup.db_path:
+            raise RuntimeError(
+                "no successful backup with a database artifact to restore-test"
+            )
+
+        from datetime import UTC, datetime
+
+        from app.core.commands import get_template, render
+
+        def now() -> datetime:
+            return datetime.now(UTC)
+
+        # Disk preflight — refuse to start if free space can't hold ~3× the
+        # backup (restore inflates the compressed dump + copies files). Recorded
+        # as a failed test so the badge/dashboard reflect it; no scratch created.
+        need = int(backup.size_bytes or 0)
+        if need:
+            df = render(get_template("server.disk_free"), {"path": source_bench_path})
+            res = await ctx.capture(df.argv)
+            avail_kb = _parse_df_avail_kb(res.stdout)
+            if avail_kb is not None and avail_kb * 1024 < need * 3:
+                detail = (
+                    f"disk preflight failed: {avail_kb // 1024} MB free < "
+                    f"{(need * 3) // (1024 * 1024)} MB needed (3× backup)"
+                )
+                rt.record_result(
+                    ctx.session, backup, passed=False, detail=detail,
+                    now=now(), job_id=ctx.job_id,
+                )
+                raise RuntimeError(detail)
+
+        await ctx.emit(
+            f"Restore-testing backup #{backup.id} of {source_site} into scratch "
+            f"site {scratch_site} (source is never touched)."
+        )
+
+        queue_port, cache_port = _redis_ports(bench)
+        is_dev = await _detect_bench_mode(ctx, source_bench_path)
+        started = False
+        scratch_armed = False
+        verdict_recorded = False
+        try:
+            if is_dev:
+                await _start_dev_redis(ctx, source_bench_path)
+                started = True
+
+            # Arm cleanup BEFORE new-site so a half-created scratch is still reaped.
+            scratch_armed = True
+            await _restore_artifacts_into_site(
+                ctx,
+                site=scratch_site,
+                bench_path=source_bench_path,
+                bench=bench,
+                db_path=backup.db_path,
+                public_files=backup.public_files_path,
+                private_files=backup.private_files_path,
+                config_path=backup.config_path,
+                create=True,
+                admin_pw=admin_pw,
+                db_root_pw=db_root_pw,
+            )
+
+            checks = await self._verify(
+                ctx,
+                scratch_site=scratch_site,
+                source_site=source_site,
+                bench_path=source_bench_path,
+            )
+            passed = all(c["ok"] for c in checks)
+            detail = "; ".join(f"{c['label']}: {c['detail']}" for c in checks)
+            rt.record_result(
+                ctx.session, backup, passed=passed, detail=detail,
+                now=now(), job_id=ctx.job_id,
+            )
+            verdict_recorded = True
+            await ctx.emit(
+                f"Backup #{backup.id} restore-tested: "
+                + ("PASSED" if passed else "FAILED")
+                + f" — {detail}"
+            )
+            if not passed:
+                raise RuntimeError(f"restore-test failed: {detail}")
+        except Exception as exc:  # noqa: BLE001 — record the verdict, then re-raise.
+            if not verdict_recorded:
+                rt.record_result(
+                    ctx.session, backup, passed=False,
+                    detail=f"restore-test error: {exc}",
+                    now=now(), job_id=ctx.job_id,
+                )
+            raise
+        finally:
+            # The scratch site is ALWAYS destroyed — even on failure (no orphans).
+            if scratch_armed:
+                try:
+                    await _drop_scratch_site(
+                        ctx, site=scratch_site, bench_path=source_bench_path,
+                        db_root_pw=db_root_pw,
+                    )
+                except Exception as drop_exc:  # noqa: BLE001
+                    await ctx.emit(
+                        f"WARNING: scratch site {scratch_site} cleanup raised "
+                        f"{drop_exc}; it may need manual cleanup."
+                    )
+            if started:
+                await _stop_dev_redis(ctx, queue_port, cache_port)
+
+    async def _verify(
+        self, ctx: JobContext, *, scratch_site: str, source_site: str, bench_path: str
+    ) -> list[dict]:
+        """Three read-mostly probes on the scratch site: it boots (frappe.ping),
+        its scheduler responds, and its row count is sane vs the source (no gross
+        data loss). Only the source row-count probe reads the source — read-only,
+        never a mutation."""
+        from app.core.commands import get_template, render
+
+        checks: list[dict] = []
+
+        with ctx.step("Check: scratch site boots (frappe.ping)"):
+            ping = render(
+                get_template("site.ping"),
+                {"site": scratch_site, "bench_path": bench_path},
+            )
+            res = await ctx.capture(ping.argv, cwd=ping.cwd)
+            boots = res.exit_code == 0 and "pong" in (res.stdout or "").lower()
+            checks.append(
+                {"key": "boots", "label": "Site boots", "ok": boots,
+                 "detail": "frappe.ping returned pong" if boots else "site did not boot"}
+            )
+
+        with ctx.step("Check: scheduler responds"):
+            sched = render(
+                get_template("site.scheduler_status"),
+                {"site": scratch_site, "bench_path": bench_path},
+            )
+            res = await ctx.capture(sched.argv, cwd=sched.cwd)
+            up = res.exit_code == 0 and "enabled" in (res.stdout or "").lower()
+            checks.append(
+                {"key": "scheduler", "label": "Scheduler responds", "ok": up,
+                 "detail": "scheduler enabled" if up else "scheduler not enabled"}
+            )
+
+        async def _count(target_site: str) -> int | None:
+            cmd = render(
+                get_template("site.count_doctype"),
+                {"site": target_site, "bench_path": bench_path, "doctype": "User"},
+            )
+            res = await ctx.capture(cmd.argv, cwd=cmd.cwd)
+            return _parse_row_count(res.stdout)
+
+        with ctx.step("Check: row-count sanity vs source"):
+            scratch_n = await _count(scratch_site)
+            source_n = await _count(source_site)
+            if scratch_n is None:
+                ok = False
+                detail = "could not read a row count on the scratch site"
+            elif source_n is None:
+                ok = scratch_n >= 1
+                detail = f"scratch has {scratch_n} User rows (no source baseline)"
+            else:
+                # A faithful restore carries ~all of source's rows; flag a gross
+                # loss (more than half gone) — matches 3.3's verify tolerance.
+                ok = scratch_n * 2 >= source_n
+                detail = f"scratch {scratch_n} vs source {source_n} User rows"
+            checks.append(
+                {"key": "row_count", "label": "Row-count sanity", "ok": ok,
+                 "detail": detail}
+            )
+        return checks
+
+
 class RestartServiceAction(Action):
     """`server.restart_service` — restart one managed system service from the
     monitoring services grid (session 1.12).

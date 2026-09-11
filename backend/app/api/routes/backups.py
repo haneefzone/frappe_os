@@ -47,6 +47,7 @@ from app.schemas.backup import (
     CreateBackupRequest,
     MoveBackupRequest,
     RestoreRequest,
+    RestoreTestRequest,
 )
 from app.schemas.job import JobDetail
 
@@ -63,6 +64,7 @@ BACKUP_ACTION = "site.backup"
 VALIDATE_ACTION = "backup.validate"
 RESTORE_ACTION = "site.restore"
 MOVE_ACTION = "backup.move_across_servers"
+RESTORE_TEST_ACTION = "backup.restore_test"
 
 RESTORE_MODES = ("same_site", "new_site", "different_bench")
 
@@ -199,6 +201,70 @@ def create_backup(
 
     row.taken_by_job_id = job.id
     db.commit()
+    db.refresh(job)
+    return JobDetail.from_model(job)
+
+
+# --------------------------------------------------------------------------- #
+# Restore-test on demand (session 3.4)
+# --------------------------------------------------------------------------- #
+
+
+@router.post("/sites/{site_id}/restore-test", status_code=201, response_model=JobDetail)
+def run_restore_test(
+    site_id: int,
+    body: RestoreTestRequest,
+    db: DbSession,
+    runner: Runner,
+    user: CurrentUser,
+    secrets: Secrets,
+):
+    """Prove a site's backup restores, now. Enqueues a `backup.restore_test` job
+    that restores the chosen backup (or the newest successful one) into an
+    ephemeral scratch site, verifies it boots + row-count is sane vs the source,
+    then ALWAYS destroys the scratch site and stamps the backup's restore-tested
+    badge. The source site is never touched. A throwaway admin password is
+    generated for the scratch site (it is destroyed after the test); the MariaDB
+    root password is resolved server-side."""
+    import secrets as _secrets
+
+    _require_action_permission(user, RESTORE_TEST_ACTION)  # backup:restore
+    site = db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="Site not found.")
+    bench = db.get(Bench, site.bench_id)
+    if bench is None:  # pragma: no cover - FK-guaranteed
+        raise HTTPException(status_code=404, detail="Site's bench is missing.")
+
+    params = {"site": site.name, "bench_path": bench.path}
+    if body.backup_id is not None:
+        backup = db.get(Backup, body.backup_id)
+        if backup is None or backup.site_id != site.id:
+            raise HTTPException(
+                status_code=404, detail="Backup not found for this site."
+            )
+        params["backup_id"] = str(body.backup_id)
+    try:
+        job = runner.create(
+            db,
+            action_name=RESTORE_TEST_ACTION,
+            server_id=bench.server_id,
+            target_type="site",
+            # Distinct per-source restore-test lock: never collides with the
+            # source site's own backup/restore lock, and serialises restore-tests.
+            target_id=f"{bench.path}::restore-test::{site.name}",
+            params=params,
+            user_secrets={"admin_pw": _secrets.token_urlsafe(24)},
+            priority=body.priority,
+            created_by=user.id,
+        )
+    except (RenderError, SecretResolutionError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LockConflict as exc:
+        return _conflict(
+            exc, f"A restore-test is already running for site {site.name!r}."
+        )
+
     db.refresh(job)
     return JobDetail.from_model(job)
 

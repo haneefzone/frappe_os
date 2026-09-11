@@ -15,6 +15,8 @@ class PolicyOut(BaseModel):
     retention_days: int | None
     require_offsite: bool
     require_restore_test: bool
+    # Per-site restore-test cadence (session 3.4) — surfaced in the Schedules view.
+    restore_test_interval_days: int | None
     enabled: bool
     created_at: datetime
     updated_at: datetime
@@ -27,6 +29,7 @@ class PolicyOut(BaseModel):
             retention_days=policy.retention_days,
             require_offsite=policy.require_offsite,
             require_restore_test=policy.require_restore_test,
+            restore_test_interval_days=policy.restore_test_interval_days,
             enabled=policy.enabled,
             created_at=policy.created_at,
             updated_at=policy.updated_at,
@@ -41,6 +44,9 @@ class UpsertPolicyRequest(BaseModel):
     retention_days: int | None = Field(default=None, ge=1, le=3650)
     require_offsite: bool = False
     require_restore_test: bool = False
+    # How often (days) to re-prove the newest backup restores; null = on-demand
+    # only (the sweep skips it). Defaults to weekly.
+    restore_test_interval_days: int | None = Field(default=7, ge=1, le=365)
     enabled: bool = True
 
 

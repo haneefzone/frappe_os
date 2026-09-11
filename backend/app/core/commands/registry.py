@@ -35,6 +35,7 @@ from app.core.commands.actions import (
     RenderVhostAction,
     RestartServiceAction,
     RestoreAction,
+    RestoreTestAction,
     ScanToolsAction,
     SetMaintenanceAction,
     SetSchedulerAction,
@@ -1081,6 +1082,87 @@ register(
         requires_lock=True,
         required_permission=BACKUP_RESTORE,
         run_as=None,
+    )
+)
+
+
+# --- Restore-test automation (session 3.4) ------------------------------- #
+
+# Read-only free-space probe rendered as a sub-step of the restore-test disk
+# preflight. `df -Pk <path>` prints POSIX columns; the action reads the
+# available-blocks field. Lock-free and idempotent.
+register(
+    CommandTemplate(
+        action_name="server.disk_free",
+        argv=("df", "-Pk", "{path}"),
+        cwd=None,
+        params=(ParamSpec("path", regex=ABS_PATH, is_path=True),),
+        action_class=Action,
+        idempotent=True,
+        requires_lock=False,
+        required_permission=READ,
+        run_as=None,
+    )
+)
+
+# `bench drop-site <site> --force --no-backup --root-login root --root-password …`
+# — destroy an ephemeral restore-test scratch site (drop its DB + remove its site
+# dir). DESTRUCTIVE (`danger`) as a standalone action; rendered as a sub-step by
+# the restore-test job's cleanup. `--force` never prompts and tolerates a
+# half-created site so cleanup is idempotent. The MariaDB root password is a
+# server-sourced secret (never the browser).
+register(
+    CommandTemplate(
+        action_name="site.drop",
+        argv=(
+            "bench", "drop-site", "{site}", "--force", "--no-backup",
+            "--root-login", "root", "--root-password", "{db_root_pw}",
+        ),
+        cwd="{bench_path}",
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("db_root_pw", regex=SECRET_TEXT, secret=True),
+        ),
+        action_class=Action,  # rendered by RestoreTestAction; drop is a sub-step.
+        # A drop is destructive and never safely retried on top of itself.
+        idempotent=False,
+        requires_lock=True,
+        required_permission=DANGER,
+        run_as=None,
+        secret_sources={"db_root_pw": "server:mariadb_root_password_enc"},
+    )
+)
+
+# The scheduled restore-test orchestrator: restore a site's newest backup into an
+# ephemeral scratch site, verify boot + scheduler + row-count vs source, then
+# ALWAYS destroy the scratch (finally), stamping the backup's restore-tested
+# badge. Reuses the 3.3 restore-to-fresh-site machinery. Locked on a per-source
+# restore-test key so two restore-tests of one site can't overlap and never
+# collide with the source site's own backup/restore lock. BACKUP_RESTORE to
+# launch (it restores a backup); the internal scratch drop is `danger`.
+register(
+    CommandTemplate(
+        action_name="backup.restore_test",
+        argv=("true",),  # nominal; RestoreTestAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("site", regex=SITE_NAME),  # the SOURCE site
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("backup_id", regex=BACKUP_ID, required=False),
+            ParamSpec("scratch_site", regex=SITE_NAME, required=False),
+            ParamSpec("admin_pw", regex=SECRET_TEXT, secret=True, required=False),
+            ParamSpec("db_root_pw", regex=SECRET_TEXT, secret=True, required=False),
+        ),
+        action_class=RestoreTestAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=BACKUP_RESTORE,
+        run_as=None,
+        secret_sources={
+            "admin_pw": "job",
+            "db_root_pw": "server:mariadb_root_password_enc",
+        },
     )
 )
 

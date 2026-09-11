@@ -52,6 +52,13 @@ BACKUP_STATUSES = ("pending", "success", "failed")
 #  failed    — the upload or a checksum re-verify failed (artifacts stay local).
 STORAGE_STATES = ("local", "uploading", "offsite", "failed")
 
+# Scheduled restore-test outcome (session 3.4):
+#  untested — this backup has never been proof-of-restore tested.
+#  passed   — restored into a scratch site that booted + row-count sane, then
+#             the scratch site was destroyed.
+#  failed   — the restore or a verification probe failed (scratch still destroyed).
+RESTORE_TEST_STATUSES = ("untested", "passed", "failed")
+
 
 class Backup(Base):
     """One captured backup of a site (its artifacts + integrity metadata)."""
@@ -97,6 +104,26 @@ class Backup(Base):
     )
     # True once this backup has been restored into a site and verified.
     restore_tested: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # --- Scheduled restore-test (session 3.4) ------------------------------ #
+    # The proof-of-restorability badge on the Backups table (uiux §6): the
+    # scheduled restore-test job restores this backup into an ephemeral scratch
+    # site, verifies it boots + row-count is sane vs the source, then always
+    # destroys the scratch site. untested | passed | failed (see above).
+    restore_test_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="untested", default="untested"
+    )
+    # When the last restore-test finished (UTC); drives the badge timestamp.
+    restore_tested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    # Short human-readable summary of the last restore-test result (e.g. the
+    # failing probe), surfaced in the badge tooltip / dashboard row.
+    restore_test_detail: Mapped[str | None] = mapped_column(String(500))
+    # The restore-test job that produced the last result (audit trail).
+    restore_test_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("command_jobs.id", ondelete="SET NULL"), index=True
+    )
 
     # --- Offsite storage (session 2.2) ------------------------------------- #
     # local | uploading | offsite | failed (see STORAGE_STATES). Defaults to

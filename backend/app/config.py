@@ -144,6 +144,14 @@ class Settings(BaseSettings):
     # signed webhook (dedup by per-rule cooldown). Aligned with the monitoring
     # poll (~60s) so a breach is caught within a poll. SET via ALERTS_TICK_SECONDS.
     alerts_tick_seconds: int = 60
+    # Restore-test sweep (session 3.4): the scheduler process registers a
+    # recurring sweep that finds every site whose newest backup is due a
+    # proof-of-restore test (enabled policy with require_restore_test, older than
+    # restore_test_interval_days) and enqueues one restore-test job per site
+    # (fan-out: one failing site never sinks the batch). Hourly by default — the
+    # per-site cadence is measured in days, so a finer tick buys nothing. SET via
+    # RESTORE_TEST_TICK_SECONDS.
+    restore_test_tick_seconds: int = 3600
 
     # Reports (session 6.2). Generated artifacts land here, one file per
     # ReportRun; the path resolves from the backend working directory like

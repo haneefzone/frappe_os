@@ -83,6 +83,7 @@ def upsert_policy(
     policy.retention_days = body.retention_days
     policy.require_offsite = body.require_offsite
     policy.require_restore_test = body.require_restore_test
+    policy.restore_test_interval_days = body.restore_test_interval_days
     policy.enabled = body.enabled
     db.commit()
     db.refresh(policy)

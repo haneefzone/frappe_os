@@ -208,6 +208,17 @@ def build_dashboard(db: Session) -> dict:
         ).all()
     )
 
+    # Failed restore tests (session 3.4, B4.1 row 4 "Needs attention"): backups
+    # whose most recent scheduled proof-of-restore test FAILED — the operator
+    # can no longer trust that backup restores.
+    failed_restore = list(
+        db.scalars(
+            select(Backup)
+            .where(Backup.restore_test_status == "failed")
+            .order_by(Backup.restore_tested_at.desc())
+        ).all()
+    )
+
     servers_strip = []
     for s in servers:
         sample = latest.get(s.id)
@@ -251,8 +262,8 @@ def build_dashboard(db: Session) -> dict:
             failed_jobs_24h=int(failed_jobs_24h),
         ),
         "servers": servers_strip,
-        # "Needs attention" row (B4.1 row 4). Config drift lands here; updates
-        # available / failed restore tests join it in their own sessions.
+        # "Needs attention" row (B4.1 row 4). Config drift + failed restore tests
+        # land here; updates-available joins them in its own session.
         "needs_attention": {
             "config_drift": {
                 "count": len(drifted),
@@ -268,6 +279,21 @@ def build_dashboard(db: Session) -> dict:
                         else None,
                     }
                     for r in drifted[:25]
+                ],
+            },
+            "failed_restore_tests": {
+                "count": len(failed_restore),
+                "site_ids": sorted({b.site_id for b in failed_restore}),
+                "backups": [
+                    {
+                        "id": b.id,
+                        "site_id": b.site_id,
+                        "detail": b.restore_test_detail,
+                        "restore_tested_at": b.restore_tested_at.isoformat()
+                        if b.restore_tested_at
+                        else None,
+                    }
+                    for b in failed_restore[:25]
                 ],
             },
         },

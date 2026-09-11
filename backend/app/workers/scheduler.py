@@ -45,6 +45,9 @@ COMPLIANCE_FUNC = "app.workers.scheduler.evaluate_compliance"
 # Session 3.1: and a recurring AlertRule sweep — evaluate enabled rules against
 # the latest monitoring samples and enqueue any breach dispatch off the sweep.
 ALERTS_FUNC = "app.workers.scheduler.evaluate_alerts_tick"
+# Session 3.4: and a recurring restore-test sweep — find every site whose newest
+# backup is due a proof-of-restore test and enqueue one restore-test job per site.
+RESTORE_TEST_FUNC = "app.workers.scheduler.evaluate_restore_tests"
 
 
 def make_connection() -> Redis:
@@ -102,6 +105,66 @@ def evaluate_alerts_tick() -> dict:
     return summary
 
 
+def evaluate_restore_tests() -> dict:
+    """Recurring job body (runs on an RQ worker): find every site whose newest
+    successful backup is due a proof-of-restore test (enabled policy with
+    `require_restore_test`, older than its `restore_test_interval_days`) and
+    enqueue ONE restore-test job per site.
+
+    Fan-out (one job per site) is deliberate: each restore-test creates + destroys
+    a scratch site, so one site failing (or its target being busy) never sinks the
+    others — a `LockConflict` skips just that site, and any error is logged and
+    the sweep continues. A throwaway admin password is generated per scratch site
+    (it is destroyed after the test); the MariaDB root password is resolved
+    server-side by the job, never sent from here. Returns the sweep summary for
+    the RQ result."""
+    import secrets as _secrets
+    from datetime import UTC, datetime
+
+    from app.core import restore_tests as rt
+    from app.core.jobs import LockConflict, build_runner
+    from app.db import SessionLocal
+
+    runner = build_runner()
+    enqueued: list[int] = []
+    skipped = 0
+    with SessionLocal() as db:
+        due = rt.select_due(db, now=datetime.now(UTC))
+        for item in due:
+            target_id = f"{item.bench.path}::restore-test::{item.site.name}"
+            try:
+                job = runner.create(
+                    db,
+                    action_name="backup.restore_test",
+                    server_id=item.bench.server_id,
+                    target_type="site",
+                    target_id=target_id,
+                    params={
+                        "site": item.site.name,
+                        "bench_path": item.bench.path,
+                        "backup_id": str(item.backup.id),
+                    },
+                    user_secrets={"admin_pw": _secrets.token_urlsafe(24)},
+                    priority="default",
+                    created_by=None,
+                )
+                enqueued.append(job.id)
+            except LockConflict:
+                # A restore-test (or another op on this key) is already running —
+                # skip this occurrence; the next sweep will pick it up.
+                skipped += 1
+            except Exception:  # noqa: BLE001 — one bad site never sinks the sweep.
+                logger.exception(
+                    "restore-test sweep: failed to enqueue for site %s", item.site.name
+                )
+                skipped += 1
+    if enqueued:
+        logger.info(
+            "restore-test sweep enqueued %d job(s): %s", len(enqueued), enqueued
+        )
+    return {"due": len(due), "enqueued": len(enqueued), "skipped": skipped}
+
+
 def _register_recurring(scheduler, *, func, func_name: str, interval: int) -> None:
     """Idempotently register one recurring job, cancelling any existing entry for
     the same func first so a restart with a changed interval never leaves two."""
@@ -141,6 +204,17 @@ def ensure_alerts_registered(scheduler, *, interval: int) -> None:
     logger.info("registered alert sweep every %ds", interval)
 
 
+def ensure_restore_tests_registered(scheduler, *, interval: int) -> None:
+    """Idempotently register the recurring restore-test sweep (session 3.4)."""
+    _register_recurring(
+        scheduler,
+        func=evaluate_restore_tests,
+        func_name=RESTORE_TEST_FUNC,
+        interval=interval,
+    )
+    logger.info("registered restore-test sweep every %ds", interval)
+
+
 def _utcnow():
     from datetime import UTC, datetime
 
@@ -167,12 +241,17 @@ def main() -> None:  # pragma: no cover - process entrypoint (needs live Redis)
         scheduler, interval=settings.compliance_tick_seconds
     )
     ensure_alerts_registered(scheduler, interval=settings.alerts_tick_seconds)
+    ensure_restore_tests_registered(
+        scheduler, interval=settings.restore_test_tick_seconds
+    )
     logger.info(
-        "scheduler starting (queue=%s, tick=%ds, compliance=%ds, alerts=%ds)",
+        "scheduler starting (queue=%s, tick=%ds, compliance=%ds, alerts=%ds, "
+        "restore_test=%ds)",
         settings.scheduler_queue,
         settings.scheduler_tick_seconds,
         settings.compliance_tick_seconds,
         settings.alerts_tick_seconds,
+        settings.restore_test_tick_seconds,
     )
     # run() installs its own graceful SIGINT/SIGTERM handlers and releases the
     # singleton lock on exit (see module docstring).

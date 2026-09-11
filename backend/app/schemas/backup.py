@@ -36,6 +36,11 @@ class BackupOut(BaseModel):
     available_artifacts: list[str]
     frappe_version: str | None
     restore_tested: bool
+    # Scheduled restore-test badge (session 3.4): untested | passed | failed,
+    # plus the timestamp + short detail for the badge tooltip (uiux §6).
+    restore_test_status: str
+    restore_tested_at: datetime | None
+    restore_test_detail: str | None
     taken_by_job_id: int | None
     # Offsite storage (session 2.2): drives the storage chip in the table (B4.6).
     storage_state: str
@@ -74,6 +79,9 @@ class BackupOut(BaseModel):
             available_artifacts=[a.kind for a in arts],
             frappe_version=backup.frappe_version,
             restore_tested=backup.restore_tested,
+            restore_test_status=backup.restore_test_status,
+            restore_tested_at=backup.restore_tested_at,
+            restore_test_detail=backup.restore_test_detail,
             taken_by_job_id=backup.taken_by_job_id,
             storage_state=backup.storage_state or "local",
             storage_target_id=backup.storage_target_id,
@@ -136,6 +144,16 @@ class RestoreRequest(BaseModel):
     # Destructive restores (over an existing site) require the typed site name.
     confirm_name: str | None = None
     priority: str = "high"
+
+
+class RestoreTestRequest(BaseModel):
+    """Run a restore-test on demand (session 3.4): restore a backup into an
+    ephemeral scratch site, verify it, then destroy the scratch and stamp the
+    restore-tested badge. `backup_id` picks a specific backup; omit it to test
+    the site's newest successful backup. The source site is never touched."""
+
+    backup_id: int | None = None
+    priority: str = "default"
 
 
 class CompatibilityOut(BaseModel):

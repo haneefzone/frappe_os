@@ -83,10 +83,18 @@ class BackupPolicy(Base):
     require_offsite: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=expression.false(), default=False
     )
-    # Groundwork only: the column exists so the policy editor can carry it, but
-    # the 2.3 evaluator does NOT yet score restore tests (a later session does).
+    # Require scheduled proof-of-restorability (session 3.4): when true, the
+    # restore-test sweep periodically restores the site's newest backup into an
+    # ephemeral scratch site, verifies it, then destroys it, and stamps the
+    # backup's restore-tested badge.
     require_restore_test: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=expression.false(), default=False
+    )
+    # How often (days) the newest backup must be re-proven restorable when
+    # `require_restore_test` is on. NULL = never auto-run (the sweep skips it);
+    # the site can still be restore-tested on demand. Default weekly.
+    restore_test_interval_days: Mapped[int | None] = mapped_column(
+        Integer, server_default="7", default=7
     )
 
     # Disabling stops the site being evaluated without deleting the policy.
