@@ -1,11 +1,11 @@
 from app.models.ai_settings import AISettings
-from app.models.bootstrap import BootstrapState
 from app.models.alert import AlertFiring, AlertRule, AlertRuleState
 from app.models.app import AppSource, InstalledApp
 from app.models.audit import AuditLog
 from app.models.auth import ApiToken, Role, User
 from app.models.backup import Backup
 from app.models.bench import Bench
+from app.models.bootstrap import BootstrapState  # noqa: F401
 from app.models.compliance import (
     BackupPolicy,
     ComplianceBreachEvent,
