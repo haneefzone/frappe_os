@@ -325,112 +325,6 @@
       </div>
     </div>
 
-    <!-- Retention editor modal -->
-    <Teleport to="body">
-      <Transition
-        enter-active-class="transition duration-150 ease-out"
-        enter-from-class="opacity-0"
-        leave-active-class="transition duration-150 ease-out"
-        leave-to-class="opacity-0"
-      >
-        <div
-          v-if="retentionOpen"
-          class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-          @click.self="retentionOpen = false"
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Configure retention policy"
-            class="w-full max-w-md rounded-lg border border-line bg-raised"
-            @keydown.esc="retentionOpen = false"
-          >
-            <div class="border-b border-line px-5 py-4">
-              <h2 class="text-section font-semibold text-ink-1">Configure retention</h2>
-              <p class="mt-0.5 text-label text-ink-2">
-                Set keep-last/daily/weekly/monthly for
-                <span class="font-medium text-ink-1">{{ retentionRepo ? serverName(retentionRepo.server_id) : '' }}</span>.
-                All-empty = no retention policy (prune will refuse).
-              </p>
-            </div>
-            <div class="space-y-3 px-5 py-4">
-              <div class="grid grid-cols-2 gap-3">
-                <div>
-                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Keep last</label>
-                  <input
-                    v-model.number="retentionForm.keep_last"
-                    type="number"
-                    min="1"
-                    placeholder="e.g. 3"
-                    v-bind="retentionInputAttrs"
-                  />
-                </div>
-                <div>
-                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Keep daily</label>
-                  <input
-                    v-model.number="retentionForm.keep_daily"
-                    type="number"
-                    min="1"
-                    placeholder="e.g. 7"
-                    v-bind="retentionInputAttrs"
-                  />
-                </div>
-                <div>
-                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Keep weekly</label>
-                  <input
-                    v-model.number="retentionForm.keep_weekly"
-                    type="number"
-                    min="1"
-                    placeholder="e.g. 4"
-                    v-bind="retentionInputAttrs"
-                  />
-                </div>
-                <div>
-                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Keep monthly</label>
-                  <input
-                    v-model.number="retentionForm.keep_monthly"
-                    type="number"
-                    min="1"
-                    placeholder="e.g. 3"
-                    v-bind="retentionInputAttrs"
-                  />
-                </div>
-              </div>
-            </div>
-            <div class="flex justify-end gap-2 border-t border-line px-5 py-3.5">
-              <Button variant="subtle" theme="gray" label="Cancel" :disabled="resticBusy !== null" @click="retentionOpen = false" />
-              <Button
-                variant="solid"
-                theme="gray"
-                label="Save retention"
-                :loading="resticBusy === 'configure'"
-                :disabled="resticBusy !== null"
-                @click="saveRetention"
-              />
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
-
-    <!-- Prune now confirmation (destructive: type-to-confirm) -->
-    <ConfirmModal
-      v-model="pruneOpen"
-      variant="destructive"
-      :title="`Prune ${pruneRepo ? serverName(pruneRepo.server_id) : ''}`"
-      :message="`Apply the retention policy (${pruneRepo?.retention_summary ?? ''}) and delete non-kept snapshots.`"
-      verb="Prune now"
-      :target-name="pruneRepo ? serverName(pruneRepo.server_id) : ''"
-      :consequences="[
-        'Snapshots outside the retention window are permanently deleted.',
-        'This cannot be undone — only the kept snapshots will survive.',
-        'The repo must not be locked by another job.',
-      ]"
-      :loading="resticBusy === 'prune'"
-      @confirm="confirmPrune"
-      @cancel="pruneRepo = null"
-    />
-
     <!-- Policies tab (B4.6) -->
     <div v-else-if="activeTab === 'policies'" class="min-h-0 flex-1 overflow-y-auto p-8">
       <div class="mb-4 flex items-center justify-between">
@@ -545,6 +439,112 @@
         </table>
       </div>
     </div>
+
+    <!-- Retention editor modal -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-150 ease-out"
+        enter-from-class="opacity-0"
+        leave-active-class="transition duration-150 ease-out"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="retentionOpen"
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          @click.self="retentionOpen = false"
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Configure retention policy"
+            class="w-full max-w-md rounded-lg border border-line bg-raised"
+            @keydown.esc="retentionOpen = false"
+          >
+            <div class="border-b border-line px-5 py-4">
+              <h2 class="text-section font-semibold text-ink-1">Configure retention</h2>
+              <p class="mt-0.5 text-label text-ink-2">
+                Set keep-last/daily/weekly/monthly for
+                <span class="font-medium text-ink-1">{{ retentionRepo ? serverName(retentionRepo.server_id) : '' }}</span>.
+                All-empty = no retention policy (prune will refuse).
+              </p>
+            </div>
+            <div class="space-y-3 px-5 py-4">
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Keep last</label>
+                  <input
+                    v-model.number="retentionForm.keep_last"
+                    type="number"
+                    min="1"
+                    placeholder="e.g. 3"
+                    v-bind="retentionInputAttrs"
+                  />
+                </div>
+                <div>
+                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Keep daily</label>
+                  <input
+                    v-model.number="retentionForm.keep_daily"
+                    type="number"
+                    min="1"
+                    placeholder="e.g. 7"
+                    v-bind="retentionInputAttrs"
+                  />
+                </div>
+                <div>
+                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Keep weekly</label>
+                  <input
+                    v-model.number="retentionForm.keep_weekly"
+                    type="number"
+                    min="1"
+                    placeholder="e.g. 4"
+                    v-bind="retentionInputAttrs"
+                  />
+                </div>
+                <div>
+                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2">Keep monthly</label>
+                  <input
+                    v-model.number="retentionForm.keep_monthly"
+                    type="number"
+                    min="1"
+                    placeholder="e.g. 3"
+                    v-bind="retentionInputAttrs"
+                  />
+                </div>
+              </div>
+            </div>
+            <div class="flex justify-end gap-2 border-t border-line px-5 py-3.5">
+              <Button variant="subtle" theme="gray" label="Cancel" :disabled="resticBusy !== null" @click="retentionOpen = false" />
+              <Button
+                variant="solid"
+                theme="gray"
+                label="Save retention"
+                :loading="resticBusy === 'configure'"
+                :disabled="resticBusy !== null"
+                @click="saveRetention"
+              />
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Prune now confirmation (destructive: type-to-confirm) -->
+    <ConfirmModal
+      v-model="pruneOpen"
+      variant="destructive"
+      :title="`Prune ${pruneRepo ? serverName(pruneRepo.server_id) : ''}`"
+      :message="`Apply the retention policy (${pruneRepo?.retention_summary ?? ''}) and delete non-kept snapshots.`"
+      verb="Prune now"
+      :target-name="pruneRepo ? serverName(pruneRepo.server_id) : ''"
+      :consequences="[
+        'Snapshots outside the retention window are permanently deleted.',
+        'This cannot be undone — only the kept snapshots will survive.',
+        'The repo must not be locked by another job.',
+      ]"
+      :loading="resticBusy === 'prune'"
+      @confirm="confirmPrune"
+      @cancel="pruneRepo = null"
+    />
 
     <!-- Policy editor sheet -->
     <PolicySheet
