@@ -165,6 +165,33 @@ def test_complete_applies_branding(fresh_client, empty_db):
 
 
 # ---------------------------------------------------------------------------
+# password complexity (A.5.17 — DOO-1074 F-1)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "weak",
+    [
+        "aaaaaaaa",            # too short, no complexity
+        "aaaaaaaaaaaa",        # 12 chars but no upper/digit/special
+        "Abcdefghijkl",        # no digit, no special
+        "Abcdefghij12",        # no special character
+        "ABCDEFGH123!",        # no lowercase
+        "S3cure!pass",         # 11 chars — below 12-char minimum
+    ],
+)
+def test_complete_rejects_weak_password(fresh_client, weak):
+    payload = {**COMPLETE_PAYLOAD, "admin": {**COMPLETE_PAYLOAD["admin"], "password": weak}}
+    r = fresh_client.post("/api/bootstrap/complete", json=payload)
+    assert r.status_code == 422, r.text
+
+
+def test_complete_accepts_strong_password(fresh_client):
+    # The existing COMPLETE_PAYLOAD password must still pass the policy.
+    r = fresh_client.post("/api/bootstrap/complete", json=COMPLETE_PAYLOAD)
+    assert r.status_code == 200, r.text
+
+
+# ---------------------------------------------------------------------------
 # 410 after completion (the security core of this session)
 # ---------------------------------------------------------------------------
 

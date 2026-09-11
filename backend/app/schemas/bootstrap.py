@@ -22,7 +22,24 @@ class PreflightOut(BaseModel):
 class AdminIn(BaseModel):
     email: EmailStr
     full_name: str = Field(min_length=1, max_length=120)
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=12, max_length=128)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_complexity(cls, v: str) -> str:
+        # A.5.17 privileged-credential policy: enforce complexity server-side.
+        # The wizard's 4-bar strength meter is advisory only; this is the gate.
+        if len(v) < 12:
+            raise ValueError("password must be at least 12 characters")
+        if not any(c.isupper() for c in v):
+            raise ValueError("password must contain an uppercase letter")
+        if not any(c.islower() for c in v):
+            raise ValueError("password must contain a lowercase letter")
+        if not any(c.isdigit() for c in v):
+            raise ValueError("password must contain a digit")
+        if not any(not c.isalnum() for c in v):
+            raise ValueError("password must contain a special character")
+        return v
 
 
 class BrandingIn(BaseModel):
