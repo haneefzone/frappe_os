@@ -377,7 +377,16 @@ def forget_prune(server_id: int, db: DbSession, runner: Runner, user: CurrentUse
         db, runner, user,
         server_id=server_id,
         action_name=FORGET_ACTION,
-        params={"repo": repo_uri},
+        # Record the effective keep-policy alongside the repo so the forget
+        # audit answers "what retention governed this prune?" on its own —
+        # non-secret ints, already surfaced in restic.repo.configure; the
+        # key names don't match mask_params' sensitive tokens ("keep" ≠ "key").
+        params={
+            "repo": repo_uri,
+            "keep_daily": repo.keep_daily,
+            "keep_weekly": repo.keep_weekly,
+            "keep_monthly": repo.keep_monthly,
+        },
         conflict_msg="A restic job is already running on this server.",
     )
 

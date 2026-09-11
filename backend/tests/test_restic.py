@@ -944,7 +944,7 @@ def test_configure_rejects_bad_read_data_subset(rc_client, db_session, api_env):
 def test_forget_endpoint_launches_job(rc_client, db_session, api_env):
     _repo(
         db_session, api_env["server_id"], api_env["target_id"],
-        initialized=True, keep_daily=7,
+        initialized=True, keep_daily=7, keep_weekly=4, keep_monthly=6,
     )
     login(rc_client, "developer@example.com")
     resp = rc_client.post(
@@ -956,7 +956,23 @@ def test_forget_endpoint_launches_job(rc_client, db_session, api_env):
         select(CommandJob).where(CommandJob.action_name == "restic.forget")
     ).first()
     assert job is not None
-    assert set(job.params_sanitized) == {"repo"}
+    # DOO-1105: the effective keep-policy is recorded alongside the repo so the
+    # forget evidence chain answers "what retention governed this prune?" from
+    # the audit alone. Rendered dims are stringified positive ints (non-secret).
+    assert set(job.params_sanitized) == {"repo", "keep_daily", "keep_weekly", "keep_monthly"}
+    assert job.params_sanitized["keep_daily"] == "7"
+    assert job.params_sanitized["keep_weekly"] == "4"
+    assert job.params_sanitized["keep_monthly"] == "6"
+    # runner.create() funnels params_sanitized straight into the AuditLog
+    # (already_masked=True), so params_masked carries the same keep dims — and
+    # mask_params never blanks them ("keep" contains no sensitive token).
+    audit = db_session.scalars(
+        select(AuditLog).where(AuditLog.job_id == job.id)
+    ).first()
+    assert audit is not None
+    assert audit.params_masked.get("keep_daily") == "7"
+    assert audit.params_masked.get("keep_weekly") == "4"
+    assert audit.params_masked.get("keep_monthly") == "6"
 
 
 def test_forget_endpoint_422_without_retention_policy(rc_client, db_session, api_env):

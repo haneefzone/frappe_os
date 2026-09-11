@@ -1862,7 +1862,19 @@ register(
         action_name="restic.forget",
         argv=("restic", "-r", "{repo}", "forget", "--prune"),
         cwd=None,
-        params=(ParamSpec("repo", regex=RESTIC_REPO_URI),),
+        # keep_* are recorded, not substituted into argv — the action derives the
+        # real --keep flags from the repo via forget_keep_args(). Declaring them
+        # here (non-required, positive-int) lets the launcher pass the effective
+        # retention dims so they land in params_sanitized → AuditLog.params_masked,
+        # answering "what keep-policy governed this prune?" from the audit alone
+        # (DOO-1105). Non-secret ints; render rejects any *undeclared* param, so
+        # these must be declared to be recorded.
+        params=(
+            ParamSpec("repo", regex=RESTIC_REPO_URI),
+            ParamSpec("keep_daily", regex=_POSITIVE_INT, required=False),
+            ParamSpec("keep_weekly", regex=_POSITIVE_INT, required=False),
+            ParamSpec("keep_monthly", regex=_POSITIVE_INT, required=False),
+        ),
         action_class=_ResticForgetAction,
         idempotent=False,  # destructive: never auto-retried.
         requires_lock=True,
