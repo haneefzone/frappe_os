@@ -88,24 +88,36 @@ check "$(is_schema_drift_error 'relation "foo" already exists' && echo y || echo
 check "$(is_schema_drift_error 'psycopg.OperationalError: connection refused' && echo y || echo n)" n "connection error is NOT drift"
 check "$(is_schema_drift_error 'Target database is not up to date.' && echo y || echo n)" n "plain out-of-date is NOT drift"
 
-echo "== 7. recovery_cmd is the checkout-age-independent curl form (DOO-1174) =="
-# DOO-1174: the recovery must fetch a fresh installer from the canonical source,
-# NOT re-run the local checkout ('sudo ./install.sh'), because the drift
-# population is disproportionately on a pre-fix checkout whose in-tree rerun
-# would loop on the same failure. See recovery_cmd's header comment.
-check "$(recovery_cmd fdm)" \
-    "sudo -u postgres dropdb fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/main/install.sh | sudo bash" \
-    "recovery_cmd fdm (curl form)"
-check "$(recovery_cmd "$DB")" \
-    "sudo -u postgres dropdb $DB && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/main/install.sh | sudo bash" \
-    "recovery_cmd honours DB name"
-check "$(recovery_cmd fdm release-2.0)" \
-    "sudo -u postgres dropdb fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/release-2.0/install.sh | sudo bash" \
+echo "== 7. recovery_cmd derives the drop from the effective DATABASE_URL (DOO-1175) =="
+# DOO-1175: `sudo -u postgres dropdb` routes through Debian pg_wrapper and can
+# target a different cluster than the one the app is bound to (an embedded PG on
+# :5432 vs the Debian cluster on :5433 — the exact DOO-1162 loop). The drop must
+# name host/port/user explicitly so it hits the precise server DATABASE_URL uses,
+# and must NEVER use --if-exists (on the wrong server a miss looks like success).
+# DOO-1174: the reinstall half stays the checkout-age-independent curl form.
+check "$(recovery_cmd fdm 127.0.0.1 5432 fdm)" \
+    "dropdb -h 127.0.0.1 -p 5432 -U fdm fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/main/install.sh | sudo bash" \
+    "recovery_cmd names host/port/user (curl reinstall)"
+check "$(recovery_cmd "$DB" 127.0.0.1 5432 "$ROLE")" \
+    "dropdb -h 127.0.0.1 -p 5432 -U $ROLE $DB && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/main/install.sh | sudo bash" \
+    "recovery_cmd honours DB name + user"
+check "$(recovery_cmd fdm db.internal 6543 fdmadmin)" \
+    "dropdb -h db.internal -p 6543 -U fdmadmin fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/main/install.sh | sudo bash" \
+    "recovery_cmd honours non-default host/port/user"
+check "$(recovery_cmd fdm 127.0.0.1 5432 fdm release-2.0)" \
+    "dropdb -h 127.0.0.1 -p 5432 -U fdm fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/release-2.0/install.sh | sudo bash" \
     "recovery_cmd honours an explicit branch arg"
-check "$(FDM_BRANCH=stable recovery_cmd fdm)" \
-    "sudo -u postgres dropdb fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/stable/install.sh | sudo bash" \
+check "$(FDM_BRANCH=stable recovery_cmd fdm 127.0.0.1 5432 fdm)" \
+    "dropdb -h 127.0.0.1 -p 5432 -U fdm fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/stable/install.sh | sudo bash" \
     "recovery_cmd defaults branch to \$FDM_BRANCH"
-# The footgun must be gone: no in-tree './install.sh' rerun, and it must fetch.
+check "$(recovery_cmd fdm)" \
+    "dropdb -h 127.0.0.1 -p 5432 -U fdm fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/main/install.sh | sudo bash" \
+    "bare recovery_cmd defaults to loopback/5432/fdm"
+# The footguns must be gone: no pg_wrapper drop, no --if-exists masking a miss,
+# no in-tree './install.sh' rerun; and it must still fetch a fresh installer.
+check "$(recovery_cmd fdm | grep -c 'sudo -u postgres dropdb')" 0 "recovery_cmd no longer assumes 'sudo -u postgres'"
+check "$(recovery_cmd fdm | grep -c -- '--if-exists')"          0 "recovery_cmd never suggests --if-exists"
+check "$(recovery_cmd fdm | grep -c 'dropdb -h [^ ]* -p [^ ]* -U ')" 1 "recovery_cmd names host/port/user"
 check "$(recovery_cmd fdm | grep -c 'sudo \./install\.sh')" 0 "recovery_cmd no longer emits in-tree ./install.sh"
 check "$(recovery_cmd fdm | grep -c 'curl -fsSL')"          1 "recovery_cmd fetches a fresh installer"
 

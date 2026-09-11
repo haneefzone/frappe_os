@@ -91,15 +91,29 @@ provision_db() {
     fi
 }
 
-# recovery_cmd DBNAME [BRANCH] — print the single, canonical recovery command
-# for a managed install wedged by database drift. Centralised (DOO-1169) so the
-# migrate failure handler and the tests all quote the same string instead of
-# drifting out of sync. DBNAME defaults to fdm; BRANCH defaults to $FDM_BRANCH
-# or main.
+# recovery_cmd DBNAME [HOST] [PORT] [USER] [BRANCH] — print the single, canonical
+# recovery command for a managed install wedged by database drift. Centralised
+# (DOO-1169) so the migrate failure handler and the tests all quote the same
+# string instead of drifting out of sync. DBNAME defaults to fdm; HOST/PORT/USER
+# default to the installer's managed loopback PostgreSQL (127.0.0.1/5432/fdm);
+# BRANCH defaults to $FDM_BRANCH or main.
 #
-# DOO-1174: the recovery MUST fetch a fresh installer from the canonical source
-# rather than re-run the local checkout. The population that hits drift is, by
-# construction, disproportionately on an OLD checkout (drift detection only
+# DOO-1175: the drop MUST be derived from the effective DATABASE_URL — host,
+# port AND user named explicitly — rather than assume `sudo -u postgres dropdb`.
+# `sudo -u postgres dropdb` routes through Debian's pg_wrapper, which resolves to
+# whatever cluster /etc/postgresql-common/user_clusters (or the single Debian
+# cluster) points at — NOT necessarily the server the app is bound to. On a host
+# where a non-Debian PostgreSQL (e.g. an embedded dev instance with loopback
+# trust auth and no `postgres` role) listens on the target port, `sudo -u
+# postgres dropdb fdm` silently targets a different cluster and the drop is a
+# no-op — the exact loop DOO-1162 was stuck in. `dropdb -h HOST -p PORT -U USER`
+# pins the drop to the precise server the installer actually uses. For the same
+# reason we NEVER emit --if-exists: on the wrong server a miss is
+# indistinguishable from success, which is how a no-op passed as a fix.
+#
+# DOO-1174: the reinstall half MUST fetch a fresh installer from the canonical
+# source rather than re-run the local checkout. The population that hits drift is,
+# by construction, disproportionately on an OLD checkout (drift detection only
 # fires when re-running after a prior aborted attempt), and `sudo ./install.sh`
 # run from inside /opt/fdm-platform takes install.sh's "skipping code sync"
 # branch — it re-executes whatever code is already on disk. On a pre-fix
@@ -109,9 +123,12 @@ provision_db() {
 # stale the checkout is. .env secrets survive because dropdb touches only the DB.
 recovery_cmd() {
     local db="${1:-fdm}"
-    local branch="${2:-${FDM_BRANCH:-main}}"
-    printf 'sudo -u postgres dropdb %s && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/%s/install.sh | sudo bash' \
-        "$db" "$branch"
+    local host="${2:-127.0.0.1}"
+    local port="${3:-5432}"
+    local user="${4:-fdm}"
+    local branch="${5:-${FDM_BRANCH:-main}}"
+    printf 'dropdb -h %s -p %s -U %s %s && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/%s/install.sh | sudo bash' \
+        "$host" "$port" "$user" "$db" "$branch"
 }
 
 # checkout_is_behind DIR BRANCH — for an in-tree install run (install.sh invoked

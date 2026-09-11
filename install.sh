@@ -55,7 +55,18 @@ die()  { echo -e "\033[1;31m[fdm-install] ERROR:\033[0m $*" >&2; exit 1; }
 # manual database surgery is required" (which was false at 5d24e4c).
 on_install_error() {
     local rc=$? line="${1:-?}"
-    echo -e "\033[1;31m[fdm-install] FAILED\033[0m (line $line, exit $rc). Fix the cause shown above, then re-run this installer: a partial first install is resumed from real database state — a MISSING managed database is re-created, and existing secrets and already-migrated data are preserved. One case a plain rerun does NOT fix: a managed database whose schema is AHEAD of its recorded alembic version (a leftover from an earlier aborted attempt), which fails migration with a DuplicateColumn / \"already exists\" error. Recover that by dropping the managed database and reinstalling from the canonical source (NOT sudo ./install.sh — an in-tree rerun re-executes this same on-disk installer, so a stale checkout would loop; the curl form always fetches a fresh installer): sudo -u postgres dropdb fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/${FDM_BRANCH:-main}/install.sh | sudo bash (back it up with pg_dump first if it holds data you need)." >&2
+    # DOO-1175: derive the drop from the effective DATABASE_URL (host/port/user)
+    # once it has been parsed, rather than hardcode a bare `sudo -u postgres
+    # dropdb fdm` — that routes through pg_wrapper and can silently miss the
+    # server the app is bound to. Before the URL is parsed, print the shape with
+    # placeholders instead of a command that might target the wrong server.
+    local recovery
+    if declare -F recovery_cmd >/dev/null 2>&1 && [ -n "${DB_NAME:-}" ]; then
+        recovery="$(recovery_cmd "$DB_NAME" "${DB_HOST:-127.0.0.1}" "${DB_PORT:-5432}" "${DB_USER:-fdm}")"
+    else
+        recovery="dropdb -h <host> -p <port> -U <user> <db> && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/${FDM_BRANCH:-main}/install.sh | sudo bash   (host/port/user come from DATABASE_URL in backend/.env)"
+    fi
+    echo -e "\033[1;31m[fdm-install] FAILED\033[0m (line $line, exit $rc). Fix the cause shown above, then re-run this installer: a partial first install is resumed from real database state — a MISSING managed database is re-created, and existing secrets and already-migrated data are preserved. One case a plain rerun does NOT fix: a managed database whose schema is AHEAD of its recorded alembic version (a leftover from an earlier aborted attempt), which fails migration with a DuplicateColumn / \"already exists\" error. Recover that by dropping the managed database — addressing it explicitly by host/port/user, NOT via 'sudo -u postgres dropdb' which routes through pg_wrapper and can miss the server FDM uses (DOO-1175) — and reinstalling from the canonical source (the curl form always fetches a fresh installer; an in-tree 'sudo ./install.sh' would re-run a possibly-stale on-disk installer): ${recovery} (back it up with pg_dump first if it holds data you need)." >&2
 }
 trap 'on_install_error "$LINENO"' ERR
 
@@ -319,9 +330,41 @@ DB_URL_EFFECTIVE="$(env_value DATABASE_URL "$ENV_FILE")"
 DB_NAME="$(pg_url_field "$DB_URL_EFFECTIVE" dbname)"
 DB_USER="$(pg_url_field "$DB_URL_EFFECTIVE" user)"
 DB_HOST="$(pg_url_field "$DB_URL_EFFECTIVE" host)"
+DB_PORT="$(pg_url_field "$DB_URL_EFFECTIVE" port)"; DB_PORT="${DB_PORT:-5432}"
 DB_PASS_EFFECTIVE="$(pg_url_field "$DB_URL_EFFECTIVE" password)"
 if [ "$IS_ROOT" -eq 1 ] && [ -z "${FDM_DATABASE_URL:-}" ] \
         && is_local_host "$DB_HOST" && [ -n "$DB_NAME" ] && [ -n "$DB_USER" ]; then
+    # DOO-1175: `pg_isready` on :$DB_PORT is NOT evidence the server listening
+    # there is one this installer manages. Before provisioning we verify that the
+    # superuser account we provision *through* (`runuser -u postgres -- psql`,
+    # routed by Debian pg_wrapper) actually administers the SAME server the app's
+    # DATABASE_URL points at — by comparing its live listening port to $DB_PORT.
+    # If they differ, a foreign PostgreSQL squats on the target port (the failure
+    # mode behind DOO-1162: an embedded dev instance on :5432 while the Debian
+    # cluster the superuser owns is on :5433). Provisioning would then create the
+    # role/DB on one server while the app connects to another, and any drop we
+    # later advise would miss. Fail loudly with the FDM_DATABASE_URL escape hatch
+    # rather than silently adopt a database we do not own.
+    admin_port="$(runuser -u postgres -- psql -tAc 'SHOW port' 2>/dev/null | tr -d '[:space:]')"
+    if [ -z "$admin_port" ]; then
+        die "Cannot reach a PostgreSQL superuser (\`runuser -u postgres -- psql\`) to provision '$DB_NAME'. Ensure the managed PostgreSQL is installed and running, or point FDM at a database you control with FDM_DATABASE_URL."
+    fi
+    if [ "$admin_port" != "$DB_PORT" ]; then
+        die "Refusing to adopt a foreign PostgreSQL on port $DB_PORT.
+Something is listening on 127.0.0.1:$DB_PORT (where DATABASE_URL points), but the
+PostgreSQL this installer can administer as the 'postgres' superuser is on port
+$admin_port — they are different servers. \`pg_isready\` on :$DB_PORT is not proof the
+server there is FDM's own. Provisioning or dropping via the 'postgres' superuser
+would target :$admin_port and miss the server the app actually uses.
+Fix it one of two ways:
+  • Free port $DB_PORT (stop the other PostgreSQL) so FDM's managed server binds it,
+    then re-run this installer; or
+  • Point FDM at the exact database you want with FDM_DATABASE_URL — FDM then treats
+    it as yours and neither creates nor drops it, e.g.:
+      sudo FDM_DATABASE_URL='postgresql+psycopg://<user>:<pass>@127.0.0.1:$DB_PORT/<db>' \\
+        bash -c 'curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/${FDM_BRANCH}/install.sh | bash'"
+    fi
+    log "Verified the 'postgres' superuser administers port $DB_PORT (FDM's managed server)."
     log "Ensuring PostgreSQL role '$DB_USER' + database '$DB_NAME' exist…"
     if [ "$(provision_db "runuser -u postgres -- psql" \
             "$DB_NAME" "$DB_USER" "$DB_PASS_EFFECTIVE")" = created ]; then
@@ -359,9 +402,9 @@ if [ "$migrate_rc" -ne 0 ]; then
     if is_schema_drift_error "$migrate_out"; then
         die "Migration failed: the managed database '$DB_NAME' has a schema AHEAD of its recorded alembic version — most likely a leftover from an earlier aborted install. This installer re-creates a MISSING database but cannot reconcile a drifted one, so re-running as-is will keep hitting this same error. Recover with:
 
-    $(recovery_cmd "$DB_NAME")
+    $(recovery_cmd "$DB_NAME" "${DB_HOST:-127.0.0.1}" "$DB_PORT" "$DB_USER")
 
-That drops the managed database and fetches a fresh installer from the canonical source to rebuild it cleanly. The curl form (rather than a bare 'sudo ./install.sh') is deliberate: an in-tree rerun re-executes this same on-disk installer, so a checkout that predates the fix would just loop on this error (DOO-1174). Your .env secrets are preserved (dropdb touches only the database). If '$DB_NAME' holds data you need, back it up first: sudo -u postgres pg_dump $DB_NAME > fdm-backup.sql"
+That drops the managed database (named by the host, port and user from your effective DATABASE_URL — NOT a bare 'sudo -u postgres dropdb', which routes through pg_wrapper and can silently miss the server FDM actually uses, DOO-1175) and fetches a fresh installer from the canonical source to rebuild it cleanly. The curl form (rather than a bare 'sudo ./install.sh') is deliberate: an in-tree rerun re-executes this same on-disk installer, so a checkout that predates the fix would just loop on this error (DOO-1174). Your .env secrets are preserved (dropdb touches only the database). If '$DB_NAME' holds data you need, back it up first: pg_dump -h ${DB_HOST:-127.0.0.1} -p $DB_PORT -U $DB_USER $DB_NAME > fdm-backup.sql"
     fi
     die "Database migration failed (alembic upgrade head, exit $migrate_rc) — see the error above."
 fi
