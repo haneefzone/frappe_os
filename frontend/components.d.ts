@@ -18,6 +18,7 @@ declare module 'vue' {
     ComplianceReportGenerator: typeof import('./src/components/ComplianceReportGenerator.vue')['default']
     ConfirmModal: typeof import('./src/components/ConfirmModal.vue')['default']
     CopyField: typeof import('./src/components/CopyField.vue')['default']
+    CreateMaintenanceWindowSheet: typeof import('./src/components/CreateMaintenanceWindowSheet.vue')['default']
     CreateScheduleSheet: typeof import('./src/components/CreateScheduleSheet.vue')['default']
     DataTable: typeof import('./src/components/DataTable.vue')['default']
     DriftChip: typeof import('./src/components/DriftChip.vue')['default']
@@ -33,6 +34,7 @@ declare module 'vue' {
     ResourceGauge: typeof import('./src/components/ResourceGauge.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    SchedulesCalendar: typeof import('./src/components/SchedulesCalendar.vue')['default']
     SheetField: typeof import('./src/components/SheetField.vue')['default']
     SidebarLink: typeof import('./src/components/layout/SidebarLink.vue')['default']
     Sparkline: typeof import('./src/components/Sparkline.vue')['default']
@@ -41,6 +43,7 @@ declare module 'vue' {
     StorageTargetSheet: typeof import('./src/components/StorageTargetSheet.vue')['default']
     TerminalTab: typeof import('./src/components/TerminalTab.vue')['default']
     ToastHost: typeof import('./src/components/ToastHost.vue')['default']
+    ToolsChecklist: typeof import('./src/components/ToolsChecklist.vue')['default']
     UpdateChip: typeof import('./src/components/UpdateChip.vue')['default']
     Wizard: typeof import('./src/components/Wizard.vue')['default']
   }

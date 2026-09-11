@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import CurrentUser, require
 from app.core.commands import RenderError, UnknownAction, get_template
-from app.core.jobs import JobRunner, LockConflict, build_runner
+from app.core.jobs import JobRunner, LockConflict, MaintenanceWindowBlocked, build_runner
 from app.core.permissions import JOB_MANAGE, READ, role_allows
 from app.db import get_db
 from app.models import CommandJob, Server
@@ -91,6 +91,19 @@ def create_job(body: JobCreate, db: DbSession, runner: Runner, user: CurrentUser
                     "message": f"A job is already running on this target "
                     f"(blocking job {exc.blocking_job_id}).",
                     "blocking_job_id": exc.blocking_job_id,
+                }
+            },
+        )
+    except MaintenanceWindowBlocked as exc:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "code": "maintenance_window_blocked",
+                    "message": str(exc),
+                    "window_id": exc.window_id,
+                    "window_name": exc.window_name,
+                    "danger_class": exc.danger_class,
                 }
             },
         )
@@ -168,6 +181,19 @@ def retry_job(
                     "message": f"A job is already running on this target "
                     f"(blocking job {exc.blocking_job_id}).",
                     "blocking_job_id": exc.blocking_job_id,
+                }
+            },
+        )
+    except MaintenanceWindowBlocked as exc:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "code": "maintenance_window_blocked",
+                    "message": str(exc),
+                    "window_id": exc.window_id,
+                    "window_name": exc.window_name,
+                    "danger_class": exc.danger_class,
                 }
             },
         )
