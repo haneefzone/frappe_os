@@ -19,6 +19,13 @@
 # database only when it is actually missing, so recovering a failed first
 # install with `dropdb fdm && ./install.sh` works (DOO-1155).
 #
+# LIMIT (DOO-1169): re-running self-heals a MISSING managed database, but it
+# does NOT reconcile one whose schema is AHEAD of its recorded alembic version
+# (a leftover from an earlier aborted attempt whose alembic_version was never
+# stamped forward). That surfaces as a DuplicateColumn/"already exists"
+# migration failure; the installer detects it and prints the drop-and-reinstall
+# recovery command rather than looping into the same error.
+#
 # Tunables (env vars, all optional):
 #   FDM_HOME           install dir      (root: /opt/fdm-platform, else ~/.local/share/fdm-platform)
 #   FDM_PORT           HTTP port        (default 8000)
@@ -39,7 +46,18 @@ set -euo pipefail
 log()  { echo -e "\033[1;36m[fdm-install]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[fdm-install] WARN:\033[0m $*" >&2; }
 die()  { echo -e "\033[1;31m[fdm-install] ERROR:\033[0m $*" >&2; exit 1; }
-trap 'rc=$?; echo -e "\033[1;31m[fdm-install] FAILED\033[0m (line $LINENO, exit $rc). Fix the cause shown above, then re-run this installer: a partial first install is resumed from real database state — a missing managed database is re-created, existing secrets and already-migrated data are preserved, and no manual database surgery is required." >&2' ERR
+# ERR handler (DOO-1155/DOO-1169). Kept in a function so the captured migrate
+# step below can suppress it (trap - ERR) around a failure it reports itself,
+# then restore it, without duplicating this message. The message is honest for
+# every state it can fire in: re-running self-heals a MISSING managed database
+# but does NOT reconcile one whose schema is AHEAD of alembic_version, so it
+# names that case and the drop-and-reinstall recovery instead of promising "no
+# manual database surgery is required" (which was false at 5d24e4c).
+on_install_error() {
+    local rc=$? line="${1:-?}"
+    echo -e "\033[1;31m[fdm-install] FAILED\033[0m (line $line, exit $rc). Fix the cause shown above, then re-run this installer: a partial first install is resumed from real database state — a MISSING managed database is re-created, and existing secrets and already-migrated data are preserved. One case a plain rerun does NOT fix: a managed database whose schema is AHEAD of its recorded alembic version (a leftover from an earlier aborted attempt), which fails migration with a DuplicateColumn / \"already exists\" error. Recover that by dropping and re-creating the managed database: sudo -u postgres dropdb fdm && sudo ./install.sh (back it up with pg_dump first if it holds data you need)." >&2
+}
+trap 'on_install_error "$LINENO"' ERR
 
 IS_ROOT=0; [ "$(id -u)" -eq 0 ] && IS_ROOT=1
 HAVE_SYSTEMD=0; [ "$IS_ROOT" -eq 1 ] && [ -d /run/systemd/system ] && HAVE_SYSTEMD=1
@@ -297,8 +315,35 @@ elif [ "$IS_ROOT" -ne 1 ]; then
 fi
 
 # ---------------------------------------------------------------- migrate
+# DOO-1169: capture the migration output instead of discarding it to /dev/null.
+# provision_db above only re-creates a MISSING database; it cannot reconcile a
+# managed database whose schema is AHEAD of alembic_version (a leftover from an
+# earlier aborted attempt). Such a DB replays a pending migration into a
+# DuplicateColumn/"already exists" failure, and a plain rerun loops forever on
+# it. Detect that signature and stop with the exact drop-and-reinstall recovery
+# command instead of a silent, self-repeating failure.
 log "Running database migrations (alembic upgrade head)…"
-as_fdm "$BACKEND_DIR" "$BACKEND_DIR/.venv/bin/alembic" upgrade head >/dev/null
+# Suppress the generic ERR handler for the duration of the captured run: this
+# block reports migration failure itself (with a targeted recovery message) and
+# would otherwise fire the trap too — a command-substitution assignment trips
+# the ERR trap even under `set +e`.
+trap - ERR
+set +e
+migrate_out="$(as_fdm "$BACKEND_DIR" "$BACKEND_DIR/.venv/bin/alembic" upgrade head 2>&1)"
+migrate_rc=$?
+set -e
+trap 'on_install_error "$LINENO"' ERR
+if [ "$migrate_rc" -ne 0 ]; then
+    printf '%s\n' "$migrate_out" >&2
+    if is_schema_drift_error "$migrate_out"; then
+        die "Migration failed: the managed database '$DB_NAME' has a schema AHEAD of its recorded alembic version — most likely a leftover from an earlier aborted install. This installer re-creates a MISSING database but cannot reconcile a drifted one, so re-running as-is will keep hitting this same error. Recover with:
+
+    $(recovery_cmd "$DB_NAME")
+
+That drops the managed database and lets this installer rebuild it cleanly; your .env secrets are preserved. If '$DB_NAME' holds data you need, back it up first: sudo -u postgres pg_dump $DB_NAME > fdm-backup.sql"
+    fi
+    die "Database migration failed (alembic upgrade head, exit $migrate_rc) — see the error above."
+fi
 
 # --------------------------------------------------------------- seed / wizard
 # Session 6.4: fresh installs are set up via the browser wizard at /setup.

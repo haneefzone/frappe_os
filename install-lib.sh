@@ -90,3 +90,26 @@ provision_db() {
         printf 'created'
     fi
 }
+
+# recovery_cmd DBNAME — print the single, canonical recovery command for a
+# managed install wedged by database drift. Centralised (DOO-1169) so the ERR
+# trap, the migrate failure handler, and the tests all quote the same string
+# instead of drifting out of sync. DBNAME defaults to fdm.
+recovery_cmd() {
+    local db="${1:-fdm}"
+    printf 'sudo -u postgres dropdb %s && sudo ./install.sh' "$db"
+}
+
+# is_schema_drift_error TEXT — true when captured `alembic upgrade head` output
+# carries the signature of a database whose schema is AHEAD of alembic_version:
+# a pending migration tries to create an object that already exists. This is the
+# DOO-1169 case — a leftover DB from an earlier aborted attempt whose
+# alembic_version was never stamped forward. provision_db cannot fix it (it only
+# creates a MISSING database), so a plain rerun replays the same migration into
+# the identical DuplicateColumn/DuplicateTable failure and loops forever. The
+# honest recovery is dropdb + reinstall, NOT another rerun. Signatures cover
+# psycopg's Duplicate* error classes and Postgres' "... already exists" text.
+is_schema_drift_error() {
+    printf '%s' "$1" | grep -qiE \
+        'DuplicateColumn|DuplicateTable|DuplicateObject|psycopg2?\.errors\.Duplicate|already exists'
+}

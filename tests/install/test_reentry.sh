@@ -72,5 +72,70 @@ PGPASSWORD="$PASS" psql -h "$PGHOST" -p "$PGPORT" -U "$ROLE" -d "$DB" -tAc "SELE
     && echo "  ok: role connects" \
     || { echo "FAIL: provisioned role cannot connect" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------
+# DOO-1169: a MISSING database self-heals (sections 2-4), but a database whose
+# schema is AHEAD of alembic_version does NOT — provision_db leaves the existing
+# DB alone and `alembic upgrade head` then replays a pending migration into a
+# DuplicateColumn/"already exists" failure. A plain rerun loops on it forever;
+# the honest recovery is dropdb + reinstall. These sections prove (a) the drift
+# signature is classified as drift, (b) unrelated failures are NOT, (c) the
+# advertised recovery command actually clears the wedge.
+
+echo "== 6. is_schema_drift_error classifies the DOO-1169 signatures =="
+DRIFT_MSG='sqlalchemy.exc.ProgrammingError: (psycopg.errors.DuplicateColumn) column "last_check_ok" of relation "restic_snapshots" already exists'
+check "$(is_schema_drift_error "$DRIFT_MSG" && echo y || echo n)"        y "DuplicateColumn output is drift"
+check "$(is_schema_drift_error 'relation "foo" already exists' && echo y || echo n)" y "\"already exists\" output is drift"
+check "$(is_schema_drift_error 'psycopg.OperationalError: connection refused' && echo y || echo n)" n "connection error is NOT drift"
+check "$(is_schema_drift_error 'Target database is not up to date.' && echo y || echo n)" n "plain out-of-date is NOT drift"
+
+echo "== 7. recovery_cmd names the exact drop-and-reinstall command =="
+check "$(recovery_cmd fdm)"  "sudo -u postgres dropdb fdm && sudo ./install.sh"  "recovery_cmd fdm"
+check "$(recovery_cmd "$DB")" "sudo -u postgres dropdb $DB && sudo ./install.sh" "recovery_cmd honours DB name"
+
+echo "== 8. schema-ahead DB: migrate fails as drift, and the recovery works =="
+# Seed the exact wedge: alembic_version stamped BEHIND, but the object a pending
+# migration would create already present (schema AHEAD). Uses only psql, so it
+# runs anywhere the rest of this test does — no backend app / alembic needed.
+seed_ahead() {
+    PGPASSWORD="$PASS" psql -h "$PGHOST" -p "$PGPORT" -U "$ROLE" -d "$DB" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+CREATE TABLE IF NOT EXISTS alembic_version (version_num varchar(32) NOT NULL);
+DELETE FROM alembic_version;
+INSERT INTO alembic_version (version_num) VALUES ('b7e2d9f4c1a8');
+CREATE TABLE IF NOT EXISTS restic_snapshots (id serial PRIMARY KEY);
+ALTER TABLE restic_snapshots ADD COLUMN last_check_ok boolean;
+SQL
+}
+# With alembic_version stamped BEHIND, `alembic upgrade head` runs ONLY the
+# migrations after that revision — here the pending d4e2f7a9c6b1 ADD COLUMN,
+# NOT the earlier CREATE TABLE (alembic believes it is already applied). Against
+# the seeded (ahead) schema that ADD COLUMN fails with DuplicateColumn — the
+# real symptom of the DOO-1169 wedge.
+pending_migration_ddl() {
+    PGPASSWORD="$PASS" psql -h "$PGHOST" -p "$PGPORT" -U "$ROLE" -d "$DB" -v ON_ERROR_STOP=1 \
+        -c 'ALTER TABLE restic_snapshots ADD COLUMN last_check_ok boolean' 2>&1
+}
+# On a CLEAN database alembic runs the whole chain from zero: the earlier
+# CREATE TABLE then the d4e2f7a9c6b1 ADD COLUMN. This is what the recovery path
+# produces, and it must succeed.
+clean_migration_from_zero() {
+    PGPASSWORD="$PASS" psql -h "$PGHOST" -p "$PGPORT" -U "$ROLE" -d "$DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<'SQL'
+CREATE TABLE restic_snapshots (id serial PRIMARY KEY);
+ALTER TABLE restic_snapshots ADD COLUMN last_check_ok boolean;
+SQL
+}
+seed_ahead
+set +e
+mig_out="$(pending_migration_ddl)"; mig_rc=$?
+set -e
+check "$([ "$mig_rc" -ne 0 ] && echo fail || echo ok)" fail "migrate against schema-ahead DB fails"
+check "$(is_schema_drift_error "$mig_out" && echo y || echo n)" y "the failure is detected as drift"
+
+echo "== 9. the advertised recovery command actually clears the wedge =="
+# Exactly what recovery_cmd tells the operator to do: drop the DB, then let the
+# installer's provisioning re-create it clean, then migrate from zero.
+$ADMIN -tAc "DROP DATABASE \"$DB\"" >/dev/null
+check "$(provision_db "$ADMIN" "$DB" "$ROLE" "$PASS")" created "recovery re-creates a clean DB"
+check "$(clean_migration_from_zero && echo ok || echo fail)" ok "from-zero migration now succeeds on the clean DB"
+
 echo
-echo "PASS ($pass checks): install re-entry self-heal verified (DOO-1155 AC4/AC5)."
+echo "PASS ($pass checks): install re-entry self-heal + schema-drift recovery verified (DOO-1155 AC4/AC5, DOO-1169)."
