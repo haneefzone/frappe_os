@@ -122,7 +122,7 @@ class SecurityPolicy(Base):
     # and blocked from mutating routes (get_current_user enforces this).
     enforce_2fa_roles: Mapped[list] = mapped_column(_JSON, default=list)
 
-    password_min_length: Mapped[int] = mapped_column(Integer, default=10)
+    password_min_length: Mapped[int] = mapped_column(Integer, default=12)
     # Requires at least one upper, one lower, one digit, one symbol.
     password_require_complexity: Mapped[bool] = mapped_column(Boolean, default=True)
     # How many previous passwords a new one may not match (0 = disabled).

@@ -6,7 +6,7 @@
 This runbook explains the two secrets that hold the FDM platform together, how to
 keep safe copies of them (*escrow*), how to prove those copies actually work, and
 exactly what to do the day a server is lost. Read it once in full before you file
-your escrow copies. Then use the [quarterly checklist](#5-quarterly-escrow-verification-checklist)
+your escrow copies. Then use the [quarterly checklist](#6-quarterly-escrow-verification-checklist)
 every three months.
 
 ---
@@ -212,7 +212,27 @@ you have found it during a drill instead of during a real disaster.
 
 ---
 
-## 5. Quarterly escrow-verification checklist
+## 5. Locked-out admin — TOTP recovery
+
+If the sole admin is locked out because they lost their TOTP device and have no backup codes,
+run the following **on the platform host** (requires shell access and the platform's virtualenv):
+
+```bash
+python -m app.manage disable-2fa --email <admin-email>
+```
+
+This clears the confirmed-TOTP flag for that account so the next login skips the TOTP prompt.
+The admin must then immediately re-enrol their TOTP device via **Settings → Security**.
+
+> **Access required:** a shell on the platform host and the ability to activate the virtualenv
+> (typically `source /opt/fdm/.venv/bin/activate` or equivalent). This is an emergency-operator
+> operation — it is **not** available through the web UI.
+>
+> **Audit trail:** the command writes an AuditLog entry (`action=auth.mfa_disable`).
+
+---
+
+## 6. Quarterly escrow-verification checklist
 
 Run every quarter. Tick each box; file the completed checklist with your ISO 27001
 operations-security evidence (A.8 — asset/operations security; key-management

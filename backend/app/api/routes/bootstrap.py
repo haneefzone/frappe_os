@@ -4,8 +4,9 @@ Security contract (the only unauthenticated mutating surface in the product):
 - GET /api/bootstrap/status   — public, safe; returns {needs_setup: bool}.
 - POST /api/bootstrap/preflight — public, rate-limited; runs health checks.
 - POST /api/bootstrap/complete  — public, rate-limited; creates the first admin
-  and marks setup done.  After completion all three routes return 410 Gone
+  and marks setup done.  After completion /preflight and /complete return 410 Gone
   (persisted in the DB, not in process memory), so a restart cannot re-open them.
+  /status continues to return 200 {needs_setup: false} — it never returns 410.
 
 Bootstrap routes are:
   (a) Served ONLY while zero users exist (checked per-request from the DB).
