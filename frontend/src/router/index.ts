@@ -51,6 +51,12 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     {
+      name: 'setup',
+      path: '/setup',
+      component: () => import('../pages/SetupPage.vue'),
+      meta: { label: 'Setup', public: true, setup: true },
+    },
+    {
       name: 'login',
       path: '/login',
       component: () => import('../pages/LoginPage.vue'),
@@ -114,6 +120,26 @@ router.beforeEach(async (to) => {
   const auth = useAuthStore()
 
   if (!auth.initialized) await auth.bootstrap()
+
+  // First-run: if the platform has no users yet, redirect everything to /setup.
+  if (!auth.setupChecked) {
+    try {
+      const { bootstrapApi } = await import('../api/bootstrap')
+      const status = await bootstrapApi.status()
+      auth.needsSetup = status.needs_setup
+    } catch {
+      auth.needsSetup = false
+    }
+    auth.setupChecked = true
+  }
+
+  if (auth.needsSetup && to.name !== 'setup') {
+    return { name: 'setup' }
+  }
+  // Once setup is complete, the /setup route is no longer needed.
+  if (!auth.needsSetup && to.name === 'setup') {
+    return auth.isAuthenticated ? { path: '/' } : { name: 'login' }
+  }
 
   if (to.meta.public) {
     // A signed-in user has no business on the login page.

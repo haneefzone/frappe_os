@@ -14,6 +14,10 @@ export const useAuthStore = defineStore('auth', {
     user: null as UserInfo | null,
     /** True once the initial /me probe has resolved (either way). */
     initialized: false,
+    /** True while /api/bootstrap/status says needs_setup=true. */
+    needsSetup: false,
+    /** True once the bootstrap status has been checked for this session. */
+    setupChecked: false,
   }),
 
   getters: {
@@ -40,6 +44,12 @@ export const useAuthStore = defineStore('auth', {
         this.user = null
       }
       this.initialized = true
+      // After the /setup wizard completes and redirects here, re-check bootstrap
+      // status so the guard no longer blocks normal navigation.
+      if (this.needsSetup && this.user !== null) {
+        this.needsSetup = false
+        this.setupChecked = true
+      }
     },
 
     /**

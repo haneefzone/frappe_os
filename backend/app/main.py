@@ -10,6 +10,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app import __version__
 from app.api.routes.ai_settings import router as ai_settings_router
+from app.api.routes.bootstrap import router as bootstrap_router
 from app.api.routes.alerts import router as alerts_router
 from app.api.routes.apps import router as apps_router
 from app.api.routes.audit import router as audit_router
@@ -155,6 +156,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     register_exception_handlers(app)
+    app.include_router(bootstrap_router)
     app.include_router(auth_router)
     app.include_router(servers_router)
     app.include_router(benches_router)

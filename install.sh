@@ -277,13 +277,17 @@ fi
 log "Running database migrations (alembic upgrade head)…"
 as_fdm "$BACKEND_DIR" "$BACKEND_DIR/.venv/bin/alembic" upgrade head >/dev/null
 
-# --------------------------------------------------------------- seed admin
-ADMIN_PASSWORD=""
-if [ "$FRESH_INSTALL" -eq 1 ]; then
-    ADMIN_PASSWORD="$("$PYBIN" -c 'import secrets; print(secrets.token_urlsafe(12))')"
-    log "Seeding roles and admin user $FDM_ADMIN_EMAIL…"
+# --------------------------------------------------------------- seed / wizard
+# Session 6.4: fresh installs are set up via the browser wizard at /setup.
+# The CLI seed is kept for headless / automated installs; pass FDM_ADMIN_EMAIL
+# and FDM_ADMIN_PASSWORD to activate it (e.g. CI, Docker, provisioning scripts).
+ADMIN_PASSWORD="${FDM_ADMIN_PASSWORD:-}"
+if [ "$FRESH_INSTALL" -eq 1 ] && [ -n "$ADMIN_PASSWORD" ]; then
+    log "Headless seed: creating admin user $FDM_ADMIN_EMAIL via CLI…"
     as_fdm "$BACKEND_DIR" "$BACKEND_DIR/.venv/bin/python" -m app.seed \
         --admin-email "$FDM_ADMIN_EMAIL" --admin-password "$ADMIN_PASSWORD" >/dev/null
+elif [ "$FRESH_INSTALL" -eq 1 ]; then
+    log "Fresh install: admin account will be created via the browser wizard (/setup)."
 fi
 
 # ------------------------------------------------------------ frontend build
@@ -391,10 +395,15 @@ echo "  FDM Platform is running."
 echo
 echo "  URL:          http://${HOST_IP:-127.0.0.1}:$FDM_PORT"
 echo "  Health:       $HEALTH"
-if [ "$FRESH_INSTALL" -eq 1 ]; then
+if [ "$FRESH_INSTALL" -eq 1 ] && [ -n "$ADMIN_PASSWORD" ]; then
     echo "  Login:        $FDM_ADMIN_EMAIL"
     echo "  Password:     $ADMIN_PASSWORD"
     echo "                (shown once — change it after first login)"
+elif [ "$FRESH_INSTALL" -eq 1 ]; then
+    echo "  Setup wizard: http://${HOST_IP:-127.0.0.1}:$FDM_PORT/setup"
+    echo "                Open this URL in your browser to complete setup."
+    echo "  Headless:     FDM_ADMIN_EMAIL=... FDM_ADMIN_PASSWORD=... ./install.sh"
+    echo "                (non-interactive / CI installs)"
 else
     echo "  Login:        unchanged (existing install upgraded)"
 fi
