@@ -51,6 +51,12 @@ CONFIG_PATHS: tuple[str, ...] = (
 STAGING_DIRNAME = ".fdm-restic-stage"
 DPKG_MANIFEST_NAME = "dpkg-selections.txt"
 
+# Default fraction of pack data `restic check` re-reads and verifies (session 4.2).
+# `--read-data-subset` keeps the integrity check affordable on a large repo while
+# still exercising real data (not just structure/metadata). A callable override
+# can pass a different subset; this is the value the schedule + API launch use.
+DEFAULT_CHECK_SUBSET = "5%"
+
 
 class ResticError(RuntimeError):
     """A restic repo is misconfigured (no target / no password / bad bucket).
@@ -190,6 +196,118 @@ def parse_snapshot_id(output: str) -> str | None:
             if len(parts) >= 3:
                 return parts[1]
     return None
+
+
+def build_forget_keep_args(repo: ResticRepo) -> list[str]:
+    """Turn a repo's retention policy into restic ``--keep-*`` argv elements.
+
+    Each configured dimension maps to its restic flag as two argv elements (flag
+    + count) so nothing is interpolated into a shell string. Raises ResticError
+    when NO dimension is set: `restic forget --prune` with no keep flags would
+    delete *every* snapshot, so an empty policy must never reach restic (this is
+    the destructive-safety floor for the retention sweep). Counts must be >= 1.
+    """
+    mapping = (
+        ("--keep-last", repo.retention_keep_last),
+        ("--keep-daily", repo.retention_keep_daily),
+        ("--keep-weekly", repo.retention_keep_weekly),
+        ("--keep-monthly", repo.retention_keep_monthly),
+    )
+    args: list[str] = []
+    for flag, value in mapping:
+        if value is None:
+            continue
+        if int(value) < 1:
+            raise ResticError(f"retention {flag} must be >= 1 (got {value})")
+        args += [flag, str(int(value))]
+    if not args:
+        raise ResticError(
+            "no retention policy configured — refusing to prune (an empty policy "
+            "would delete every snapshot)"
+        )
+    return args
+
+
+def is_restic_lock_error(output: str) -> bool:
+    """True when a restic run failed because the repository was already locked by
+    another operation (e.g. a concurrent snapshot or prune) rather than because of
+    a genuine problem. The per-server job lock only serialises jobs of the *same*
+    action (the lock key includes the action name), so a `restic check` can still
+    overlap a `restic backup`/`forget` on the same repo; restic's own exclusive
+    repository lock then rejects the loser. That is an operational retry condition,
+    NOT an integrity failure — the check action uses this to avoid recording a
+    false `last_check_ok=False` and raising a spurious breach alert."""
+    low = output.lower()
+    markers = (
+        "unable to create lock",
+        "repository is already locked",
+        "already locked exclusively",
+    )
+    return any(marker in low for marker in markers)
+
+
+def is_restic_transient_error(output: str) -> bool:
+    """True when a restic run failed because the repository was unreachable —
+    S3/network connectivity, DNS, throttling, timeouts — rather than because the
+    check found actual corruption. `restic check` cannot verify integrity if it
+    never reaches the repo, so classifying such a failure as `last_check_ok=False`
+    and firing the `restic.check_failed` breach alert ("the disaster-recovery
+    backup may not be restorable") is a false DR-panic. Like the lock case, this is
+    an operational condition, NOT an integrity breach: the check action uses it to
+    fail the job WITHOUT recording ok=False or alerting. Kept deliberately narrow —
+    only unambiguous connectivity markers, so genuine integrity errors ("pack ...
+    is damaged", "id ... not found", "tree ... invalid") still alert."""
+    low = output.lower()
+    markers = (
+        "unable to open repository",
+        "unable to open config file",
+        "connection refused",
+        "connection reset",
+        "network is unreachable",
+        "no route to host",
+        "no such host",
+        "i/o timeout",
+        "timeout awaiting",
+        "context deadline exceeded",
+        "dial tcp",
+        "temporary failure in name resolution",
+        "server misbehaving",
+        "requesterror",
+        "requesttimeout",
+        "slowdown",
+        "service unavailable",
+        "503",
+    )
+    return any(marker in low for marker in markers)
+
+
+def summarize_check(exit_code: int, output: str) -> tuple[bool, str]:
+    """Interpret a `restic check` run into (ok, one-line summary).
+
+    restic exits 0 and prints "no errors were found" when the repository is
+    intact; any other exit code means the check found problems. The summary is a
+    single restic verdict line (or a generic fallback) — it is a status line
+    only and carries no repo URI, password, or S3 key (golden rule 6).
+    """
+    ok = exit_code == 0
+    verdict = ""
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        low = line.lower()
+        if ok and "no errors were found" in low:
+            verdict = line
+            break
+        if not ok and ("error" in low or "fatal" in low or "damaged" in low):
+            verdict = line  # keep the last error line as the summary
+    if not verdict:
+        verdict = (
+            "restic check reported no errors"
+            if ok
+            else f"restic check failed (exit {exit_code})"
+        )
+    return ok, verdict[:500]
 
 
 def redacted_repository(uri: str) -> str:

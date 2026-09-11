@@ -7,6 +7,8 @@
 - POST /api/servers/{id}/restic-repo/init         `restic init` -> job
 - POST /api/servers/{id}/restic-repo/backup       config-tier snapshot -> job
 - POST /api/servers/{id}/restic-repo/snapshots    evidence listing -> job
+- POST /api/servers/{id}/restic-repo/forget       retention prune -> job (4.2)
+- POST /api/servers/{id}/restic-repo/check        integrity check -> job (4.2)
 
 Reading is READ-visible so the §6 backup-evidence view can render the config
 kind/storage chip for everyone. Every mutation (configure + the three job
@@ -51,6 +53,8 @@ INSTALL_ACTION = "restic.install"
 INIT_ACTION = "restic.init"
 BACKUP_ACTION = "restic.backup"
 SNAPSHOTS_ACTION = "restic.snapshots"
+FORGET_ACTION = "restic.forget"
+CHECK_ACTION = "restic.check"
 
 
 def _require_action_permission(user, action_name: str) -> None:
@@ -168,6 +172,13 @@ def configure_repo(
     if body.password:
         repo.password_enc = secrets.encrypt(body.password)
         password_action = "set"
+    # Retention policy is a full replace from the body (PUT semantics): the client
+    # sends the desired keep-* set; None on a dimension clears it. All-None leaves
+    # the repo with no policy and the forget action will refuse to prune.
+    repo.retention_keep_last = body.retention_keep_last
+    repo.retention_keep_daily = body.retention_keep_daily
+    repo.retention_keep_weekly = body.retention_keep_weekly
+    repo.retention_keep_monthly = body.retention_keep_monthly
     db.commit()
     db.refresh(repo)
 
@@ -186,6 +197,7 @@ def configure_repo(
             # defensive key-name masking (any key containing "password"/"key"/
             # "secret") never blanks it — the value carries no credential.
             "credential_state": password_action,
+            "retention": repo.retention_summary or "none",
         },
     )
     return _out(db, repo)
@@ -328,5 +340,64 @@ def list_snapshots(server_id: int, db: DbSession, runner: Runner, user: CurrentU
         server_id=server_id,
         action_name=SNAPSHOTS_ACTION,
         params={"repo": repo_uri},
+        conflict_msg="A restic job is already running on this server.",
+    )
+
+
+@router.post(
+    "/servers/{server_id}/restic-repo/forget",
+    status_code=201,
+    response_model=JobDetail,
+)
+def forget_config(server_id: int, db: DbSession, runner: Runner, user: CurrentUser):
+    """Apply the repo's retention policy and prune (`restic forget --prune`) →
+    returns the enqueued job. DESTRUCTIVE (deletes snapshots): the action never
+    auto-retries and refuses to run when no retention policy is set. 422 here if
+    the repo is not initialised or has no policy configured."""
+    _server_or_404(db, server_id)
+    repo = _repo_or_404(db, server_id)
+    repo_uri = _repo_uri_or_422(db, repo)
+    if not repo.initialized:
+        raise HTTPException(
+            status_code=422,
+            detail="This restic repo is not initialised — nothing to prune.",
+        )
+    if not repo.retention_configured:
+        raise HTTPException(
+            status_code=422,
+            detail="No retention policy is configured — set at least one "
+            "keep-last/daily/weekly/monthly value before pruning.",
+        )
+    return _launch(
+        db, runner, user,
+        server_id=server_id,
+        action_name=FORGET_ACTION,
+        params={"repo": repo_uri},
+        conflict_msg="A restic job is already running on this server.",
+    )
+
+
+@router.post(
+    "/servers/{server_id}/restic-repo/check",
+    status_code=201,
+    response_model=JobDetail,
+)
+def check_repo(server_id: int, db: DbSession, runner: Runner, user: CurrentUser):
+    """Verify repository integrity (`restic check --read-data-subset`) → returns
+    the enqueued job. The action records the result on the repo and raises a
+    breach alert on a genuine failure. 422 if the repo is not initialised."""
+    _server_or_404(db, server_id)
+    repo = _repo_or_404(db, server_id)
+    repo_uri = _repo_uri_or_422(db, repo)
+    if not repo.initialized:
+        raise HTTPException(
+            status_code=422,
+            detail="This restic repo is not initialised — nothing to check.",
+        )
+    return _launch(
+        db, runner, user,
+        server_id=server_id,
+        action_name=CHECK_ACTION,
+        params={"repo": repo_uri, "subset": rst.DEFAULT_CHECK_SUBSET},
         conflict_msg="A restic job is already running on this server.",
     )

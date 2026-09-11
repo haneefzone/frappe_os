@@ -213,6 +213,30 @@ def dispatch_config_drift(
     )
 
 
+def dispatch_restic_check_failed(
+    db: Session, *, server_id: int, server_name: str, summary: str
+) -> None:
+    """Emit restic.check_failed when a `restic check` integrity verification fails
+    (session 4.2 — Full-system DR).
+
+    Reuses the same per-user channel groundwork every other event uses (in-app +
+    email + signed webhook per preference) — it does NOT fork a new alert path.
+    `summary` is restic's own credential-free verdict line (the check action
+    passes only that, never a repo URI/password/S3 key — golden rule 6)."""
+    dispatch_event(
+        db,
+        event_type="restic.check_failed",
+        title=f"Backup integrity check failed on {server_name}",
+        body=(
+            f"`restic check` on {server_name}'s config-tier repository reported a "
+            f"problem: {summary}. The disaster-recovery backup may not be "
+            f"restorable — investigate before relying on it."
+        ),
+        entity_type="server",
+        entity_id=server_id,
+    )
+
+
 def dispatch_uptime_event(
     db: Session, *, site_id: int, site_name: str, up: bool, was_up: bool | None
 ) -> None:

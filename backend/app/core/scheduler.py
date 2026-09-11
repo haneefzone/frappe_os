@@ -156,6 +156,71 @@ def _build_report_fire(schedule: Schedule) -> tuple[None, str, dict, None]:
     return None, str(report_id), params, None
 
 
+def _build_restic_fire(
+    db: Session, schedule: Schedule
+) -> tuple[int, str, dict, None]:
+    """Params for a server-targeted restic DR fire (session 4.2).
+
+    Loads the target server's single ResticRepo + its 2.2 StorageTarget and builds
+    the restic repository URI (never decrypting any secret here — the repo password
+    and S3 keys are resolved inside the worker only). Raises ScheduleError if the
+    repo is not ready (missing / no target / no password / not initialised, or —
+    for `restic.forget` — no retention policy configured) so a misconfigured
+    schedule fails its fire cleanly and pauses, rather than enqueuing a job doomed
+    to fail. `restic.backup` additionally carries the `--host` label;
+    `restic.check` carries the read-data subset. The retention policy for
+    `restic.forget` lives on the repo row (the action reads it), so no keep params
+    are threaded through here."""
+    from app.core import restic as rst
+    from app.models.restic import ResticRepo
+    from app.models.server import Server
+    from app.models.storage import StorageTarget
+
+    if schedule.target_type != "server":
+        raise ScheduleError(
+            f"{schedule.action_name} requires target_type 'server'"
+        )
+    server = db.get(Server, schedule.target_id)
+    if server is None:
+        raise ScheduleError(f"server {schedule.target_id} no longer exists")
+    repo = db.scalars(
+        select(ResticRepo).where(ResticRepo.server_id == server.id)
+    ).first()
+    if repo is None:
+        raise ScheduleError(f"server {server.id} has no restic repo configured")
+    if not repo.password_enc:
+        raise ScheduleError("restic repo has no password configured")
+    if not repo.initialized:
+        raise ScheduleError("restic repo is not initialised")
+    # A `restic.forget` fire with no keep policy would enqueue a job that fails at
+    # runtime (build_forget_keep_args -> ResticError) while the succeeded fire still
+    # advances next_run_at — leaving the schedule "active" but silently never
+    # pruning. Pause the schedule here instead, mirroring the API launch guard
+    # (422 in forget_config). See ScheduleError contract above.
+    if schedule.action_name == "restic.forget" and not repo.retention_configured:
+        raise ScheduleError("restic repo has no retention policy configured")
+    target = (
+        db.get(StorageTarget, repo.storage_target_id)
+        if repo.storage_target_id
+        else None
+    )
+    if target is None:
+        raise ScheduleError("restic repo has no storage target attached")
+    if not (target.access_key_enc and target.secret_key_enc):
+        raise ScheduleError(f"storage target {target.name!r} has no S3 credentials")
+    try:
+        repo_uri = rst.repository_uri(target, repo.prefix)
+    except rst.ResticError as exc:
+        raise ScheduleError(str(exc)) from exc
+
+    params: dict = {"repo": repo_uri}
+    if schedule.action_name == "restic.backup":
+        params["host"] = server.hostname or server.name
+    elif schedule.action_name == "restic.check":
+        params["subset"] = rst.DEFAULT_CHECK_SUBSET
+    return server.id, str(server.id), params, None
+
+
 def _build_fire(
     db: Session, schedule: Schedule
 ) -> tuple[int | None, str, dict, object | None]:
@@ -178,6 +243,12 @@ def _build_fire(
         if server is None:
             raise ScheduleError(f"server {schedule.target_id} no longer exists")
         return server.id, None, {}, None
+
+    # restic full-system DR actions (session 4.2) are server-targeted: resolve the
+    # server's one restic repo → the repo URI (+ host for a backup) so runner.create
+    # validates the same params a hand-launched restic job carries.
+    if schedule.action_name in ("restic.backup", "restic.forget", "restic.check"):
+        return _build_restic_fire(db, schedule)
 
     if schedule.action_name == "report.generate":
         return _build_report_fire(schedule)
