@@ -295,6 +295,8 @@ class SSHService:
             command = f"sudo -n -u {shlex.quote(run_as)} -- {command}"
         if cwd is not None:
             command = f"cd {shlex.quote(cwd)} && {command}"
+        # Non-interactive SSH sessions omit ~/.local/bin; bench is always installed there
+        command = "export PATH=$HOME/.local/bin:$PATH && " + command
         return command
 
     async def stream(
