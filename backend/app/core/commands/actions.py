@@ -2283,11 +2283,22 @@ async def _drop_scratch_site(
         if code != 0:
             # A non-zero drop is a warning, not a job-failer: we surface it so an
             # operator can reap a stuck scratch, but we never mask the real
-            # restore-test verdict behind a cleanup hiccup.
+            # restore-test verdict behind a cleanup hiccup. It ALSO fires a
+            # notification (A.8.10, DOO-1071) — the scratch may still hold a copy
+            # of the source data, so a job-log WARNING alone is not enough.
             await ctx.emit(
                 f"WARNING: dropping scratch site {site} exited {code}; it may need "
                 "manual cleanup (bench drop-site)."
             )
+            try:
+                from app.core import notifications
+
+                notifications.dispatch_restore_test_orphan(
+                    ctx.session, scratch_site=site, bench_path=bench_path,
+                    job_id=ctx.job_id,
+                )
+            except Exception as exc:  # noqa: BLE001 — alerting must never re-raise in cleanup.
+                await ctx.emit(f"WARNING: orphan-scratch alert dispatch failed: {exc}")
         else:
             await ctx.emit(f"Scratch site {site} destroyed.")
 

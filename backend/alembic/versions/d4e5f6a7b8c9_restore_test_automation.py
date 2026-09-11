@@ -1,7 +1,7 @@
 """restore-test automation (session 3.4)
 
 Revision ID: d4e5f6a7b8c9
-Revises: b4e7c2a9d1f3
+Revises: b7e2d9f4c1a8
 Create Date: 2026-09-11 00:00:00
 
 Scheduled proof-of-restorability. Adds the restore-tested badge fields to
@@ -22,7 +22,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "d4e5f6a7b8c9"
-down_revision = "b4e7c2a9d1f3"
+down_revision = "b7e2d9f4c1a8"
 branch_labels = None
 depends_on = None
 

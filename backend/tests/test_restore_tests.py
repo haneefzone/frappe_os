@@ -412,6 +412,38 @@ def test_restore_test_picks_latest_backup_when_id_omitted(sf):
         assert db.get(Backup, newer_id).restore_test_status == "passed"
 
 
+def test_restore_test_alerts_on_orphaned_scratch(sf, monkeypatch):
+    """A.8.10 (DOO-1071): when the scratch drop exits non-zero, an operator is
+    actively alerted (not just a job-log WARNING) — the scratch may still hold a
+    copy of the source data."""
+    from app.core import notifications
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        notifications,
+        "dispatch_restore_test_orphan",
+        lambda db, **kw: calls.append(kw),
+    )
+    with sf() as db:
+        server_id, bench_id, site_id = _world(db)
+        b = _backup(db, site_id, bench_id)
+        bid = b.id
+    # restore+verify pass, but the scratch drop fails → orphan alert must fire.
+    ex = RTExecutor(fail_on=lambda a: a[:2] == ["bench", "drop-site"])
+    _run(
+        sf, server_id=server_id,
+        params={"site": SOURCE, "bench_path": BENCH_PATH, "backup_id": str(bid)},
+        executor=ex,
+    )
+    assert len(calls) == 1
+    assert calls[0]["scratch_site"].startswith("rt-")
+    assert calls[0]["bench_path"] == BENCH_PATH
+    with sf() as db:
+        # The restore itself passed — the badge reflects the verdict, not the
+        # cleanup hiccup.
+        assert db.get(Backup, bid).restore_test_status == "passed"
+
+
 def test_restore_test_never_targets_source_site(sf):
     with sf() as db:
         server_id, bench_id, site_id = _world(db)

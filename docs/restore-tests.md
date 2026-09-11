@@ -47,7 +47,11 @@ Ordered steps:
 6. **`finally`: destroy the scratch site** — `bench drop-site <scratch> --force
    --no-backup` drops its DB + removes its site dir. `--force` never prompts and
    tolerates a half-created site, so cleanup is idempotent and *always* runs — a
-   cleanup hiccup is a warning, never masks the real verdict.
+   cleanup hiccup is a warning, never masks the real verdict. If the drop exits
+   non-zero the scratch may still hold a copy of the source data, so a
+   `backup.restore_test_orphan` **notification** is dispatched (in-app / email /
+   webhook) telling an operator to reap it — a job-log WARNING alone is not
+   enough (A.8.10, DOO-1071).
 
 A restore/verify failure records the *failed* badge, then the job fails loudly
 (so the operator sees a failed job) — and because the template is

@@ -193,6 +193,27 @@ def dispatch_job_event(db: Session, *, job_id: int, action_name: str, status: st
     )
 
 
+def dispatch_restore_test_orphan(
+    db: Session, *, scratch_site: str, bench_path: str, job_id: int | None = None
+) -> None:
+    """Emit backup.restore_test_orphan when a restore-test scratch site failed to
+    drop (session 3.4, A.8.10). The scratch may still hold a copy of production
+    data, so an operator must be actively told to reap it — a job-log WARNING
+    alone is not enough. Names only the scratch site + bench path (no secrets)."""
+    dispatch_event(
+        db,
+        event_type="backup.restore_test_orphan",
+        title=f"Restore-test scratch site may be orphaned: {scratch_site}",
+        body=(
+            f"bench drop-site failed for restore-test scratch site {scratch_site} "
+            f"on {bench_path}. It may still hold a copy of the source data — verify "
+            f"and reap it with `bench drop-site {scratch_site} --force --no-backup`."
+        ),
+        entity_type="job",
+        entity_id=job_id,
+    )
+
+
 def dispatch_config_drift(
     db: Session, *, server_id: int, server_name: str, artifact_keys: list[str]
 ) -> None:
