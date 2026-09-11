@@ -1,0 +1,56 @@
+# Regression guard for the install.sh re-runnability trap (DOO-1155 AC4/AC5).
+#
+# install.sh used to derive FRESH_INSTALL from backend/.env existence and gate
+# `createdb` on it, so a first install that wrote .env then failed at/after
+# `alembic upgrade head` could never recover: `dropdb fdm && ./install.sh`
+# skipped provisioning and died at migrate forever. Provisioning now lives in
+# install-lib.sh::provision_db and keys off ACTUAL DB state. This job replays
+# the failed-first-install → dropdb → reinstall sequence against a real
+# Postgres on every change to the installer scripts or their test.
+name: install-reentry
+
+on:
+  push:
+    paths:
+      - "install.sh"
+      - "install-lib.sh"
+      - "tests/install/**"
+      - ".github/workflows/install-reentry.yml"
+  pull_request:
+    paths:
+      - "install.sh"
+      - "install-lib.sh"
+      - "tests/install/**"
+      - ".github/workflows/install-reentry.yml"
+
+jobs:
+  reentry:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: fdm
+          POSTGRES_PASSWORD: fdm
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fdm"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: syntax-check installer scripts
+        run: |
+          bash -n install.sh
+          bash -n install-lib.sh
+          bash -n tests/install/test_reentry.sh
+      - name: install-reentry self-heal test
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          TEST_PG_ADMIN_USER: fdm
+          TEST_PG_ADMIN_PASSWORD: fdm
+        run: bash tests/install/test_reentry.sh

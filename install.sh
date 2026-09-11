@@ -14,8 +14,10 @@
 # first-login credentials.
 #
 # Idempotent: re-running upgrades code and dependencies, re-runs migrations,
-# and restarts services. It never regenerates secrets, never re-creates the
-# database, and never resets the admin password on an existing install.
+# and restarts services. It never regenerates secrets and never resets the
+# admin password on an existing install. It (re-)creates the managed local
+# database only when it is actually missing, so recovering a failed first
+# install with `dropdb fdm && ./install.sh` works (DOO-1155).
 #
 # Tunables (env vars, all optional):
 #   FDM_HOME           install dir      (root: /opt/fdm-platform, else ~/.local/share/fdm-platform)
@@ -214,6 +216,12 @@ else
 fi
 if [ "$IS_ROOT" -eq 1 ]; then chown -R "$RUN_USER:$RUN_USER" "$FDM_HOME"; fi
 
+# Load reusable installer helpers now that the code tree is in place. Shipped in
+# the repo so it is present after the fetch above regardless of curl-pipe vs
+# local-checkout install (DOO-1155). shellcheck source=install-lib.sh
+[ -f "$FDM_HOME/install-lib.sh" ] || die "install-lib.sh missing from $FDM_HOME — incomplete checkout/clone."
+. "$FDM_HOME/install-lib.sh"
+
 # -------------------------------------------------------- backend install
 log "Installing backend (uv sync, Python 3.12+ auto-managed)…"
 as_fdm "$BACKEND_DIR" "$UV_BIN" sync --frozen >/dev/null
@@ -261,16 +269,30 @@ REDIS_URL_EFFECTIVE="$( (grep -E '^REDIS_URL=' "$ENV_FILE" || true) | head -1 | 
 REDIS_URL_EFFECTIVE="${REDIS_URL_EFFECTIVE:-$FDM_REDIS_URL}"
 
 # ------------------------------------------------------- database provision
-if [ "$FRESH_INSTALL" -eq 1 ] && [ -z "${FDM_DATABASE_URL:-}" ]; then
-    log "Provisioning PostgreSQL role + database 'fdm'…"
-    pg() { runuser -u postgres -- psql -tAc "$1"; }
-    if [ "$(pg "SELECT 1 FROM pg_roles WHERE rolname='fdm'")" = "1" ]; then
-        pg "ALTER ROLE fdm LOGIN PASSWORD '${DB_PASS}'" >/dev/null
+# DOO-1155: provisioning is driven off ACTUAL database state, never off .env
+# existence. A first install that wrote .env and then died at/after migrate can
+# now recover with `dropdb fdm && ./install.sh` — the DB is simply re-created
+# when missing. We only ever touch a loopback, installer-managed PostgreSQL as
+# root; a user who points FDM_DATABASE_URL at their own (or a remote) database
+# owns it entirely and we never provision it.
+DB_URL_EFFECTIVE="$(env_value DATABASE_URL "$ENV_FILE")"
+DB_NAME="$(pg_url_field "$DB_URL_EFFECTIVE" dbname)"
+DB_USER="$(pg_url_field "$DB_URL_EFFECTIVE" user)"
+DB_HOST="$(pg_url_field "$DB_URL_EFFECTIVE" host)"
+DB_PASS_EFFECTIVE="$(pg_url_field "$DB_URL_EFFECTIVE" password)"
+if [ "$IS_ROOT" -eq 1 ] && [ -z "${FDM_DATABASE_URL:-}" ] \
+        && is_local_host "$DB_HOST" && [ -n "$DB_NAME" ] && [ -n "$DB_USER" ]; then
+    log "Ensuring PostgreSQL role '$DB_USER' + database '$DB_NAME' exist…"
+    if [ "$(provision_db "runuser -u postgres -- psql" \
+            "$DB_NAME" "$DB_USER" "$DB_PASS_EFFECTIVE")" = created ]; then
+        log "Created database '$DB_NAME'."
     else
-        pg "CREATE ROLE fdm LOGIN PASSWORD '${DB_PASS}'" >/dev/null
+        log "Database '$DB_NAME' already exists — reusing it."
     fi
-    [ "$(pg "SELECT 1 FROM pg_database WHERE datname='fdm'")" = "1" ] \
-        || runuser -u postgres -- createdb -O fdm fdm
+elif [ -n "${FDM_DATABASE_URL:-}" ]; then
+    log "Using externally-provided FDM_DATABASE_URL — skipping provisioning."
+elif [ "$IS_ROOT" -ne 1 ]; then
+    log "Non-root run — assuming the database already exists (cannot provision)."
 fi
 
 # ---------------------------------------------------------------- migrate
