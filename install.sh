@@ -39,7 +39,7 @@ set -euo pipefail
 log()  { echo -e "\033[1;36m[fdm-install]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[fdm-install] WARN:\033[0m $*" >&2; }
 die()  { echo -e "\033[1;31m[fdm-install] ERROR:\033[0m $*" >&2; exit 1; }
-trap 'echo -e "\033[1;31m[fdm-install] FAILED\033[0m (line $LINENO). Re-running after fixing the cause is safe." >&2' ERR
+trap 'rc=$?; echo -e "\033[1;31m[fdm-install] FAILED\033[0m (line $LINENO, exit $rc). Fix the cause shown above, then re-run this installer: a partial first install is resumed from real database state — a missing managed database is re-created, existing secrets and already-migrated data are preserved, and no manual database surgery is required." >&2' ERR
 
 IS_ROOT=0; [ "$(id -u)" -eq 0 ] && IS_ROOT=1
 HAVE_SYSTEMD=0; [ "$IS_ROOT" -eq 1 ] && [ -d /run/systemd/system ] && HAVE_SYSTEMD=1
@@ -194,6 +194,7 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
 fi
 
 RSYNC_EXCLUDES=(--exclude .git --exclude backend/.venv --exclude backend/.env
+    --exclude backend/.install-complete
     --exclude frontend/node_modules --exclude frontend/dist
     --exclude '/run' --exclude '/logs'
     --exclude '__pycache__' --exclude '.pytest_cache' --exclude '.ruff_cache')
@@ -303,13 +304,23 @@ as_fdm "$BACKEND_DIR" "$BACKEND_DIR/.venv/bin/alembic" upgrade head >/dev/null
 # Session 6.4: fresh installs are set up via the browser wizard at /setup.
 # The CLI seed is kept for headless / automated installs; pass FDM_ADMIN_EMAIL
 # and FDM_ADMIN_PASSWORD to activate it (e.g. CI, Docker, provisioning scripts).
+#
+# DOO-1155: whether setup still needs doing is decided by a completion marker
+# written only after a run fully succeeds — NOT by FRESH_INSTALL (which keys on
+# .env and so wrongly reads a partial first install, whose migrate died after
+# .env was written, as a completed upgrade — hiding the /setup URL the operator
+# still needs). A run that dies before the marker is written is correctly
+# treated as setup-pending on the next re-run. The CLI seed is idempotent (it
+# never resets an existing admin), so re-seeding a resumed install is safe.
+MARKER_FILE="$BACKEND_DIR/.install-complete"
+SETUP_PENDING=1; [ -f "$MARKER_FILE" ] && SETUP_PENDING=0
 ADMIN_PASSWORD="${FDM_ADMIN_PASSWORD:-}"
-if [ "$FRESH_INSTALL" -eq 1 ] && [ -n "$ADMIN_PASSWORD" ]; then
+if [ "$SETUP_PENDING" -eq 1 ] && [ -n "$ADMIN_PASSWORD" ]; then
     log "Headless seed: creating admin user $FDM_ADMIN_EMAIL via CLI…"
     as_fdm "$BACKEND_DIR" "$BACKEND_DIR/.venv/bin/python" -m app.seed \
         --admin-email "$FDM_ADMIN_EMAIL" --admin-password "$ADMIN_PASSWORD" >/dev/null
-elif [ "$FRESH_INSTALL" -eq 1 ]; then
-    log "Fresh install: admin account will be created via the browser wizard (/setup)."
+elif [ "$SETUP_PENDING" -eq 1 ]; then
+    log "Setup pending: admin account will be created via the browser wizard (/setup)."
 fi
 
 # ------------------------------------------------------------ frontend build
@@ -409,6 +420,12 @@ echo "$HEALTH" | grep -q '"status":"ok"' \
 curl -fsS "http://127.0.0.1:$FDM_PORT/" | grep -qi '<div id="app">' \
     || die "Login page not served at http://127.0.0.1:$FDM_PORT/"
 
+# The install is fully up. Drop the completion marker so a later re-run is
+# unambiguously an upgrade and a run that dies earlier is resumed as setup-
+# pending (DOO-1155). Excluded from rsync so it survives a code sync.
+: > "$MARKER_FILE"
+if [ "$IS_ROOT" -eq 1 ]; then chown "$RUN_USER:$RUN_USER" "$MARKER_FILE"; fi
+
 # ------------------------------------------------------------------ summary
 HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo
@@ -417,11 +434,11 @@ echo "  FDM Platform is running."
 echo
 echo "  URL:          http://${HOST_IP:-127.0.0.1}:$FDM_PORT"
 echo "  Health:       $HEALTH"
-if [ "$FRESH_INSTALL" -eq 1 ] && [ -n "$ADMIN_PASSWORD" ]; then
+if [ "$SETUP_PENDING" -eq 1 ] && [ -n "$ADMIN_PASSWORD" ]; then
     echo "  Login:        $FDM_ADMIN_EMAIL"
     echo "  Password:     $ADMIN_PASSWORD"
     echo "                (shown once — change it after first login)"
-elif [ "$FRESH_INSTALL" -eq 1 ]; then
+elif [ "$SETUP_PENDING" -eq 1 ]; then
     echo "  Setup wizard: http://${HOST_IP:-127.0.0.1}:$FDM_PORT/setup"
     echo "                Open this URL in your browser to complete setup."
     echo "  Headless:     FDM_ADMIN_EMAIL=... FDM_ADMIN_PASSWORD=... ./install.sh"
