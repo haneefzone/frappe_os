@@ -1,7 +1,8 @@
 """bootstrap_state — first-run setup flag (session 6.4)
 
 Revision ID: a9b2c3d4e5f6
-Revises: b4e7c2a9d1f3, b5e9d3c1a4f7, c9d4e7a2f1b8, e4c7b1a9f2d0, f8b3d1c6a2e9, fbcd01f180ab
+Revises: b4e7c2a9d1f3, b5e9d3c1a4f7, c9d4e7a2f1b8, d1c3b5a7e9f2, d4e5f6a7b8c9,
+         e4c7b1a9f2d0, f8b3d1c6a2e9, fbcd01f180ab
 Create Date: 2026-09-11 07:00:00.000000
 
 Merges all current main-branch heads into a single new head so subsequent
@@ -19,6 +20,7 @@ down_revision: str | Sequence[str] | None = (
     "b5e9d3c1a4f7",
     "c9d4e7a2f1b8",
     "d1c3b5a7e9f2",
+    "d4e5f6a7b8c9",
     "e4c7b1a9f2d0",
     "f8b3d1c6a2e9",
     "fbcd01f180ab",
