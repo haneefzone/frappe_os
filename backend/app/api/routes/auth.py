@@ -525,8 +525,16 @@ def logout(request: Request, response: Response, db: DbSession) -> None:
     """Clears the session cookies and revokes the underlying `UserSession` row
     (best-effort — from whichever cookie still decodes). Deliberately
     unauthenticated so a client with an expired/broken session can always
-    reach a clean state."""
+    reach a clean state.
+
+    A.8.15 (Monitoring, DOO-417): whenever a valid token is present we also
+    write an `auth.logout` audit row (mirroring `auth.logout_all`), attributed
+    to the actor decoded from the token. A broken/absent/expired token still
+    reaches a clean state — there is just no actor to attribute, so no row is
+    written. `record_audit` never raises, so best-effort logging can never turn
+    logout into a 500."""
     settings = get_settings()
+    actor: dict | None = None
     for cookie_name, expected_type in ((ACCESS_COOKIE, "access"), (REFRESH_COOKIE, "refresh")):
         token = request.cookies.get(cookie_name)
         if not token:
@@ -534,6 +542,8 @@ def logout(request: Request, response: Response, db: DbSession) -> None:
         claims = decode_session_token(
             token, expected_type=expected_type, secret=settings.jwt_secret
         )
+        if claims and actor is None:
+            actor = claims
         sid = claims.get("sid") if claims else None
         if sid:
             db.execute(
@@ -543,6 +553,20 @@ def logout(request: Request, response: Response, db: DbSession) -> None:
             )
             db.commit()
             break
+    if actor is not None:
+        user_id = int(actor["sub"])
+        user = db.get(User, user_id)
+        entity_id = actor.get("sid") or (user.email if user else str(user_id))
+        record_audit(
+            db,
+            action="auth.logout",
+            summary=f"Signed out {user.email if user else user_id}",
+            user_id=user_id,
+            entity_type="session",
+            entity_id=entity_id,
+            result="ok",
+            source_ip=_client_ip(request),
+        )
     _clear_session_cookies(response)
 
 

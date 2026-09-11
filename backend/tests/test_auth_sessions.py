@@ -63,6 +63,34 @@ def test_logout_revokes_the_session_row(client, db_session):
     assert row.revoked_at is not None
 
 
+def _logout_rows(db_session):
+    return db_session.scalars(
+        select(AuditLog).where(AuditLog.action == "auth.logout")
+    ).all()
+
+
+def test_logout_writes_audit_row(client, db_session):
+    """A.8.15 (DOO-417): a single-session logout with a valid token is audited,
+    attributed to the actor and keyed on the session jti."""
+    login(client, "admin@example.com")
+    session = db_session.get(UserSession, client.get("/api/auth/sessions").json()[0]["id"])
+    assert _logout_rows(db_session) == []
+    assert client.post("/api/auth/logout").status_code == 204
+    rows = _logout_rows(db_session)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.result == "ok"
+    assert row.entity_type == "session"
+    assert row.entity_id == session.jti
+    assert row.user_id == session.user_id
+
+
+def test_logout_without_token_writes_no_audit_row(client, db_session):
+    """No decodable token → clean logout but no actor to attribute → no row."""
+    assert client.post("/api/auth/logout").status_code == 204
+    assert _logout_rows(db_session) == []
+
+
 def test_logout_all_revokes_every_session(client, proxy_client_factory):
     login(client, "admin@example.com")
     other_device = proxy_client_factory("testclient")
