@@ -10,6 +10,7 @@ Idempotent: uses `if_not_exists=True` on create and `IF EXISTS` on drop.
 from __future__ import annotations
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "e1a2b3c4d5e6"

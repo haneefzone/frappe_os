@@ -322,29 +322,12 @@ def test_dispatch_restic_backup_weekly_creates_job_with_repo_and_host(sf):
         assert sched.next_run_at == datetime(2026, 7, 12, 2, 0, tzinfo=UTC)
 
 
-def test_dispatch_restic_forget_and_check_carry_repo_param_only(sf):
-    with sf() as db:
-        server_id, _repo_id = _setup_restic_server(db)
-        forget = Schedule(
-            name="weekly retention", target_type="server", target_id=server_id,
-            action_name="restic.forget", cron="0 3 * * 0", timezone="UTC",
-            enabled=True, next_run_at=NOW - timedelta(seconds=1),
-        )
-        check = Schedule(
-            name="weekly integrity check", target_type="server", target_id=server_id,
-            action_name="restic.check", cron="0 4 * * 0", timezone="UTC",
-            enabled=True, next_run_at=NOW - timedelta(seconds=1),
-        )
-        db.add_all([forget, check])
-        db.commit()
-        forget_id, check_id = forget.id, check.id
-    runner = _runner(sf)
-    with sf() as db:
-        forget_job = dispatch_schedule(db, runner, db.get(Schedule, forget_id), now=NOW)
-        check_job = dispatch_schedule(db, runner, db.get(Schedule, check_id), now=NOW)
-        assert set(forget_job.params_sanitized) == {"repo"}
-        assert set(check_job.params_sanitized) == {"repo"}
-        assert forget_job.server_id == server_id == check_job.server_id
+# NOTE: restic forget/check schedule-dispatch param coverage lives canonically in
+# tests/test_restic_retention.py (test_build_restic_fire_check_carries_subset,
+# test_build_restic_fire_forget_has_no_keep_params,
+# test_build_restic_fire_forget_without_policy_pauses). The local variant that
+# once lived here asserted the pre-reconcile behaviour (check carries repo only)
+# and was removed in the DOO-1119 reconcile onto origin's canonical FDM 4.2 restic.
 
 
 def test_dispatch_restic_action_requires_server_target_type(sf):

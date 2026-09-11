@@ -19,8 +19,8 @@ from app.api.routes.backups import router as backups_router
 from app.api.routes.benches import router as benches_router
 from app.api.routes.bootstrap import router as bootstrap_router
 from app.api.routes.compliance import router as compliance_router
-from app.api.routes.copilot import router as copilot_router
 from app.api.routes.compliance_reports import router as compliance_reports_router
+from app.api.routes.copilot import router as copilot_router
 from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.domains import router as domains_router
 from app.api.routes.dr_runbook import router as dr_runbook_router

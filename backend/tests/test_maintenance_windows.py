@@ -8,7 +8,7 @@ Tests:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -21,7 +21,6 @@ from app.db import Base
 from app.models import Server
 from app.models.maintenance_window import DANGER_CLASSES, MaintenanceWindow
 
-
 # --------------------------------------------------------------------------- #
 # is_active_at: unit tests (no DB needed)
 # --------------------------------------------------------------------------- #
@@ -30,7 +29,14 @@ from app.models.maintenance_window import DANGER_CLASSES, MaintenanceWindow
 class _WindowStub:
     """Plain-Python stub for is_active_at unit tests — no SQLAlchemy session needed."""
 
-    def __init__(self, *, cron: str, duration_minutes: int = 60, timezone: str = "UTC", enabled: bool = True):
+    def __init__(
+        self,
+        *,
+        cron: str,
+        duration_minutes: int = 60,
+        timezone: str = "UTC",
+        enabled: bool = True,
+    ):
         self.cron = cron
         self.duration_minutes = duration_minutes
         self.timezone = timezone
@@ -40,7 +46,7 @@ class _WindowStub:
         return MaintenanceWindow.is_active_at(self, at)  # type: ignore[arg-type]
 
 
-def _make_window(*, cron: str, duration_minutes: int = 60, timezone: str = "UTC") -> "_WindowStub":
+def _make_window(*, cron: str, duration_minutes: int = 60, timezone: str = "UTC") -> _WindowStub:
     return _WindowStub(cron=cron, duration_minutes=duration_minutes, timezone=timezone)
 
 
@@ -137,7 +143,9 @@ def _seed_server(db) -> Server:
     return srv
 
 
-def _seed_window(db, server_id: int, *, active: bool, danger_class: str = "update") -> MaintenanceWindow:
+def _seed_window(
+    db, server_id: int, *, active: bool, danger_class: str = "update"
+) -> MaintenanceWindow:
     # Use a cron that is always or never active based on the `active` flag.
     if active:
         # "every minute" — will always have a recent trigger
