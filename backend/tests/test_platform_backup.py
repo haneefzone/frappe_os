@@ -262,7 +262,7 @@ def test_self_backup_job_success_and_no_secret_leak(sf, platform_env):
         db.commit()
         backup_id = row.id
         job = runner.create(
-            db, action_name="platform.self_backup", server_id=0,
+            db, action_name="platform.self_backup", server_id=None,
             target_type="platform", target_id="platform",
             params={
                 "backup_id": str(backup_id),
@@ -297,7 +297,7 @@ def test_verify_job_marks_verified(sf, platform_env):
         db.commit()
         backup_id = row.id
         job = runner.create(
-            db, action_name="platform.self_backup", server_id=0,
+            db, action_name="platform.self_backup", server_id=None,
             target_type="platform", target_id="platform",
             params={
                 "backup_id": str(backup_id),
@@ -310,7 +310,7 @@ def test_verify_job_marks_verified(sf, platform_env):
 
     with sf() as db:
         vjob = runner.create(
-            db, action_name="platform.self_backup_verify", server_id=0,
+            db, action_name="platform.self_backup_verify", server_id=None,
             target_type="platform", target_id="platform",
             params={"backup_id": str(backup_id)}, priority="high", created_by=None,
         )
@@ -335,7 +335,7 @@ def test_self_backup_fails_without_passphrase(sf, platform_env, monkeypatch):
         db.commit()
         backup_id = row.id
         job = runner.create(
-            db, action_name="platform.self_backup", server_id=0,
+            db, action_name="platform.self_backup", server_id=None,
             target_type="platform", target_id="platform",
             params={
                 "backup_id": str(backup_id),

@@ -48,7 +48,7 @@ class StepOut(BaseModel):
 
 class JobOut(BaseModel):
     id: int
-    server_id: int
+    server_id: int | None
     target_type: str
     target_id: str | None
     action_name: str

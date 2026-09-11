@@ -54,8 +54,9 @@ AdminUser = Annotated[User, Depends(require_admin)]
 SELF_BACKUP_ACTION = "platform.self_backup"
 VERIFY_ACTION = "platform.self_backup_verify"
 # A `local` action needs no managed Server; the JobRunner gives it a
-# LocalRemoteExecutor. Sentinel server_id + target keep the lock/audit uniform.
-PLATFORM_SERVER_ID = 0
+# LocalRemoteExecutor. NULL server_id satisfies the FK (nullable since 6.2
+# migration a3f1c2b4d5e6); 0 would violate the FK in PostgreSQL.
+PLATFORM_SERVER_ID = None
 PLATFORM_TARGET = "platform"
 
 
