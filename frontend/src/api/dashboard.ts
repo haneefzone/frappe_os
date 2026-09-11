@@ -89,7 +89,6 @@ export interface Dashboard {
   /** 7 entries, oldest → newest. */
   backup_grid: BackupGridDay[]
   running_jobs: DashboardRunningJob[]
-  needs_attention: DashboardNeedsAttention
 }
 
 export const dashboardApi = {
