@@ -11,7 +11,7 @@ Adds two read-only tables backing the update advisor:
 No update is performed by 3.2 (that is the 3.3 safe-update pipeline).
 
 Revision ID: f1a2b3c4d5e6
-Revises: d3f5a1c7e9b2
+Revises: b3c1d5e7f9a2
 Create Date: 2026-07-10 18:30:00.000000
 
 """
