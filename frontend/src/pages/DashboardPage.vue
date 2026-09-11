@@ -161,7 +161,7 @@
               <StatusDot status="err" />
               <span class="font-mono text-label text-ink-1">{{ art.artifact_key }}</span>
               <span class="truncate text-meta text-ink-3" :title="art.path">{{ art.path }}</span>
-              <span v-if="art.drift_detected_at" class="ml-auto text-meta text-ink-3">
+              <span v-if="art.drift_detected_at" class="ml-auto text-meta text-ink-3" :title="absoluteTime(art.drift_detected_at)">
                 {{ relativeTime(art.drift_detected_at) }}
               </span>
               <Button

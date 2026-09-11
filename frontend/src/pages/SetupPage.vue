@@ -137,6 +137,7 @@
               <p
                 v-if="admin.confirmPassword && admin.password !== admin.confirmPassword"
                 class="mt-1 text-meta text-err"
+                role="alert"
               >
                 Passwords do not match
               </p>

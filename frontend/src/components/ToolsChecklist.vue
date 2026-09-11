@@ -2,7 +2,7 @@
   <div>
     <!-- Header row: scan button + last-scanned timestamp -->
     <div class="mb-4 flex items-center justify-between">
-      <p v-if="data?.last_scanned_at" class="text-meta text-ink-3">
+      <p v-if="data?.last_scanned_at" class="text-meta text-ink-3" :title="absoluteTime(data.last_scanned_at)">
         Last scanned {{ relativeTime(data.last_scanned_at) }}
         <span v-if="data.frappe_major" class="ml-1">(Frappe {{ data.frappe_major }})</span>
       </p>
@@ -158,7 +158,7 @@ import LucideRefreshCw from '~icons/lucide/refresh-cw'
 import { ApiError } from '../api/client'
 import { toolsApi, type ServerToolsOut, type ToolOut } from '../api/tools'
 import { useJobsStore } from '../stores/jobs'
-import { relativeTime } from '../lib/servers'
+import { absoluteTime, relativeTime } from '../lib/servers'
 import { useAuthStore } from '../stores/auth'
 import type { Status } from './types'
 import ConfirmModal from './ConfirmModal.vue'

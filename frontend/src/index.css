@@ -37,7 +37,8 @@ html.light {
   --border-strong: #d4d4d8;
   --text-primary: #18181b;
   --text-secondary: #52525b;
-  --text-muted: #8e8e99;
+  /* #6e6e7a gives ≈4.6:1 on --bg-raised (#f4f4f5), meeting WCAG AA for small text. */
+  --text-muted: #6e6e7a;
   /* In light mode the brand accent also defaults to the primary text colour. */
   --brand-accent: var(--text-primary);
 }
