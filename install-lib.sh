@@ -131,6 +131,32 @@ recovery_cmd() {
         "$host" "$port" "$user" "$db" "$branch"
 }
 
+# recovery_bind_elsewhere NEWDB [HOST] [PORT] [USER] [BRANCH] — print the
+# recovery command for a database the installer did NOT provision: an external
+# FDM_DATABASE_URL target, or a server the D1 adoption guard refused. HOST/PORT/
+# USER identify the PostgreSQL the operator controls; NEWDB is a FRESH, empty
+# database name to bind FDM at (defaulting to a placeholder the operator fills).
+#
+# DOO-1176 (MD decision folding into DOO-1175): the installer must NEVER advise
+# dropping a database it did not create. `dropdb` is retired for this whole
+# class of failure. Aimed at a foreign server squatting the port it destroys
+# someone else's data and STILL loops (the next run re-adopts that server);
+# aimed at a cluster it cannot reach it is a silent no-op that reads as success —
+# the exact trap the last five corrections fell into. The honest recovery is to
+# bind FDM at a fresh database the operator provisions on a server they own —
+# `createdb` a clean DB, then point FDM_DATABASE_URL at it, host/port/user named.
+# No dropdb, and (like recovery_cmd) never --if-exists: on the wrong server a
+# miss must not read as success.
+recovery_bind_elsewhere() {
+    local newdb="${1:-<new-empty-db>}"
+    local host="${2:-127.0.0.1}"
+    local port="${3:-5432}"
+    local user="${4:-fdm}"
+    local branch="${5:-${FDM_BRANCH:-main}}"
+    printf "sudo -u postgres createdb -p %s -O %s %s && sudo FDM_DATABASE_URL='postgresql+psycopg://%s:<password>@%s:%s/%s' bash -c 'curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/%s/install.sh | bash'" \
+        "$port" "$user" "$newdb" "$user" "$host" "$port" "$newdb" "$branch"
+}
+
 # checkout_is_behind DIR BRANCH — for an in-tree install run (install.sh invoked
 # from inside its own checkout, which takes the "skipping code sync" branch),
 # report whether DIR's HEAD is behind or diverged from origin/BRANCH. This is

@@ -60,13 +60,20 @@ on_install_error() {
     # dropdb fdm` — that routes through pg_wrapper and can silently miss the
     # server the app is bound to. Before the URL is parsed, print the shape with
     # placeholders instead of a command that might target the wrong server.
+    # DOO-1176 (MD decision on DOO-1175): the recovery we advise must depend on
+    # whether the installer itself provisioned this database. Only a database WE
+    # created may be dropped as a recovery; one the operator supplied via
+    # FDM_DATABASE_URL is theirs — we bind FDM elsewhere, never drop it. dropdb is
+    # retired for the foreign/external class entirely (see recovery_bind_elsewhere).
     local recovery
-    if declare -F recovery_cmd >/dev/null 2>&1 && [ -n "${DB_NAME:-}" ]; then
+    if [ "${DB_MANAGED_BY_INSTALLER:-0}" = 1 ] && declare -F recovery_cmd >/dev/null 2>&1 && [ -n "${DB_NAME:-}" ]; then
         recovery="$(recovery_cmd "$DB_NAME" "${DB_HOST:-127.0.0.1}" "${DB_PORT:-5432}" "${DB_USER:-fdm}")"
+    elif declare -F recovery_bind_elsewhere >/dev/null 2>&1; then
+        recovery="$(recovery_bind_elsewhere "<new-empty-db>" "${DB_HOST:-127.0.0.1}" "${DB_PORT:-5432}" "${DB_USER:-fdm}")"
     else
-        recovery="dropdb -h <host> -p <port> -U <user> <db> && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/${FDM_BRANCH:-main}/install.sh | sudo bash   (host/port/user come from DATABASE_URL in backend/.env)"
+        recovery="provision a fresh empty database FDM will own and point FDM_DATABASE_URL at it, then re-run (host/port/user come from DATABASE_URL in backend/.env)"
     fi
-    echo -e "\033[1;31m[fdm-install] FAILED\033[0m (line $line, exit $rc). Fix the cause shown above, then re-run this installer: a partial first install is resumed from real database state — a MISSING managed database is re-created, and existing secrets and already-migrated data are preserved. One case a plain rerun does NOT fix: a managed database whose schema is AHEAD of its recorded alembic version (a leftover from an earlier aborted attempt), which fails migration with a DuplicateColumn / \"already exists\" error. Recover that by dropping the managed database — addressing it explicitly by host/port/user, NOT via 'sudo -u postgres dropdb' which routes through pg_wrapper and can miss the server FDM uses (DOO-1175) — and reinstalling from the canonical source (the curl form always fetches a fresh installer; an in-tree 'sudo ./install.sh' would re-run a possibly-stale on-disk installer): ${recovery} (back it up with pg_dump first if it holds data you need)." >&2
+    echo -e "\033[1;31m[fdm-install] FAILED\033[0m (line $line, exit $rc). Fix the cause shown above, then re-run this installer: a partial first install is resumed from real database state — a MISSING managed database is re-created, and existing secrets and already-migrated data are preserved. One case a plain rerun does NOT fix: a database whose schema is AHEAD of its recorded alembic version (a leftover from an earlier aborted attempt), which fails migration with a DuplicateColumn / \"already exists\" error. If the installer provisioned the database (a managed loopback server), recover by dropping and reinstalling it — addressed explicitly by host/port/user, NOT via 'sudo -u postgres dropdb' which routes through pg_wrapper and can miss the server FDM uses (DOO-1175). If the database was supplied via FDM_DATABASE_URL, the installer will NOT drop it — bind FDM at a fresh empty database you own instead (DOO-1176). Recovery for this install: ${recovery} (back it up with pg_dump first if it holds data you need)." >&2
 }
 trap 'on_install_error "$LINENO"' ERR
 
@@ -332,6 +339,10 @@ DB_USER="$(pg_url_field "$DB_URL_EFFECTIVE" user)"
 DB_HOST="$(pg_url_field "$DB_URL_EFFECTIVE" host)"
 DB_PORT="$(pg_url_field "$DB_URL_EFFECTIVE" port)"; DB_PORT="${DB_PORT:-5432}"
 DB_PASS_EFFECTIVE="$(pg_url_field "$DB_URL_EFFECTIVE" password)"
+# DOO-1176: track whether THIS installer provisioned the database. Only a DB we
+# created may later be advised for drop-and-reinstall recovery; an external
+# FDM_DATABASE_URL target is the operator's and is never dropped by our advice.
+DB_MANAGED_BY_INSTALLER=0
 if [ "$IS_ROOT" -eq 1 ] && [ -z "${FDM_DATABASE_URL:-}" ] \
         && is_local_host "$DB_HOST" && [ -n "$DB_NAME" ] && [ -n "$DB_USER" ]; then
     # DOO-1175: `pg_isready` on :$DB_PORT is NOT evidence the server listening
@@ -359,9 +370,11 @@ would target :$admin_port and miss the server the app actually uses.
 Fix it one of two ways:
   • Free port $DB_PORT (stop the other PostgreSQL) so FDM's managed server binds it,
     then re-run this installer; or
-  • Point FDM at the exact database you want with FDM_DATABASE_URL — FDM then treats
-    it as yours and neither creates nor drops it, e.g.:
-      sudo FDM_DATABASE_URL='postgresql+psycopg://<user>:<pass>@127.0.0.1:$DB_PORT/<db>' \\
+  • Isolate FDM on the server this installer CAN administer (port $admin_port) with
+    FDM_DATABASE_URL — FDM treats that database as yours and neither creates nor
+    drops it, so provision a fresh empty database there first (DOO-1176), e.g.:
+      sudo -u postgres createdb -p $admin_port -O fdm fdm
+      sudo FDM_DATABASE_URL='postgresql+psycopg://fdm:<pass>@127.0.0.1:$admin_port/fdm' \\
         bash -c 'curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/${FDM_BRANCH}/install.sh | bash'"
     fi
     log "Verified the 'postgres' superuser administers port $DB_PORT (FDM's managed server)."
@@ -372,6 +385,10 @@ Fix it one of two ways:
     else
         log "Database '$DB_NAME' already exists — reusing it."
     fi
+    # DOO-1176: reached only when we verified we administer the exact server the
+    # app uses (admin_port == DB_PORT) and provisioned role+DB ourselves. This DB
+    # is now ours, so a drop-and-reinstall recovery may legitimately target it.
+    DB_MANAGED_BY_INSTALLER=1
 elif [ -n "${FDM_DATABASE_URL:-}" ]; then
     log "Using externally-provided FDM_DATABASE_URL — skipping provisioning."
 elif [ "$IS_ROOT" -ne 1 ]; then
@@ -400,11 +417,20 @@ trap 'on_install_error "$LINENO"' ERR
 if [ "$migrate_rc" -ne 0 ]; then
     printf '%s\n' "$migrate_out" >&2
     if is_schema_drift_error "$migrate_out"; then
-        die "Migration failed: the managed database '$DB_NAME' has a schema AHEAD of its recorded alembic version — most likely a leftover from an earlier aborted install. This installer re-creates a MISSING database but cannot reconcile a drifted one, so re-running as-is will keep hitting this same error. Recover with:
+        # DOO-1176: the recovery depends on whether WE provisioned this database.
+        if [ "${DB_MANAGED_BY_INSTALLER:-0}" = 1 ]; then
+            die "Migration failed: the managed database '$DB_NAME' has a schema AHEAD of its recorded alembic version — most likely a leftover from an earlier aborted install. This installer re-creates a MISSING database but cannot reconcile a drifted one, so re-running as-is will keep hitting this same error. Recover with:
 
     $(recovery_cmd "$DB_NAME" "${DB_HOST:-127.0.0.1}" "$DB_PORT" "$DB_USER")
 
 That drops the managed database (named by the host, port and user from your effective DATABASE_URL — NOT a bare 'sudo -u postgres dropdb', which routes through pg_wrapper and can silently miss the server FDM actually uses, DOO-1175) and fetches a fresh installer from the canonical source to rebuild it cleanly. The curl form (rather than a bare 'sudo ./install.sh') is deliberate: an in-tree rerun re-executes this same on-disk installer, so a checkout that predates the fix would just loop on this error (DOO-1174). Your .env secrets are preserved (dropdb touches only the database). If '$DB_NAME' holds data you need, back it up first: pg_dump -h ${DB_HOST:-127.0.0.1} -p $DB_PORT -U $DB_USER $DB_NAME > fdm-backup.sql"
+        else
+            die "Migration failed: the database '$DB_NAME' at ${DB_HOST:-127.0.0.1}:$DB_PORT (supplied via FDM_DATABASE_URL) has a schema AHEAD of its recorded alembic version. This installer did NOT provision this database, so it will NOT drop it (DOO-1176) — dropping a database FDM does not own is how the earlier recovery loop destroyed the wrong data or silently no-op'd. Recover by binding FDM at a FRESH empty database you provision on a server you control, then re-run:
+
+    $(recovery_bind_elsewhere "<new-empty-db>" "${DB_HOST:-127.0.0.1}" "$DB_PORT" "$DB_USER")
+
+That touches no existing data: you create a new empty database and FDM migrates cleanly into it. If you must reuse '$DB_NAME', reset it yourself first (the installer will not); back it up with pg_dump -h ${DB_HOST:-127.0.0.1} -p $DB_PORT -U $DB_USER $DB_NAME > fdm-backup.sql."
+        fi
     fi
     die "Database migration failed (alembic upgrade head, exit $migrate_rc) — see the error above."
 fi

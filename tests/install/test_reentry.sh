@@ -121,6 +121,29 @@ check "$(recovery_cmd fdm | grep -c 'dropdb -h [^ ]* -p [^ ]* -U ')" 1 "recovery
 check "$(recovery_cmd fdm | grep -c 'sudo \./install\.sh')" 0 "recovery_cmd no longer emits in-tree ./install.sh"
 check "$(recovery_cmd fdm | grep -c 'curl -fsSL')"          1 "recovery_cmd fetches a fresh installer"
 
+echo "== 7b. recovery_bind_elsewhere: bind FDM at a fresh DB, never drop (DOO-1176) =="
+# DOO-1176 (MD decision folding into DOO-1175): for a database the installer did
+# NOT provision (an external FDM_DATABASE_URL target, or a foreign server the D1
+# adoption guard refused), the recovery must NEVER be a drop. Dropping a foreign
+# server's DB destroys the wrong data AND loops (the next run re-adopts it);
+# dropping an unreachable one is a silent no-op that reads as success — the exact
+# trap the last five corrections fell into. The honest recovery is `createdb` a
+# fresh empty DB the operator owns + an FDM_DATABASE_URL install, host/port/user
+# pinned; no dropdb, no --if-exists.
+check "$(recovery_bind_elsewhere fdm_new 127.0.0.1 5433 fdm)" \
+    "sudo -u postgres createdb -p 5433 -O fdm fdm_new && sudo FDM_DATABASE_URL='postgresql+psycopg://fdm:<password>@127.0.0.1:5433/fdm_new' bash -c 'curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/main/install.sh | bash'" \
+    "recovery_bind_elsewhere names host/port/user + fresh db"
+check "$(recovery_bind_elsewhere fdm_new db.internal 6543 fdmadmin release-2.0)" \
+    "sudo -u postgres createdb -p 6543 -O fdmadmin fdm_new && sudo FDM_DATABASE_URL='postgresql+psycopg://fdmadmin:<password>@db.internal:6543/fdm_new' bash -c 'curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/release-2.0/install.sh | bash'" \
+    "recovery_bind_elsewhere honours non-default host/port/user + branch"
+# The whole dropdb family must be absent from this recovery.
+check "$(recovery_bind_elsewhere fdm_new | grep -c 'dropdb')"          0 "recovery_bind_elsewhere never drops"
+check "$(recovery_bind_elsewhere fdm_new | grep -c -- '--if-exists')"  0 "recovery_bind_elsewhere never suggests --if-exists"
+check "$(recovery_bind_elsewhere fdm_new | grep -c 'createdb -p [^ ]* -O [^ ]* ')" 1 "recovery_bind_elsewhere provisions a fresh DB by port/owner"
+check "$(recovery_bind_elsewhere fdm_new | grep -c 'FDM_DATABASE_URL=')" 1 "recovery_bind_elsewhere binds via FDM_DATABASE_URL"
+check "$(recovery_bind_elsewhere fdm_new | grep -c 'curl -fsSL')"       1 "recovery_bind_elsewhere fetches a fresh installer"
+check "$(recovery_bind_elsewhere fdm_new | grep -c 'sudo \./install\.sh')" 0 "recovery_bind_elsewhere emits no in-tree ./install.sh"
+
 echo "== 8. schema-ahead DB: migrate fails as drift, and the recovery works =="
 # Seed the exact wedge: alembic_version stamped BEHIND, but the object a pending
 # migration would create already present (schema AHEAD). Uses only psql, so it
