@@ -25,7 +25,7 @@ def test_get_security_policy_defaults(client):
     body = r.json()
     assert body["enforce_2fa_roles"] == []
     assert body["ip_allowlist"] == []
-    assert body["password_min_length"] == 10
+    assert body["password_min_length"] == 12  # DOO-258 hardened default
 
 
 def test_put_security_policy_requires_settings_manage(client):
