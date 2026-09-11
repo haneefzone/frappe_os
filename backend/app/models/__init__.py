@@ -26,6 +26,7 @@ from app.models.notification import Notification, NotificationPreference
 from app.models.platform_backup import PlatformBackup
 from app.models.report_run import ReportRun
 from app.models.restic import ResticRepo
+from app.models.maintenance_window import MaintenanceWindow
 from app.models.schedule import Schedule
 from app.models.server import Server, SSHCredential
 from app.models.server_tool import ServerTool
@@ -58,6 +59,7 @@ __all__ = [
     "InstalledApp",
     "LogEntry",
     "LoginAttempt",
+    "MaintenanceWindow",
     "MonitoringSample",
     "Notification",
     "NotificationPreference",

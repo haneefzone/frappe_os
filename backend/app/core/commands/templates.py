@@ -104,6 +104,12 @@ class CommandTemplate:
     # even though their action_names differ. None = lock on action_name alone
     # (the original behaviour; each action only excludes itself).
     lock_class: str | None = None
+    # Maintenance-window danger class (session 3.5). If set, JobRunner.create
+    # checks for an active MaintenanceWindow on the target server that blocks
+    # this class and refuses the job. None = never blocked by maintenance windows.
+    # Values match MaintenanceWindow.blocked_danger_classes: "update", "restore",
+    # "production_setup".
+    danger_class: str | None = None
     # OS user to run the command as (via `sudo -u`); None = the SSH login user.
     run_as: str | None = None
     # Platform-local action (session 6.2): the work runs inside the platform

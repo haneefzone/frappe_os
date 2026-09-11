@@ -30,6 +30,7 @@ from app.api.routes.notifications import router as notifications_router
 from app.api.routes.platform_backups import router as platform_backups_router
 from app.api.routes.reports import router as reports_router
 from app.api.routes.restic import router as restic_router
+from app.api.routes.maintenance_windows import router as maintenance_windows_router
 from app.api.routes.schedules import router as schedules_router
 from app.api.routes.search import router as search_router
 from app.api.routes.servers import router as servers_router
@@ -172,6 +173,7 @@ def create_app() -> FastAPI:
     app.include_router(terminal_router)
     app.include_router(monitoring_router)
     app.include_router(schedules_router)
+    app.include_router(maintenance_windows_router)
     app.include_router(compliance_router)
     app.include_router(compliance_reports_router)
     app.include_router(dr_runbook_router)

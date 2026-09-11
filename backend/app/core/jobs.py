@@ -67,6 +67,19 @@ class LockConflict(Exception):
         super().__init__(f"target is locked by job {blocking_job_id}")
 
 
+class MaintenanceWindowBlocked(Exception):
+    """A maintenance window on the target server blocks this action class (-> HTTP 409)."""
+
+    def __init__(self, window_id: int, window_name: str, danger_class: str) -> None:
+        self.window_id = window_id
+        self.window_name = window_name
+        self.danger_class = danger_class
+        super().__init__(
+            f"action class '{danger_class}' is blocked by maintenance window "
+            f"'{window_name}' (id={window_id})"
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Backend: Redis lock, cancel signalling and log pub/sub behind one interface.
 # --------------------------------------------------------------------------- #
@@ -656,6 +669,29 @@ class JobRunner:
         came from a masked `params_sanitized` map, so a secret-bearing template
         fails loud (SecretParamUnresolved) instead of running with `••••`."""
         template = get_template(action_name)  # UnknownAction if missing
+
+        # Session 3.5: maintenance-window enforcement guard. If the template has
+        # a danger_class and there is an active maintenance window on the target
+        # server that blocks it, refuse the job immediately before any DB write.
+        if template.danger_class and server_id is not None:
+            from app.models.maintenance_window import MaintenanceWindow as _MW
+
+            active_windows = (
+                db.execute(
+                    select(_MW).where(
+                        _MW.server_id == server_id,
+                        _MW.enabled.is_(True),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for mw in active_windows:
+                if (
+                    template.danger_class in (mw.blocked_danger_classes or [])
+                    and mw.is_active_at()
+                ):
+                    raise MaintenanceWindowBlocked(mw.id, mw.name, template.danger_class)
 
         secrets_enc: str | None = None
         if not _from_sanitized and template.secret_sources:

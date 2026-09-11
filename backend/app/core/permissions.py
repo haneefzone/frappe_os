@@ -30,6 +30,11 @@ REPORT_GENERATE = "report:generate"  # generate compliance / audit report export
 # Admin holds (Admin has it via the wildcard). Deliberately absent from
 # Developer/Operator in DEFAULT_ROLES — those reports are Admin-only.
 REPORT_SENSITIVE = "report:sensitive"
+# Session 3.5: create/edit/delete maintenance windows. Intentionally separate
+# from schedule:manage so operators can view windows without being able to
+# disable them (windows block dangerous actions; disabling one is a security
+# decision). Admin and Developer only by default.
+MAINTENANCE_MANAGE = "maintenance:manage"
 # Re-detect a server's toolchain (session 6.1). Separate from `read` because a
 # scan enqueues a job, and Read-only can never mutate (rule 7); separate from
 # `server:manage` because an Operator may check the stack without being allowed
@@ -52,6 +57,7 @@ DEFAULT_ROLES: dict[str, list[str]] = {
         JOB_MANAGE,
         TERMINAL_ACCESS,
         SCHEDULE_MANAGE,
+        MAINTENANCE_MANAGE,
         SSL_MANAGE,
         ALERT_MANAGE,
         REPORT_GENERATE,
