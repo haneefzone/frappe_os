@@ -466,18 +466,43 @@ async def run_drift_check(ctx) -> list[DriftResult]:
         row = _find_baseline(db, ctx.server_id, art.key, path)
 
         if row is None:
-            # First sighting — establish the baseline, report clean.
+            # First sighting — establish the baseline.
             row = ConfigBaseline(server_id=ctx.server_id, artifact_key=art.key, path=path)
             db.add(row)
             row.bench_id = bench_id
             row.site_id = site_id
+            row.captured_at = _now()
+            row.captured_by_job_id = ctx.job_id
+            row.last_checked_at = _now()
+
+            if art.fmt == "absent":
+                # The *desired* state of an absent-artefact is fixed ("<absent>"),
+                # so we must never bless an observed presence as the baseline
+                # (DOO-405). Pin the baseline to <absent> and, if the file is
+                # present right now (e.g. the 2.5 elevation drop-in caught during
+                # a rare in-flight `bench setup-production`), flag it as drift on
+                # first sight rather than recording a clean baseline that would
+                # mask every future reappearance.
+                row.sha256 = _sha256("<absent>")
+                row.size = 0
+                row.sanitized_content = "<absent>"
+                if reading.present:
+                    row.status = "drifted"
+                    row.current_sha256 = reading.sha256
+                    row.current_content = reading.content  # None: body never stored
+                    row.drift_detected_at = _now()
+                    results.append(DriftResult(art.key, path, drifted=True, reason="present"))
+                    continue
+                row.status = "baseline"
+                results.append(DriftResult(art.key, path, drifted=False, reason="new-baseline"))
+                continue
+
+            # Every other artefact: baseline whatever we observe (we cannot know
+            # the prior intended state), report clean.
             row.sha256 = reading.sha256
             row.size = reading.size
             row.sanitized_content = reading.content
             row.status = "baseline"
-            row.captured_at = _now()
-            row.captured_by_job_id = ctx.job_id
-            row.last_checked_at = _now()
             results.append(DriftResult(art.key, path, drifted=False, reason="new-baseline"))
             continue
 

@@ -209,6 +209,33 @@ def test_elevation_dropin_presence_is_drift(db_session):
     assert row.current_content is None
 
 
+def test_first_sight_with_dropin_present_flags_drift(db_session):
+    # DOO-405: if the very first drift check on a server catches the 2.5 elevation
+    # drop-in present (a rare in-flight `bench setup-production`), it must NOT be
+    # blessed as a clean baseline — the desired state of an absent-artefact is
+    # always "<absent>", so present-on-first-sight is drift.
+    server = _server(db_session)
+    files = _clean_files()
+    files["/etc/sudoers.d/fdm-prod-elevation"] = "frappe ALL=(root) NOPASSWD: ALL\n"  # present!
+    ctx = FakeCtx(db_session, server_id=server.id, files=files, dirs=_dirs())
+    results = asyncio.run(drift.run_drift_check(ctx))  # FIRST sight, drop-in present
+    r = next(r for r in results if r.artifact_key == "sudoers.elevation")
+    assert r.drifted and r.reason == "present"
+    row = db_session.query(ConfigBaseline).filter_by(artifact_key="sudoers.elevation").one()
+    assert row.status == "drifted" and row.drift_detected_at is not None
+    # Baseline is pinned to the desired <absent> state, and the drop-in body is
+    # never stored.
+    assert row.sha256 == drift._sha256("<absent>")
+    assert row.current_content is None
+
+    # And once the drop-in is revoked, the next check self-heals against that
+    # <absent> baseline (proving the baseline wasn't polluted with the presence).
+    del files["/etc/sudoers.d/fdm-prod-elevation"]
+    results = asyncio.run(drift.run_drift_check(ctx))
+    r = next(r for r in results if r.artifact_key == "sudoers.elevation")
+    assert not r.drifted and r.reason == "clean"
+
+
 def test_reverted_edit_self_heals(db_session):
     server = _server(db_session)
     files = _clean_files()
