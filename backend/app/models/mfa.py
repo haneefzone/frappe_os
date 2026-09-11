@@ -26,7 +26,16 @@ Admin-editable security policy singleton (session 6.5).
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -61,9 +70,18 @@ class UserTOTP(Base):
 class RecoveryCode(Base):
     __tablename__ = "recovery_codes"
 
+    # Uniqueness is scoped per user, not global: a SHA-256 collision across two
+    # different users' codes is astronomically unlikely, but a *global* unique
+    # would turn one — if it ever happened — into an IntegrityError/500 that
+    # fails the victim's enrolment. Per-user scope still forbids the only case
+    # that actually matters (the same code minted twice for one user).
+    __table_args__ = (
+        UniqueConstraint("user_id", "code_hash", name="uq_recovery_codes_user_code"),
+    )
+
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    code_hash: Mapped[str] = mapped_column(String(64))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

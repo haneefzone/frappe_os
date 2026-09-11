@@ -145,6 +145,32 @@ def test_audit_rows_written_for_enrol_and_disable(client, db_session):
     assert "auth.mfa_disable" in actions
 
 
+def test_setup_writes_audit_row(client, db_session):
+    login(client, "admin@example.com")
+    r = client.post("/api/auth/2fa/setup", headers=csrf_headers(client))
+    assert r.status_code == 200
+    actions = {row.action for row in db_session.scalars(select(AuditLog)).all()}
+    assert "auth.mfa_setup" in actions
+
+
+def test_recovery_code_hash_may_collide_across_users(seeded_users, db_session):
+    # Per-user (not global) uniqueness: two different users can hold the same
+    # code_hash without an IntegrityError. Uniqueness within a user still holds.
+    u1, u2 = seeded_users["admin"], seeded_users["developer"]
+    shared_hash = "a" * 64
+    db_session.add_all(
+        [
+            RecoveryCode(user_id=u1.id, code_hash=shared_hash),
+            RecoveryCode(user_id=u2.id, code_hash=shared_hash),
+        ]
+    )
+    db_session.commit()  # would raise IntegrityError under a global unique
+    rows = db_session.scalars(
+        select(RecoveryCode).where(RecoveryCode.code_hash == shared_hash)
+    ).all()
+    assert {r.user_id for r in rows} == {u1.id, u2.id}
+
+
 def test_setup_refuses_when_already_confirmed(client):
     _enrol(client)
     r = client.post("/api/auth/2fa/setup", headers=csrf_headers(client))

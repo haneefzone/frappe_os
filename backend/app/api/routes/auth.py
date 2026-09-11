@@ -608,7 +608,7 @@ def logout_all(
 
 
 @router.post("/2fa/setup")
-def totp_setup(user: CurrentUser, db: DbSession) -> TOTPSetupOut:
+def totp_setup(user: CurrentUser, db: DbSession, audit: Audit) -> TOTPSetupOut:
     existing = db.scalars(select(UserTOTP).where(UserTOTP.user_id == user.id)).first()
     if existing is not None and existing.confirmed_at is not None:
         raise HTTPException(
@@ -621,6 +621,16 @@ def totp_setup(user: CurrentUser, db: DbSession) -> TOTPSetupOut:
         existing.secret_encrypted = encrypt_totp_secret(secret)
         existing.last_used_step = None
     db.commit()
+    # A pending secret is inert until /2fa/confirm, but writing (or rewriting)
+    # it is still a state mutation — golden rule 2 (no silent mutations). The
+    # meaningful enrolment is audited at confirm; this row records that a
+    # setup/re-setup was initiated. The secret itself is never logged.
+    audit.record(
+        action="auth.mfa_setup",
+        summary=f"Started 2FA setup for {user.email}",
+        entity_type="user",
+        entity_id=user.id,
+    )
     return TOTPSetupOut(secret=secret, provisioning_uri=provisioning_uri(secret, user.email))
 
 
