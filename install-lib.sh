@@ -91,13 +91,59 @@ provision_db() {
     fi
 }
 
-# recovery_cmd DBNAME — print the single, canonical recovery command for a
-# managed install wedged by database drift. Centralised (DOO-1169) so the ERR
-# trap, the migrate failure handler, and the tests all quote the same string
-# instead of drifting out of sync. DBNAME defaults to fdm.
+# recovery_cmd DBNAME [BRANCH] — print the single, canonical recovery command
+# for a managed install wedged by database drift. Centralised (DOO-1169) so the
+# migrate failure handler and the tests all quote the same string instead of
+# drifting out of sync. DBNAME defaults to fdm; BRANCH defaults to $FDM_BRANCH
+# or main.
+#
+# DOO-1174: the recovery MUST fetch a fresh installer from the canonical source
+# rather than re-run the local checkout. The population that hits drift is, by
+# construction, disproportionately on an OLD checkout (drift detection only
+# fires when re-running after a prior aborted attempt), and `sudo ./install.sh`
+# run from inside /opt/fdm-platform takes install.sh's "skipping code sync"
+# branch — it re-executes whatever code is already on disk. On a pre-fix
+# checkout that is the old installer with no drift detection, so
+# `dropdb && ./install.sh` dies at migrate again and loops forever. The curl
+# form bypasses the on-disk tree entirely, so it recovers regardless of how
+# stale the checkout is. .env secrets survive because dropdb touches only the DB.
 recovery_cmd() {
     local db="${1:-fdm}"
-    printf 'sudo -u postgres dropdb %s && sudo ./install.sh' "$db"
+    local branch="${2:-${FDM_BRANCH:-main}}"
+    printf 'sudo -u postgres dropdb %s && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/%s/install.sh | sudo bash' \
+        "$db" "$branch"
+}
+
+# checkout_is_behind DIR BRANCH — for an in-tree install run (install.sh invoked
+# from inside its own checkout, which takes the "skipping code sync" branch),
+# report whether DIR's HEAD is behind or diverged from origin/BRANCH. This is
+# the root enabler of the DOO-1174 loop: an in-tree run silently executes
+# whatever installer code is on disk, so a stale checkout runs stale code (and
+# prints stale, wrong recovery advice) with no signal to the operator. A cheap
+# shallow fetch + compare lets install.sh warn instead of installing older code
+# silently.
+#
+# Prints the number of commits HEAD is behind origin/BRANCH when behind/diverged
+# (always >= 1 so a stale checkout is never reported as current), and prints
+# NOTHING when up to date, not a git checkout, git is unavailable, or origin is
+# unreachable — an offline or detached install must never be blocked by this
+# advisory check. Always returns 0 so callers under `set -e` are safe.
+checkout_is_behind() {
+    local dir="$1" branch="${2:-main}"
+    command -v git >/dev/null 2>&1 || return 0
+    [ -d "$dir/.git" ] || return 0
+    git -C "$dir" fetch --quiet --depth 1 origin "$branch" >/dev/null 2>&1 || return 0
+    local head origin n
+    head="$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo '')"
+    origin="$(git -C "$dir" rev-parse "origin/$branch" 2>/dev/null || echo '')"
+    [ -n "$origin" ] || return 0
+    [ "$head" = "$origin" ] && return 0
+    # HEAD differs from origin. rev-list gives the exact behind count; a diverged
+    # or shallow tree with no merge base can report 0 despite the SHA mismatch,
+    # so floor the answer at 1 — a differing HEAD is never "current".
+    n="$(git -C "$dir" rev-list --count "HEAD..origin/$branch" 2>/dev/null || echo '')"
+    { [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null; } || n=1
+    printf '%s' "$n"
 }
 
 # is_schema_drift_error TEXT — true when captured `alembic upgrade head` output

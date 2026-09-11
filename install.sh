@@ -55,7 +55,7 @@ die()  { echo -e "\033[1;31m[fdm-install] ERROR:\033[0m $*" >&2; exit 1; }
 # manual database surgery is required" (which was false at 5d24e4c).
 on_install_error() {
     local rc=$? line="${1:-?}"
-    echo -e "\033[1;31m[fdm-install] FAILED\033[0m (line $line, exit $rc). Fix the cause shown above, then re-run this installer: a partial first install is resumed from real database state — a MISSING managed database is re-created, and existing secrets and already-migrated data are preserved. One case a plain rerun does NOT fix: a managed database whose schema is AHEAD of its recorded alembic version (a leftover from an earlier aborted attempt), which fails migration with a DuplicateColumn / \"already exists\" error. Recover that by dropping and re-creating the managed database: sudo -u postgres dropdb fdm && sudo ./install.sh (back it up with pg_dump first if it holds data you need)." >&2
+    echo -e "\033[1;31m[fdm-install] FAILED\033[0m (line $line, exit $rc). Fix the cause shown above, then re-run this installer: a partial first install is resumed from real database state — a MISSING managed database is re-created, and existing secrets and already-migrated data are preserved. One case a plain rerun does NOT fix: a managed database whose schema is AHEAD of its recorded alembic version (a leftover from an earlier aborted attempt), which fails migration with a DuplicateColumn / \"already exists\" error. Recover that by dropping the managed database and reinstalling from the canonical source (NOT sudo ./install.sh — an in-tree rerun re-executes this same on-disk installer, so a stale checkout would loop; the curl form always fetches a fresh installer): sudo -u postgres dropdb fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/${FDM_BRANCH:-main}/install.sh | sudo bash (back it up with pg_dump first if it holds data you need)." >&2
 }
 trap 'on_install_error "$LINENO"' ERR
 
@@ -222,6 +222,11 @@ if [ -n "$SOURCE_DIR" ] && [ "$SOURCE_DIR" != "$FDM_HOME" ]; then
     rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$SOURCE_DIR/" "$FDM_HOME/"
 elif [ -n "$SOURCE_DIR" ]; then
     log "Running from the install directory itself — skipping code sync."
+    # DOO-1174: an in-tree run executes whatever installer code is on disk. If
+    # this checkout is behind origin the operator is silently running stale code
+    # (and would get stale recovery advice). Flag it so we can warn once the
+    # helper lib is sourced below; the fetch itself is done there.
+    IN_TREE_RUN=1
 elif [ -d "$FDM_HOME/.git" ]; then
     log "Existing install found — pulling $FDM_BRANCH from $FDM_REPO_URL"
     git -C "$FDM_HOME" fetch --depth 1 origin "$FDM_BRANCH"
@@ -240,6 +245,22 @@ if [ "$IS_ROOT" -eq 1 ]; then chown -R "$RUN_USER:$RUN_USER" "$FDM_HOME"; fi
 # local-checkout install (DOO-1155). shellcheck source=install-lib.sh
 [ -f "$FDM_HOME/install-lib.sh" ] || die "install-lib.sh missing from $FDM_HOME — incomplete checkout/clone."
 . "$FDM_HOME/install-lib.sh"
+
+# DOO-1174: for an in-tree run, warn (do not silently proceed) when this
+# checkout is behind origin. Running stale installer code is the root enabler of
+# the drop-and-reinstall loop — a pre-fix checkout re-runs the old installer,
+# hits the same failure, and prints recovery advice that cannot work. This is
+# advisory only: checkout_is_behind stays silent (and never fails) when offline,
+# detached, or already current, so it does not block air-gapped installs.
+if [ "${IN_TREE_RUN:-0}" -eq 1 ]; then
+    behind_count="$(checkout_is_behind "$SOURCE_DIR" "$FDM_BRANCH")"
+    if [ -n "$behind_count" ]; then
+        warn "This checkout ($SOURCE_DIR) is $behind_count commit(s) behind origin/$FDM_BRANCH — you are installing OLDER code than what is published, so any failure/recovery advice it prints may be stale. Update first:
+    git -C \"$SOURCE_DIR\" fetch origin $FDM_BRANCH && git -C \"$SOURCE_DIR\" reset --hard origin/$FDM_BRANCH && sudo ./install.sh
+or reinstall from the canonical source (immune to checkout age):
+    curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/$FDM_BRANCH/install.sh | sudo bash"
+    fi
+fi
 
 # -------------------------------------------------------- backend install
 log "Installing backend (uv sync, Python 3.12+ auto-managed)…"
@@ -340,7 +361,7 @@ if [ "$migrate_rc" -ne 0 ]; then
 
     $(recovery_cmd "$DB_NAME")
 
-That drops the managed database and lets this installer rebuild it cleanly; your .env secrets are preserved. If '$DB_NAME' holds data you need, back it up first: sudo -u postgres pg_dump $DB_NAME > fdm-backup.sql"
+That drops the managed database and fetches a fresh installer from the canonical source to rebuild it cleanly. The curl form (rather than a bare 'sudo ./install.sh') is deliberate: an in-tree rerun re-executes this same on-disk installer, so a checkout that predates the fix would just loop on this error (DOO-1174). Your .env secrets are preserved (dropdb touches only the database). If '$DB_NAME' holds data you need, back it up first: sudo -u postgres pg_dump $DB_NAME > fdm-backup.sql"
     fi
     die "Database migration failed (alembic upgrade head, exit $migrate_rc) — see the error above."
 fi

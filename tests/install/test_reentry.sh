@@ -88,9 +88,26 @@ check "$(is_schema_drift_error 'relation "foo" already exists' && echo y || echo
 check "$(is_schema_drift_error 'psycopg.OperationalError: connection refused' && echo y || echo n)" n "connection error is NOT drift"
 check "$(is_schema_drift_error 'Target database is not up to date.' && echo y || echo n)" n "plain out-of-date is NOT drift"
 
-echo "== 7. recovery_cmd names the exact drop-and-reinstall command =="
-check "$(recovery_cmd fdm)"  "sudo -u postgres dropdb fdm && sudo ./install.sh"  "recovery_cmd fdm"
-check "$(recovery_cmd "$DB")" "sudo -u postgres dropdb $DB && sudo ./install.sh" "recovery_cmd honours DB name"
+echo "== 7. recovery_cmd is the checkout-age-independent curl form (DOO-1174) =="
+# DOO-1174: the recovery must fetch a fresh installer from the canonical source,
+# NOT re-run the local checkout ('sudo ./install.sh'), because the drift
+# population is disproportionately on a pre-fix checkout whose in-tree rerun
+# would loop on the same failure. See recovery_cmd's header comment.
+check "$(recovery_cmd fdm)" \
+    "sudo -u postgres dropdb fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/main/install.sh | sudo bash" \
+    "recovery_cmd fdm (curl form)"
+check "$(recovery_cmd "$DB")" \
+    "sudo -u postgres dropdb $DB && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/main/install.sh | sudo bash" \
+    "recovery_cmd honours DB name"
+check "$(recovery_cmd fdm release-2.0)" \
+    "sudo -u postgres dropdb fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/release-2.0/install.sh | sudo bash" \
+    "recovery_cmd honours an explicit branch arg"
+check "$(FDM_BRANCH=stable recovery_cmd fdm)" \
+    "sudo -u postgres dropdb fdm && curl -fsSL https://raw.githubusercontent.com/haneefzone/frappe_os/stable/install.sh | sudo bash" \
+    "recovery_cmd defaults branch to \$FDM_BRANCH"
+# The footgun must be gone: no in-tree './install.sh' rerun, and it must fetch.
+check "$(recovery_cmd fdm | grep -c 'sudo \./install\.sh')" 0 "recovery_cmd no longer emits in-tree ./install.sh"
+check "$(recovery_cmd fdm | grep -c 'curl -fsSL')"          1 "recovery_cmd fetches a fresh installer"
 
 echo "== 8. schema-ahead DB: migrate fails as drift, and the recovery works =="
 # Seed the exact wedge: alembic_version stamped BEHIND, but the object a pending
@@ -137,5 +154,95 @@ $ADMIN -tAc "DROP DATABASE \"$DB\"" >/dev/null
 check "$(provision_db "$ADMIN" "$DB" "$ROLE" "$PASS")" created "recovery re-creates a clean DB"
 check "$(clean_migration_from_zero && echo ok || echo fail)" ok "from-zero migration now succeeds on the clean DB"
 
+# ---------------------------------------------------------------------------
+# DOO-1174: the DOO-1169 recovery command ('dropdb && sudo ./install.sh') cannot
+# work on a STALE checkout. 'sudo ./install.sh' run from inside the install dir
+# takes install.sh's "skipping code sync" branch, so it re-executes whatever
+# installer code is already on disk. On a pre-fix checkout that is the OLD
+# installer (no drift detection), so dropdb + in-tree rerun dies at migrate
+# again and loops forever. These sections reproduce that with real git repos
+# (offline — origin is a local bare repo) and a drifted DB, and prove:
+#   (a) a stale checkout is detected (checkout_is_behind), so install.sh warns;
+#   (b) the on-disk stale installer genuinely cannot recover (no drift logic);
+#   (c) the curl-fetched installer IS drift-aware, and after dropdb the DB
+#       migrates clean — i.e. the recovery_cmd curl form escapes the loop.
+
+GITROOT="$(mktemp -d "${TMPDIR:-/tmp}/fdm_stale_ck.$$.XXXXXX")"
+cleanup_git() { rm -rf "$GITROOT" 2>/dev/null || true; }
+trap 'cleanup_git; cleanup' EXIT
+GIT="git -c user.email=t@t -c user.name=t -c init.defaultBranch=main -c advice.detachedHead=false -c protocol.file.allow=always"
+
+echo "== 10. DOO-1174: build a stale checkout (offline origin) =="
+ORIGIN="$GITROOT/origin.git"
+WORK="$GITROOT/opt-fdm-platform"
+SEED="$GITROOT/seed"
+$GIT init -q --bare "$ORIGIN"
+$GIT init -q "$SEED"
+mkdir -p "$SEED/backend"
+: > "$SEED/backend/pyproject.toml"   # marks SEED a valid SOURCE_DIR for install.sh
+# --- commit 1: the OLD installer — the footgun recovery, and NO drift logic.
+cat > "$SEED/install.sh" <<'OLD'
+#!/usr/bin/env bash
+# Pre-DOO-1169 installer stub: dies at migrate, prints the in-tree recovery.
+echo "[fdm-install] migrating…"
+echo "ERROR: re-run with: sudo -u postgres dropdb fdm && sudo ./install.sh" >&2
+exit 1
+OLD
+$GIT -C "$SEED" add -A && $GIT -C "$SEED" commit -qm "old installer (no drift detection)"
+$GIT -C "$SEED" remote add origin "$ORIGIN"
+$GIT -C "$SEED" push -q origin main
+OLD_SHA="$($GIT -C "$SEED" rev-parse HEAD)"
+# --- commit 2 on origin: the FIXED installer — the real, drift-aware install.sh.
+cp "$ROOT/install.sh" "$SEED/install.sh"
+cp "$ROOT/install-lib.sh" "$SEED/install-lib.sh"
+$GIT -C "$SEED" add -A && $GIT -C "$SEED" commit -qm "fixed installer (DOO-1169/1174)"
+$GIT -C "$SEED" push -q origin main
+# The operator's checkout: cloned, then pinned BACK to the old commit (stale).
+$GIT clone -q "$ORIGIN" "$WORK"
+$GIT -C "$WORK" reset -q --hard "$OLD_SHA"
+check "$($GIT -C "$WORK" rev-parse HEAD)" "$OLD_SHA" "work checkout pinned to the pre-fix commit"
+
+echo "== 11. DOO-1174: checkout_is_behind flags the stale tree (and stays quiet otherwise) =="
+# Behind by exactly one commit -> install.sh's in-tree branch will warn.
+check "$(checkout_is_behind "$WORK" main)" 1 "stale checkout reported 1 commit behind"
+# Not a git checkout / offline-ish -> silent (never blocks an air-gapped install).
+check "$(checkout_is_behind "$GITROOT/does-not-exist" main)" "" "non-repo path is silent"
+# After updating to origin tip -> up to date -> silent.
+UP="$GITROOT/uptodate"; $GIT clone -q "$ORIGIN" "$UP"
+check "$(checkout_is_behind "$UP" main)" "" "current checkout is silent"
+
+echo "== 12. DOO-1174: old in-tree recovery loops; curl-fetched installer recovers =="
+# (b) The on-disk stale installer the in-tree './install.sh' would re-run has no
+#     drift detection — it can only die and re-print the same looping advice.
+check "$(grep -c 'is_schema_drift_error' "$WORK/install.sh")" 0 \
+    "stale on-disk installer cannot detect drift (in-tree rerun loops)"
+check "$(grep -c 'sudo \./install\.sh' "$WORK/install.sh")" 1 \
+    "stale installer even prints the looping in-tree recovery"
+# (c) What the curl form actually fetches is origin's tip installer, which IS
+#     drift-aware and prints the escape-the-loop curl recovery.
+FETCHED="$GITROOT/fetched-install.sh"
+$GIT -C "$WORK" show origin/main:install.sh > "$FETCHED"
+check "$(grep -q 'is_schema_drift_error' "$FETCHED" && echo y || echo n)" y "curl-fetched installer detects drift"
+# The fixed installer's drift recovery advertises the age-independent curl form.
+check "$(grep -qF 'raw.githubusercontent.com/haneefzone/frappe_os' "$FETCHED" && echo y || echo n)" y \
+    "curl-fetched installer advertises the age-independent curl recovery"
+# And the DB half: reproduce the drifted DB, then run exactly what the recovery
+# does (dropdb -> provision clean -> migrate from zero) and prove it reaches a
+# good state. This is the state the curl-fetched installer drives the DB to.
+$ADMIN -tAc "DROP DATABASE IF EXISTS \"$DB\"" >/dev/null
+$ADMIN -tAc "SELECT 1 FROM pg_roles WHERE rolname='$ROLE'" | grep -q 1 \
+    || $ADMIN -tAc "CREATE ROLE \"$ROLE\" LOGIN PASSWORD '$PASS'" >/dev/null
+$ADMIN -tAc "CREATE DATABASE \"$DB\" OWNER \"$ROLE\"" >/dev/null
+seed_ahead
+set +e
+mig_out2="$(pending_migration_ddl)"; mig_rc2=$?
+set -e
+check "$([ "$mig_rc2" -ne 0 ] && echo fail || echo ok)" fail "stale-checkout DB is drifted (migrate fails)"
+check "$(is_schema_drift_error "$mig_out2" && echo y || echo n)" y "and the failure is drift (drift-aware installer would catch it)"
+# recovery: dropdb + fresh provision + from-zero migration.
+$ADMIN -tAc "DROP DATABASE \"$DB\"" >/dev/null
+check "$(provision_db "$ADMIN" "$DB" "$ROLE" "$PASS")" created "recovery re-creates a clean DB"
+check "$(clean_migration_from_zero && echo ok || echo fail)" ok "from-zero migration succeeds after the curl recovery"
+
 echo
-echo "PASS ($pass checks): install re-entry self-heal + schema-drift recovery verified (DOO-1155 AC4/AC5, DOO-1169)."
+echo "PASS ($pass checks): install re-entry self-heal + schema-drift recovery + stale-checkout recovery verified (DOO-1155 AC4/AC5, DOO-1169, DOO-1174)."
