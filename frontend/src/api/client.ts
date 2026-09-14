@@ -65,8 +65,15 @@ async function parseError(response: Response): Promise<ApiError> {
       ? (parseInt(response.headers.get('Retry-After') ?? '0', 10) || undefined)
       : undefined
   try {
-    const body = (await response.json()) as ApiErrorBody
-    return new ApiError(response.status, body.error.code, body.error.message, retryAfter)
+    const body = (await response.json()) as ApiErrorBody & { detail?: string }
+    if (body.error?.code && body.error?.message) {
+      return new ApiError(response.status, body.error.code, body.error.message, retryAfter)
+    }
+    // FastAPI HTTPException serialises as {"detail": "..."} — surface it directly.
+    if (typeof body.detail === 'string') {
+      return new ApiError(response.status, 'api_error', body.detail, retryAfter)
+    }
+    return new ApiError(response.status, 'http_error', response.statusText, retryAfter)
   } catch {
     return new ApiError(response.status, 'http_error', response.statusText, retryAfter)
   }
