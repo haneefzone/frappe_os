@@ -48,6 +48,9 @@ ALERTS_FUNC = "app.workers.scheduler.evaluate_alerts_tick"
 # Session 3.4: and a recurring restore-test sweep — find every site whose newest
 # backup is due a proof-of-restore test and enqueue one restore-test job per site.
 RESTORE_TEST_FUNC = "app.workers.scheduler.evaluate_restore_tests"
+# DOO-1194: the same scheduler process also refreshes the Frappe app store
+# catalog (shallow clone of `frappe/marketplace`) — serves stale on failure.
+MARKETPLACE_FUNC = "app.workers.scheduler.refresh_marketplace_catalog"
 
 
 def make_connection() -> Redis:
@@ -165,6 +168,23 @@ def evaluate_restore_tests() -> dict:
     return {"due": len(due), "enqueued": len(enqueued), "skipped": skipped}
 
 
+def refresh_marketplace_catalog() -> dict:
+    """Recurring job body (runs on an RQ worker): shallow-clone / fetch the
+    `frappe/marketplace` catalog into the local cache. A refresh that cannot
+    reach the remote logs and serves the existing cache rather than failing
+    (DOO-1194 AC1). Returns a small summary for the RQ result."""
+    from app.core.marketplace import RegistryUnavailableError, build_cache
+
+    cache = build_cache()
+    try:
+        updated = cache.refresh()
+    except RegistryUnavailableError as exc:
+        logger.warning("marketplace refresh skipped: %s", exc)
+        return {"updated": False, "available": False}
+    logger.info("marketplace catalog %s", "updated" if updated else "served stale")
+    return {"updated": updated, "available": True}
+
+
 def _register_recurring(scheduler, *, func, func_name: str, interval: int) -> None:
     """Idempotently register one recurring job, cancelling any existing entry for
     the same func first so a restart with a changed interval never leaves two."""
@@ -236,6 +256,17 @@ def ensure_updates_poll_registered(scheduler, *, interval: int) -> None:
     logger.info("registered update-advisor poll every %ds", interval)
 
 
+def ensure_marketplace_registered(scheduler, *, interval: int) -> None:
+    """Idempotently register the recurring app-store catalog refresh (DOO-1194)."""
+    _register_recurring(
+        scheduler,
+        func=refresh_marketplace_catalog,
+        func_name=MARKETPLACE_FUNC,
+        interval=interval,
+    )
+    logger.info("registered marketplace catalog refresh every %ds", interval)
+
+
 def _utcnow():
     from datetime import UTC, datetime
 
@@ -269,6 +300,9 @@ def main() -> None:  # pragma: no cover - process entrypoint (needs live Redis)
         ensure_updates_poll_registered(
             scheduler, interval=settings.updates_poll_interval_seconds
         )
+    ensure_marketplace_registered(
+        scheduler, interval=settings.marketplace_refresh_seconds
+    )
     logger.info(
         "scheduler starting (queue=%s, tick=%ds, compliance=%ds, alerts=%ds, "
         "restore_test=%ds)",

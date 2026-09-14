@@ -94,6 +94,19 @@ class Settings(BaseSettings):
     # Marketplace bare names bypass this. Set via REPO_HOST_ALLOWLIST.
     repo_host_allowlist: str = "github.com,gitlab.com"
 
+    # Frappe app store (DOO-1194). The catalog is the `frappe/marketplace` git
+    # repo, NOT an API: we shallow-clone it and refresh on a schedule, then read
+    # `apps.json` + `apps/<name>.json` off disk. Offline hosts are normal for us,
+    # so a failed refresh serves the last good cache rather than erroring.
+    marketplace_repo_url: str = "https://github.com/frappe/marketplace"
+    marketplace_branch: str = "main"
+    # Relative paths resolve from the backend working directory (like uploads_dir).
+    marketplace_cache_dir: str = "marketplace-cache"
+    # Refresh cadence for the registry sweep. Hourly by default — the upstream
+    # catalog changes slowly and stale is served on failure anyway. Set via
+    # MARKETPLACE_REFRESH_SECONDS.
+    marketplace_refresh_seconds: int = 3600
+
     # Terminal idle timeout: WS closes if no input within this window. Warning
     # message is injected 60s before. Set via TERMINAL_IDLE_TIMEOUT_SECONDS.
     terminal_idle_timeout_seconds: int = 15 * 60

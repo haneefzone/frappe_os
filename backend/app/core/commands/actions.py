@@ -756,6 +756,82 @@ class InstallAppOnSiteAction(Action):
                 await _stop_dev_redis(ctx, queue_port, cache_port)
 
 
+class MarketplaceInstallAction(Action):
+    """`site.install_marketplace_app` — install a Frappe app store app plus its
+    resolved dependencies, in dependency order, as ONE job locked on the site.
+
+    This reuses the custom-app connector path end to end (DOO-1194 AC4): the same
+    `_get_app_steps` (`bench get-app`) and `_install_app_step`
+    (`bench --site X install-app`) helpers, the same dev-bench Redis dance, and
+    the same app×site matrix upkeep as `InstallAppOnSiteAction` — only the *set*
+    of apps differs, and it was resolved + validated at the API layer before the
+    job was ever created (so a conflict never yields a partial install).
+
+    The plan travels as one base64-encoded JSON param `plan_b64` — a list of
+    `{app, source, branch}` steps, dependencies first. Marketplace apps are
+    public, so no deploy key is involved."""
+
+    async def run(self, ctx: JobContext) -> None:
+        import base64
+        import json
+
+        params = ctx.rendered.params_sanitized
+        site = params["site"]
+        bench_path = params["bench_path"]
+        steps = json.loads(base64.b64decode(params["plan_b64"]).decode())
+
+        bench = _load_bench(ctx, bench_path)
+        queue_port, cache_port = _redis_ports(bench)
+
+        # 1) Fetch every app onto the bench first, dependencies first. get-app is
+        #    a bench-level op and needs no Redis; a re-fetch over an existing app
+        #    dir is a no-op bench short-circuits.
+        for step in steps:
+            await _get_app_steps(
+                ctx,
+                source=step["source"],
+                branch=step.get("branch") or "",
+                bench_path=bench_path,
+                deploy_key=None,
+            )
+
+        # 2) Install each on the site in the same order, wrapped once in the
+        #    dev-bench Redis dance; register each matrix cell as it lands.
+        is_dev = await _detect_bench_mode(ctx, bench_path)
+        started_redis = False
+        try:
+            if is_dev:
+                await _start_dev_redis(ctx, bench_path)
+                started_redis = True
+
+            for step in steps:
+                app = step["app"]
+                await _install_app_step(ctx, site=site, app=app, bench_path=bench_path)
+                with ctx.step(f"Register installed app ({app})"):
+                    version = await _app_version(ctx, bench_path, app)
+                    if bench is None:
+                        await ctx.emit(
+                            "Bench not in inventory yet — run a discovery to link "
+                            "this install to its site."
+                        )
+                    else:
+                        _register_installed_app(
+                            ctx,
+                            bench=bench,
+                            site_name=site,
+                            app=app,
+                            branch=step.get("branch"),
+                            version=version,
+                        )
+                        await ctx.emit(
+                            f"Registered {app} on {site} "
+                            f"(version {version or 'unknown'})."
+                        )
+        finally:
+            if started_redis:
+                await _stop_dev_redis(ctx, queue_port, cache_port)
+
+
 class UninstallAppAction(Action):
     """`app.uninstall` — DESTRUCTIVE (`danger` permission): `bench --site X
     uninstall-app APP --yes`, wrapped in the dev-bench Redis dance, then drop the

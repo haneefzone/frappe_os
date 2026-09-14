@@ -27,6 +27,7 @@ from app.api.routes.dr_runbook import router as dr_runbook_router
 from app.api.routes.drift import router as drift_router
 from app.api.routes.job_logs import router as job_logs_router
 from app.api.routes.jobs import router as jobs_router
+from app.api.routes.marketplace import router as marketplace_router
 from app.api.routes.maintenance_windows import router as maintenance_windows_router
 from app.api.routes.monitoring import router as monitoring_router
 from app.api.routes.notifications import router as notifications_router
@@ -169,6 +170,7 @@ def create_app() -> FastAPI:
     app.include_router(domains_router)
     app.include_router(drift_router)
     app.include_router(apps_router)
+    app.include_router(marketplace_router)
     app.include_router(backups_router)
     app.include_router(jobs_router)
     app.include_router(job_logs_router)

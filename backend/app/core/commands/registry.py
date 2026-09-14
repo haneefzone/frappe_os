@@ -29,6 +29,7 @@ from app.core.commands.actions import (
     InstallAppOnSiteAction,
     InstallToolAction,
     ListBranchesAction,
+    MarketplaceInstallAction,
     MigrateAllSitesAction,
     MoveBackupAction,
     PromoteUpdateAction,
@@ -148,6 +149,12 @@ SUPERVISOR_GROUP = r"[a-z0-9][a-z0-9._-]{0,80}:\*"
 # printable ASCII + whitespace (PEM is multiline). Carried on the job as one
 # Fernet token and redacted from every log line.
 DEPLOY_KEY = r"[\s!-~]{1,10000}"
+
+# A base64-encoded JSON install plan for `site.install_marketplace_app` (DOO-1194).
+# The plan is resolved + validated (compatibility, transitive deps, cycle/conflict
+# detection) at the API layer; base64 keeps the JSON braces/quotes off the shell
+# whitelist. It is decoded in-process by MarketplaceInstallAction, never shelled.
+PLAN_B64 = r"[A-Za-z0-9+/=]{1,40000}"
 
 
 _TEMPLATES: dict[str, CommandTemplate] = {}
@@ -466,6 +473,28 @@ register(
         required_permission=APP_MANAGE,
         run_as=None,
         secret_sources={"deploy_key": "job"},
+    )
+)
+
+# Frappe app store install (DOO-1194): fetch + install a store app AND its
+# resolved dependencies, in dependency order, in ONE job locked on the site. The
+# plan is resolved/validated at the API layer and carried as one base64 param;
+# MarketplaceInstallAction reuses the same get-app/install-app connector path.
+register(
+    CommandTemplate(
+        action_name="site.install_marketplace_app",
+        argv=("true",),  # nominal; MarketplaceInstallAction drives the real steps.
+        cwd=None,
+        params=(
+            ParamSpec("site", regex=SITE_NAME),
+            ParamSpec("bench_path", regex=ABS_PATH, is_path=True),
+            ParamSpec("plan_b64", regex=PLAN_B64),
+        ),
+        action_class=MarketplaceInstallAction,
+        idempotent=False,
+        requires_lock=True,
+        required_permission=APP_MANAGE,
+        run_as=None,
     )
 )
 
