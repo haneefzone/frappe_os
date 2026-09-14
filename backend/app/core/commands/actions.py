@@ -670,11 +670,26 @@ def _register_installed_app(
     app: str,
     branch: str | None,
     version: str | None,
+    source_repo: str | None = None,
 ) -> None:
-    """Upsert the app×site matrix row after a successful install."""
+    """Upsert the app×site matrix row after a successful install.
+
+    `app_source_id` is resolved so the matrix cell links back to a real
+    `app_sources` row wherever the install fetched from a known source:
+
+    1. An explicit saved source (`source_name` param) — the app_source_id /
+       private-repo install path — links to that exact operator-configured row.
+    2. Otherwise, if we fetched from a repo/marketplace `source_repo` (the store
+       path, DOO-1227, and any raw-`source` install), get-or-create the
+       app_sources row keyed on the app module name and link it. This is what
+       kept store-install cells NULL before (they carry `source` but never a
+       `source_name`).
+    3. No source at all (an already-present marketplace app, a discovered app,
+       `frappe` core) leaves it NULL — the column is nullable by design.
+    """
     from sqlalchemy import select
 
-    from app.core.appsources import upsert_installed_app
+    from app.core.appsources import get_or_create_app_source, upsert_installed_app
     from app.models.app import AppSource
     from app.models.site import Site
 
@@ -693,6 +708,11 @@ def _register_installed_app(
         src = ctx.session.scalars(
             select(AppSource).where(AppSource.name == source_name)
         ).first()
+        source_id = src.id if src else None
+    elif source_repo:
+        src = get_or_create_app_source(
+            ctx.session, name=app, repo_url=source_repo, default_branch=branch
+        )
         source_id = src.id if src else None
 
     row = upsert_installed_app(
@@ -791,6 +811,7 @@ class InstallAppOnSiteAction(Action):
                             app=dep_app,
                             branch=dep_branch,
                             version=dep_version,
+                            source_repo=dep_source,
                         )
                         await ctx.emit(
                             f"Registered dependency {dep_app} on {site} "
@@ -816,6 +837,7 @@ class InstallAppOnSiteAction(Action):
                         app=app,
                         branch=branch,
                         version=version,
+                        source_repo=source,
                     )
                     await ctx.emit(
                         f"Registered {app} on {site} "
