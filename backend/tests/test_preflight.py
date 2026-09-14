@@ -18,7 +18,6 @@ from app.core.preflight import (
     evaluate_ports,
     evaluate_uv,
     evaluate_wkhtmltopdf,
-    login_shell,
     parse_df_avail_bytes,
     parse_mariadb_server_version,
     parse_node_major,
@@ -48,9 +47,6 @@ def test_disk_argv_builds_df_command():
     assert disk_argv("/home/frappe") == ["df", "-Pk", "/home/frappe"]
 
 
-def test_login_shell_wraps_a_fixed_probe():
-    # DOO-1189: tool probes run in a login shell so nvm/uv PATH is loaded.
-    assert login_shell(["node", "--version"]) == ["bash", "-lc", "node --version"]
 
 
 def test_disk_argv_rejects_bad_and_dotdot_paths():
@@ -222,8 +218,10 @@ def make_capture(*, uv=(0, "uv 0.5.11"), node=(0, "v24.1.0"), maria=(0, "mariadb
     async def capture(argv, *, cwd=None, timeout=120.0):
         if seen is not None:
             seen.append(list(argv))
-        # Tool probes are wrapped as ["bash","-lc","<cmd>"] (login shell); df runs
-        # direct. Unwrap so the fake can match on the inner command.
+        # DOO-1208: probes now pass *bare* argv (`["node","--version"]`); the SSH
+        # exec layer (SSHService._wrap_command) is what runs every command through
+        # the login shell, so probe and real `bench init` resolve identically. The
+        # legacy `["bash","-lc",<cmd>]` shape is still unwrapped here for safety.
         cmd = argv[2] if argv[:2] == ["bash", "-lc"] else " ".join(argv)
         head = cmd.split()[0] if cmd.split() else ""
         if head == "uv":
@@ -270,20 +268,23 @@ def test_run_preflight_low_disk_blocks():
     assert report.blocked
 
 
-def test_run_preflight_wraps_tool_probes_in_login_shell():
-    # DOO-1189: uv/node/mariadb/wkhtmltopdf run in a login shell so nvm/uv PATH
-    # is loaded; df (a system binary) runs direct.
+def test_run_preflight_probes_are_bare_argv_login_wrap_is_the_exec_layer():
+    # DOO-1208: the probes hand the exec layer *bare* argv and let
+    # SSHService._wrap_command apply the login shell, so a probe resolves its
+    # interpreter through the exact same wrapper as the `bench init` it clears.
+    # Pre-flight must NOT pre-wrap in `bash -lc` itself — that split wrapping was
+    # the divergence that let pre-flight pass while the real command failed. (The
+    # login-shell wrapping itself is asserted at the exec layer in
+    # test_server_ssh.py::test_wrap_command_runs_bench_through_login_shell.)
     seen: list[list[str]] = []
     _run(make_capture(seen=seen))
-    tool_cmds = {
-        argv[2] for argv in seen if argv[:2] == ["bash", "-lc"]
-    }
-    assert any(c.startswith("uv ") for c in tool_cmds)
-    assert any(c.startswith("node ") for c in tool_cmds)
-    assert any(c.startswith("wkhtmltopdf ") for c in tool_cmds)
-    assert any(c.startswith("mariadb ") for c in tool_cmds)
-    # df is NOT login-wrapped.
+    assert ["uv", "--version"] in seen
+    assert ["node", "--version"] in seen
+    assert ["wkhtmltopdf", "--version"] in seen
+    assert ["mariadb", "--version"] in seen
     assert ["df", "-Pk", "/home/frappe"] in seen
+    # No probe smuggles its own `bash -lc` wrapper — that belongs to the exec layer.
+    assert not any(argv[:2] == ["bash", "-lc"] for argv in seen)
 
 
 def test_run_preflight_node_via_nvm_not_falsely_blocked():

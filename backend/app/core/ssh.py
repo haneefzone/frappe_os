@@ -96,6 +96,34 @@ def host_key_string(conn: asyncssh.SSHClientConnection) -> str:
     return normalize_host_key(key.export_public_key(format_name="openssh").decode())
 
 
+def login_shell_command(command: str) -> str:
+    """Wrap a shell command string so it runs in a bash **login** shell.
+
+    An SSH `exec` channel opens a *non-login, non-interactive* shell that sources
+    none of /etc/profile, ~/.profile, ~/.bash_profile or ~/.bashrc — the files
+    where nvm, pyenv and a user-local `uv`/`~/.local/bin` put their interpreters
+    on PATH. A bare `node`/`bench` over SSH therefore reads the stale *system*
+    interpreter (or none), the exact false "Node NN is outside the matrix" / "uv
+    missing" failure that stopped `bench init` on DOO-1187/1189.
+
+    Every command the platform runs over SSH is wrapped here (see
+    `SSHService._wrap_command`), so the pre-flight probe and the real `bench init`
+    it clears resolve their interpreters through the **same** login shell — a
+    green pre-flight is a real promise about the command that will actually run
+    (DOO-1208 AC1), instead of the divergence where the probe looked through a
+    login shell and the command did not. On our target OS (Ubuntu) the login
+    profile is also what puts `~/.local/bin` (where bench/uv install) on PATH, so
+    this subsumes the old `export PATH=$HOME/.local/bin:$PATH` prefix while
+    additionally loading nvm/pyenv — and it does so identically for probe and
+    command, which the bare export never could.
+
+    Safety (golden rule 1): `command` is already composed from validated,
+    shlex-quoted argv elements; it is passed as a single `-c` argument via
+    `shlex.quote`, so no metacharacter can escape the element.
+    """
+    return "bash -lc " + shlex.quote(command)
+
+
 class SSHService:
     """Pooled AsyncSSH access to managed servers.
 
@@ -284,17 +312,28 @@ class SSHService:
 
     @staticmethod
     def _wrap_command(argv: list[str], cwd: str | None, run_as: str | None) -> str:
-        """Build the remote shell command line from a fixed argv (rule 1): argv is
-        shlex-joined; an optional `run_as` runs it as another user via `sudo -n`;
-        an optional cwd `cd`s first. No user input is ever interpolated — argv
-        elements are already validated + quoted."""
+        """Build the remote shell command line from a fixed argv (rule 1).
+
+        argv is shlex-joined; an optional cwd `cd`s first; the whole command runs
+        in a bash **login** shell (`login_shell_command`) so nvm/pyenv/uv PATH is
+        sourced — the identical interpreter resolution the pre-flight probes use,
+        so a green pre-flight is a real promise about the command that runs
+        (DOO-1208). An optional `run_as` wraps the login shell in `sudo -n` so
+        bash executes *as that user* and sources *their* profile (the bench
+        owner's nvm), not the connecting user's.
+
+        Ordering matters: `cd` sits inside the login shell (so it runs as the
+        target user with that user's PATH), and `sudo` sits outside it (so the
+        login shell itself is the target user's). No user input is ever
+        interpolated — argv elements are validated + shlex-quoted, cwd is
+        shlex-quoted, and the composed command is quoted as a single `-c` arg.
+        """
         command = shlex.join(argv)
-        if run_as:
-            command = f"sudo -n -u {shlex.quote(run_as)} -- {command}"
         if cwd is not None:
             command = f"cd {shlex.quote(cwd)} && {command}"
-        # Non-interactive SSH sessions omit ~/.local/bin; bench is always installed there
-        command = "export PATH=$HOME/.local/bin:$PATH && " + command
+        command = login_shell_command(command)
+        if run_as:
+            command = f"sudo -n -u {shlex.quote(run_as)} -- {command}"
         return command
 
     async def stream(

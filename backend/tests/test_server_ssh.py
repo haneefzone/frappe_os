@@ -5,8 +5,9 @@ import asyncio
 
 from cryptography.fernet import Fernet
 
+from app.core.preflight import NODE_ARGV, UV_ARGV
 from app.core.security import SecretsService, generate_ed25519_keypair
-from app.core.ssh import SSHService, normalize_host_key
+from app.core.ssh import SSHService, login_shell_command, normalize_host_key
 from app.models import Server, SSHCredential
 
 STORED_KEY = "ssh-ed25519 AAAAStoredKeyBase64Value"
@@ -145,3 +146,69 @@ def test_check_connection_streams_events():
     assert "os" in names
     # one "tool" event per detected tool
     assert sum(1 for n in names if n == "tool") == 8
+
+
+# --------------------------------------------------------------------------- #
+# DOO-1208: the real exec path runs every command through the bench user's
+# LOGIN shell — the same interpreter resolution the pre-flight probes clear a
+# host with — so a green pre-flight is a real promise about the command that
+# actually runs (`bench init`, `bench get-app`, the node/yarn asset build …).
+# --------------------------------------------------------------------------- #
+
+
+def test_wrap_command_runs_bench_through_login_shell():
+    # A bench command with a cwd is wrapped in a bash LOGIN shell so nvm/pyenv/uv
+    # PATH is sourced. Regression: before the fix this used a non-login
+    # `export PATH=$HOME/.local/bin:$PATH && …` that never loaded the
+    # nvm-managed node, so `bench init` ran without the node the green
+    # pre-flight had promised (a live contributor to DOO-1187).
+    cmd = SSHService._wrap_command(
+        ["bench", "init", "frappe-bench"], cwd="/home/frappe", run_as=None
+    )
+    assert cmd == "bash -lc 'cd /home/frappe && bench init frappe-bench'"
+    # The broken non-login mechanism is gone.
+    assert "export PATH=$HOME/.local/bin" not in cmd
+
+
+def test_exec_and_probe_resolve_interpreter_identically():
+    # AC1: the wrapper the real command goes through is the SAME login shell the
+    # pre-flight node/uv probe is resolved by. Prove it by construction — a bare
+    # probe argv and a bench command both come out inside `bash -lc`, and the
+    # probe's wrap equals `login_shell_command` (the one shared primitive).
+    node_exec = SSHService._wrap_command(list(NODE_ARGV), cwd=None, run_as=None)
+    assert node_exec == login_shell_command("node --version")
+    assert node_exec == "bash -lc 'node --version'"
+
+    uv_exec = SSHService._wrap_command(list(UV_ARGV), cwd=None, run_as=None)
+    assert uv_exec == login_shell_command("uv --version")
+
+    # The bench command the probe clears rides the identical login shell.
+    bench_exec = SSHService._wrap_command(["bench", "--version"], cwd=None, run_as=None)
+    assert bench_exec == "bash -lc 'bench --version'"
+
+
+def test_wrap_command_run_as_sudos_the_login_shell():
+    # When a command must run as another user, sudo wraps the login shell (so
+    # bash sources *that* user's profile — the bench owner's nvm), never the
+    # other way round.
+    cmd = SSHService._wrap_command(
+        ["bench", "build"], cwd="/home/frappe/bench", run_as="frappe"
+    )
+    assert cmd == "sudo -n -u frappe -- bash -lc 'cd /home/frappe/bench && bench build'"
+
+
+def test_ssh_run_sends_login_shell_wrapped_command_to_the_channel():
+    # End-to-end through SSHService.run: the string handed to the SSH channel is
+    # the login-shell-wrapped form, not a bare `node --version`.
+    seen: dict[str, str] = {}
+
+    class _RecordConn(_FakeConn):
+        async def run(self, command, check=False, timeout=30):
+            seen["command"] = command
+            return _FakeResult(0, "v20.11.1\n")
+
+    conn = _RecordConn(STORED_KEY, HAPPY_RESPONSES)
+    svc, _ = _service_for(conn)
+    out = asyncio.run(svc.run(conn, ["node", "--version"]))
+    assert out.exit_status == 0
+    assert seen["command"] == "bash -lc 'node --version'"

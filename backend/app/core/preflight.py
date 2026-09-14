@@ -31,7 +31,6 @@ suite is driven by a fake in tests with no SSH.
 from __future__ import annotations
 
 import re
-import shlex
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -107,24 +106,6 @@ MARIADB_SNAPSHOT_ARGV = [
     "SELECT @@global.innodb_snapshot_isolation",
 ]
 WKHTMLTOPDF_ARGV = ["wkhtmltopdf", "--version"]
-
-
-def login_shell(argv: list[str]) -> list[str]:
-    """Wrap a fixed tool probe so it runs in the bench user's **login** shell.
-
-    An SSH `exec` request (`conn.run`) runs a *non-login, non-interactive* shell,
-    which never sources `~/.profile`/`~/.bash_profile`/`~/.bashrc`. nvm, pyenv and
-    a user-local `uv`/`~/.local/bin` all put their binaries on `PATH` from those
-    files, so a bare `node --version` over SSH reads the stale *system* Node
-    instead of the nvm-managed one — the exact false "Node NN is outside the
-    matrix" block that stopped `bench init` on DOO-1189.
-
-    Safety (golden rule 1): `argv` is a developer-authored constant here (or a
-    validated path already quoted by `shlex.join`), and the whole joined command
-    is passed as a single `-c` argument, so no user input is interpolated and no
-    metacharacter can escape its element.
-    """
-    return ["bash", "-lc", shlex.join(argv)]
 
 
 def disk_argv(path: str) -> list[str]:
@@ -423,28 +404,32 @@ async def run_preflight(
             if maybe is not None:
                 await maybe
 
-    # Toolchain probes run through the bench user's login shell so nvm/pyenv/uv
-    # PATH entries are loaded (DOO-1189); `df` is a system binary and runs direct.
-    uv = await capture(login_shell(UV_ARGV))
+    # Toolchain probes are bare argv: the SSH exec layer (SSHService._wrap_command
+    # → login_shell_command) runs *every* command through the bench user's login
+    # shell, so nvm/pyenv/uv PATH is loaded here identically to the way the real
+    # `bench init` this pre-flight clears will resolve its interpreters (DOO-1208).
+    # Keeping the wrapping in one place is what makes a green pre-flight a real
+    # promise about the command that runs. `df` is a system binary either way.
+    uv = await capture(UV_ARGV)
     await record(evaluate_uv(uv.exit_code, uv.stdout, uv.stderr))
 
-    node = await capture(login_shell(NODE_ARGV))
+    node = await capture(NODE_ARGV)
     await record(evaluate_node(node.exit_code, node.stdout, entry))
 
-    maria = await capture(login_shell(MARIADB_ARGV))
+    maria = await capture(MARIADB_ARGV)
     snapshot: bool | None = None
     version = (
         parse_mariadb_server_version(maria.stdout) if maria.exit_code == 0 else None
     )
     if version and _ge(version[:2], MARIADB_SNAPSHOT_ISOLATION_FROM):
         try:
-            snap = await capture(login_shell(MARIADB_SNAPSHOT_ARGV), timeout=15.0)
+            snap = await capture(MARIADB_SNAPSHOT_ARGV, timeout=15.0)
             snapshot = parse_snapshot_isolation(snap.stdout) if snap.exit_code == 0 else None
         except Exception:
             snapshot = None  # best-effort; falls back to the advisory branch
     await record(evaluate_mariadb(maria.exit_code, maria.stdout, snapshot))
 
-    wk = await capture(login_shell(WKHTMLTOPDF_ARGV))
+    wk = await capture(WKHTMLTOPDF_ARGV)
     await record(evaluate_wkhtmltopdf(wk.exit_code, wk.stdout))
 
     await record(evaluate_ports(sibling_ports))
