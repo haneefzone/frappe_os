@@ -11,8 +11,8 @@ import asyncio
 
 import pytest
 
-from app.core.local_guard import LocalExecRefused
 from app.core import local_pty
+from app.core.local_guard import LocalExecRefused
 from app.core.local_pty import (
     LocalPtyProcess,
     local_shell_argv,
