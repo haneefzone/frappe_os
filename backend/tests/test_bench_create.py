@@ -37,11 +37,18 @@ def probe_capture(
     node=(0, "v24.1.0"),
     maria=(0, "mariadb 10.11.6"),
     wk=(0, "wkhtmltopdf 0.12.6.1 (with patched qt)"),
-    disk=(0, "Avail\n10737418240\n"),
+    disk=(0, (
+        "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+        "/dev/sda1 102400000 90000000 10485760 95% /\n"  # ~10 GiB avail (df -Pk)
+    )),
 ):
-    """Answers the six read-only pre-flight probes."""
+    """Answers the six read-only pre-flight probes. Tool probes arrive wrapped in
+    a login shell (`bash -lc <cmd>`, DOO-1189); df runs direct."""
     async def capture(argv, *, cwd=None, timeout=120.0):
-        head = argv[0]
+        cmd = argv[2] if argv[:2] == ["bash", "-lc"] else " ".join(argv)
+        head = cmd.split()[0] if cmd.split() else ""
+        if head == "mariadb" and "innodb_snapshot_isolation" in cmd:
+            return CaptureResult(0, "", "")  # snapshot query (unauthenticated)
         if head == "uv":
             return CaptureResult(uv[0], uv[1], "")
         if head == "node":
@@ -67,7 +74,9 @@ class CreateExecutor:
         self.streamed: list[list[str]] = []
 
     async def capture(self, argv, *, cwd=None, timeout=120.0):
-        if argv[0] == "bash":  # the discovery inspect script
+        # Login-shell tool probes (`bash -lc …`, DOO-1189) go to the probe fake;
+        # the discovery inspect script is `bash -c <script>`.
+        if argv[:2] == ["bash", "-c"]:  # the discovery inspect script
             return CaptureResult(0, INSPECT_NEW, "")
         if argv[:2] == ["bench", "version"]:
             return CaptureResult(0, "frappe 16.25.0", "")

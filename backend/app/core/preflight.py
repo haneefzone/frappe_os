@@ -31,6 +31,7 @@ suite is driven by a fake in tests with no SSH.
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -57,7 +58,7 @@ MIN_DISK_BYTES = 5 * 1024**3  # 5 GB
 MARIADB_SNAPSHOT_ISOLATION_FROM = (11, 6)
 
 
-CheckStatus = str  # "pass" | "warn" | "fail"
+CheckStatus = str  # "pass" | "warn" | "fail" | "error"
 
 
 @dataclass
@@ -66,7 +67,7 @@ class CheckResult:
 
     key: str
     title: str
-    status: CheckStatus  # pass | warn | fail
+    status: CheckStatus  # pass | warn | fail | error
     detail: str
     # A blocking check that failed must stop `bench init`. Warnings and passes
     # never block; a non-blocking check never sets status "fail".
@@ -74,6 +75,11 @@ class CheckResult:
 
     @property
     def is_blocking_failure(self) -> bool:
+        # Only a determinate "the host does not meet this requirement" (status
+        # "fail") on a blocking check stops `bench init`. Status "error" means
+        # the *probe itself* couldn't read a value (a platform-side read error,
+        # not a host shortfall) — it is surfaced distinctly and never blocks, so
+        # a fragile probe can't falsely gate a create the way it did on DOO-1189.
         return self.blocking and self.status == "fail"
 
     def as_dict(self) -> dict[str, object]:
@@ -103,14 +109,37 @@ MARIADB_SNAPSHOT_ARGV = [
 WKHTMLTOPDF_ARGV = ["wkhtmltopdf", "--version"]
 
 
+def login_shell(argv: list[str]) -> list[str]:
+    """Wrap a fixed tool probe so it runs in the bench user's **login** shell.
+
+    An SSH `exec` request (`conn.run`) runs a *non-login, non-interactive* shell,
+    which never sources `~/.profile`/`~/.bash_profile`/`~/.bashrc`. nvm, pyenv and
+    a user-local `uv`/`~/.local/bin` all put their binaries on `PATH` from those
+    files, so a bare `node --version` over SSH reads the stale *system* Node
+    instead of the nvm-managed one — the exact false "Node NN is outside the
+    matrix" block that stopped `bench init` on DOO-1189.
+
+    Safety (golden rule 1): `argv` is a developer-authored constant here (or a
+    validated path already quoted by `shlex.join`), and the whole joined command
+    is passed as a single `-c` argument, so no user input is interpolated and no
+    metacharacter can escape its element.
+    """
+    return ["bash", "-lc", shlex.join(argv)]
+
+
 def disk_argv(path: str) -> list[str]:
     """`df` on the bench's parent dir. Path is validated (absolute allowlist)
-    and passed as its own argv element."""
+    and passed as its own argv element.
+
+    Uses POSIX `df -Pk` (portable, one data row per filesystem, sizes in 1 KiB
+    units) rather than the GNU-only `--output=avail`, so the probe reads on the
+    widest range of hosts (DOO-1189: the old form returned nothing on the target
+    and the read-failure was mis-rendered as a host shortfall)."""
     if not PATH_RE.match(path):
         raise DiscoveryError(f"path {path!r} is not a valid absolute path")
     if has_dotdot_segment(path):
         raise DiscoveryError(f"path {path!r} must not contain '..' segments")
-    return ["df", "-B1", "--output=avail", path]
+    return ["df", "-Pk", path]
 
 
 # --------------------------------------------------------------------------- #
@@ -124,6 +153,22 @@ def parse_version_tuple(text: str) -> tuple[int, ...] | None:
     if not m:
         return None
     return tuple(int(g) for g in m.groups() if g is not None)
+
+
+def parse_mariadb_server_version(text: str) -> tuple[int, ...] | None:
+    """Extract the **server** version from `mariadb --version`.
+
+    The client tool prints *its own* version first (`Ver 15.1` / `client 15.2`)
+    and the server it was built for as a `Distrib <v>` or `from <v>` token — that
+    token is the MariaDB *server* version the gotcha-#5 gate (`innodb_snapshot_
+    isolation` on ≥ 11.6) must be evaluated against. Grabbing the first number
+    instead reads the client version — a false green that let an 11.8 server pass
+    unchecked on DOO-1189. Falls back to the first dotted token when neither
+    marker is present (older/odd builds)."""
+    m = re.search(r"(?:Distrib|from)\s+(\d+(?:\.\d+){0,2})", text)
+    if m:
+        return tuple(int(x) for x in m.group(1).split("."))
+    return parse_version_tuple(text)
 
 
 def parse_node_major(text: str) -> int | None:
@@ -149,11 +194,14 @@ def parse_snapshot_isolation(text: str) -> bool | None:
 
 
 def parse_df_avail_bytes(text: str) -> int | None:
-    """`df -B1 --output=avail` prints a header then the byte count. Return it."""
-    for line in text.splitlines():
-        s = line.strip()
-        if s.isdigit():
-            return int(s)
+    """`df -Pk` prints a header row then one data row per filesystem; the
+    Available column is POSIX field 4 (index 3), in 1 KiB units. Return it in
+    bytes from the last data row, or None if nothing parseable is present (a
+    read error → surfaced as status "error", never a host shortfall)."""
+    for line in reversed(text.strip().splitlines()):
+        parts = line.split()
+        if len(parts) >= 4 and parts[3].isdigit():
+            return int(parts[3]) * 1024
     return None
 
 
@@ -215,7 +263,8 @@ def evaluate_mariadb(
             "MariaDB client not found. Not needed for `bench init`, but site "
             "creation will need a running MariaDB ≥ 10.6.",
         )
-    version = parse_version_tuple(stdout)
+    # The *server* version (Distrib/from token), never the client tool version.
+    version = parse_mariadb_server_version(stdout)
     vtext = ".".join(map(str, version)) if version else "unknown"
     if version and _ge(version[:2], MARIADB_SNAPSHOT_ISOLATION_FROM):
         if snapshot is True:
@@ -284,9 +333,15 @@ def evaluate_ports(sibling_ports: set[int]) -> CheckResult:
 def evaluate_disk(exit_code: int, stdout: str) -> CheckResult:
     avail = parse_df_avail_bytes(stdout) if exit_code == 0 else None
     if avail is None:
+        # A probe read-error, NOT a host shortfall — status "error" so the UI
+        # shows "couldn't check" rather than "FAIL · blocks init". This never
+        # blocks `bench init` (DOO-1189: a fragile df probe was falsely gating
+        # creates and sending operators to chase disk problems that didn't exist).
         return CheckResult(
-            "disk", "Disk space", "fail",
-            "Could not read available disk space for the target path.",
+            "disk", "Disk space", "error",
+            "Could not read available disk space for the target path — this is a "
+            "platform probe error, not a host shortfall. Check that `df` works on "
+            "the path (or verify free space manually) and re-run pre-flight.",
             blocking=True,
         )
     gb = avail / 1024**3
@@ -330,10 +385,18 @@ class PreflightReport:
     def has_warnings(self) -> bool:
         return any(c.status == "warn" for c in self.checks)
 
+    @property
+    def has_errors(self) -> bool:
+        """A probe couldn't read a value it needed (platform-side read error).
+        Distinct from `blocked` (a host requirement is unmet) — surfaced so the
+        wizard can say "couldn't check" instead of "your host failed"."""
+        return any(c.status == "error" for c in self.checks)
+
     def as_dict(self) -> dict[str, object]:
         return {
             "blocked": self.blocked,
             "has_warnings": self.has_warnings,
+            "has_errors": self.has_errors,
             "checks": [c.as_dict() for c in self.checks],
         }
 
@@ -360,24 +423,28 @@ async def run_preflight(
             if maybe is not None:
                 await maybe
 
-    uv = await capture(UV_ARGV)
+    # Toolchain probes run through the bench user's login shell so nvm/pyenv/uv
+    # PATH entries are loaded (DOO-1189); `df` is a system binary and runs direct.
+    uv = await capture(login_shell(UV_ARGV))
     await record(evaluate_uv(uv.exit_code, uv.stdout, uv.stderr))
 
-    node = await capture(NODE_ARGV)
+    node = await capture(login_shell(NODE_ARGV))
     await record(evaluate_node(node.exit_code, node.stdout, entry))
 
-    maria = await capture(MARIADB_ARGV)
+    maria = await capture(login_shell(MARIADB_ARGV))
     snapshot: bool | None = None
-    version = parse_version_tuple(maria.stdout) if maria.exit_code == 0 else None
+    version = (
+        parse_mariadb_server_version(maria.stdout) if maria.exit_code == 0 else None
+    )
     if version and _ge(version[:2], MARIADB_SNAPSHOT_ISOLATION_FROM):
         try:
-            snap = await capture(MARIADB_SNAPSHOT_ARGV, timeout=15.0)
+            snap = await capture(login_shell(MARIADB_SNAPSHOT_ARGV), timeout=15.0)
             snapshot = parse_snapshot_isolation(snap.stdout) if snap.exit_code == 0 else None
         except Exception:
             snapshot = None  # best-effort; falls back to the advisory branch
     await record(evaluate_mariadb(maria.exit_code, maria.stdout, snapshot))
 
-    wk = await capture(WKHTMLTOPDF_ARGV)
+    wk = await capture(login_shell(WKHTMLTOPDF_ARGV))
     await record(evaluate_wkhtmltopdf(wk.exit_code, wk.stdout))
 
     await record(evaluate_ports(sibling_ports))

@@ -18,7 +18,9 @@ from app.core.preflight import (
     evaluate_ports,
     evaluate_uv,
     evaluate_wkhtmltopdf,
+    login_shell,
     parse_df_avail_bytes,
+    parse_mariadb_server_version,
     parse_node_major,
     parse_snapshot_isolation,
     parse_version_tuple,
@@ -28,11 +30,27 @@ from app.core.preflight import (
 )
 from app.core.version_matrix import get_entry
 
+
+def df_pk(avail_kib: int) -> str:
+    """A realistic `df -Pk <path>` output whose Available column (field 4, in
+    1 KiB units) is `avail_kib`."""
+    return (
+        "Filesystem     1024-blocks     Used Available Capacity Mounted on\n"
+        f"/dev/sda1        102400000 90000000 {avail_kib:>9} 95% /\n"
+    )
+
+
 # -- command builders -------------------------------------------------------- #
 
 
 def test_disk_argv_builds_df_command():
-    assert disk_argv("/home/frappe") == ["df", "-B1", "--output=avail", "/home/frappe"]
+    # DOO-1189: portable POSIX `df -Pk`, not the GNU-only `--output=avail`.
+    assert disk_argv("/home/frappe") == ["df", "-Pk", "/home/frappe"]
+
+
+def test_login_shell_wraps_a_fixed_probe():
+    # DOO-1189: tool probes run in a login shell so nvm/uv PATH is loaded.
+    assert login_shell(["node", "--version"]) == ["bash", "-lc", "node --version"]
 
 
 def test_disk_argv_rejects_bad_and_dotdot_paths():
@@ -49,6 +67,19 @@ def test_parse_version_tuple():
     assert parse_version_tuple("uv 0.5.11 (abc)") == (0, 5, 11)
     assert parse_version_tuple("mariadb from 11.8.2-MariaDB") == (11, 8, 2)
     assert parse_version_tuple("no numbers here") is None
+
+
+def test_parse_mariadb_server_version_reads_server_not_client():
+    # DOO-1189: the leading number is the *client* tool version; the server is
+    # the `Distrib`/`from` token. parse_version_tuple got this wrong (false green).
+    assert parse_mariadb_server_version(
+        "mariadb  Ver 15.1 Distrib 11.8.8-MariaDB, for debian-linux-gnu"
+    ) == (11, 8, 8)
+    assert parse_mariadb_server_version(
+        "mariadb from 11.8.8-MariaDB, client 15.2 for debian-linux-gnu (x86_64)"
+    ) == (11, 8, 8)
+    # No marker → fall back to the first dotted token.
+    assert parse_mariadb_server_version("mariadb 10.11.6") == (10, 11, 6)
 
 
 def test_parse_node_major():
@@ -72,8 +103,10 @@ def test_parse_snapshot_isolation():
 
 
 def test_parse_df_avail_bytes():
-    assert parse_df_avail_bytes("Avail\n10737418240\n") == 10737418240
-    assert parse_df_avail_bytes("Avail\n") is None
+    # df -Pk reports 1 KiB units; parser returns bytes from field 4 of the row.
+    assert parse_df_avail_bytes(df_pk(10 * 1024 * 1024)) == 10 * 1024 * 1024 * 1024
+    assert parse_df_avail_bytes("Filesystem 1024-blocks Used Available Capacity Mounted\n") is None
+    assert parse_df_avail_bytes("") is None
 
 
 # -- individual checks ------------------------------------------------------- #
@@ -121,6 +154,18 @@ def test_mariadb_snapshot_isolation_gotcha5():
     assert evaluate_mariadb(127, "", snapshot=None).status == "warn"
 
 
+def test_mariadb_gate_uses_server_version_not_client():
+    # DOO-1189 regression: real client output where the *client* is 15.x but the
+    # *server* is 11.8 (>= 11.6). The gotcha-#5 gate must fire on the server
+    # version — snapshot ON must warn, and the reported version must be 11.8.8,
+    # not 15.1. (Pre-fix this parsed 15.1 and never truly checked the server.)
+    client_first = "mariadb  Ver 15.1 Distrib 11.8.8-MariaDB, for debian-linux-gnu"
+    on = evaluate_mariadb(0, client_first, snapshot=True)
+    assert on.status == "warn" and "11.8.8" in on.detail
+    off = evaluate_mariadb(0, client_first, snapshot=False)
+    assert off.status == "pass" and "11.8.8" in off.detail
+
+
 def test_wkhtmltopdf_check():
     assert evaluate_wkhtmltopdf(0, "wkhtmltopdf 0.12.6.1 (with patched qt)").status == "pass"
     assert evaluate_wkhtmltopdf(0, "wkhtmltopdf 0.12.6").status == "warn"
@@ -135,10 +180,21 @@ def test_ports_conflict_is_a_warning():
 
 
 def test_disk_threshold():
-    assert evaluate_disk(0, "Avail\n6000000000\n").status == "pass"
-    low = evaluate_disk(0, "Avail\n1000000000\n")
-    assert low.status == "fail" and low.blocking
-    assert evaluate_disk(0, "Avail\n").status == "fail"
+    # 6 GiB free (> 5 GiB floor) -> pass.
+    assert evaluate_disk(0, df_pk(6 * 1024 * 1024)).status == "pass"
+    # ~1 GiB free -> a real host shortfall: blocking fail.
+    low = evaluate_disk(0, df_pk(1 * 1024 * 1024))
+    assert low.status == "fail" and low.is_blocking_failure
+
+
+def test_disk_read_error_is_error_status_not_blocking():
+    # DOO-1189: an unreadable df is a PROBE error, not a host shortfall — status
+    # "error" (distinct from "fail") and it must NOT block bench init.
+    err = evaluate_disk(0, "garbage with no avail column")
+    assert err.status == "error"
+    assert not err.is_blocking_failure
+    nonzero = evaluate_disk(1, "")
+    assert nonzero.status == "error" and not nonzero.is_blocking_failure
 
 
 def test_sibling_ports_from_benches():
@@ -159,17 +215,25 @@ def test_sibling_ports_from_benches():
 
 def make_capture(*, uv=(0, "uv 0.5.11"), node=(0, "v24.1.0"), maria=(0, "mariadb 10.11.6"),
                  snapshot=(0, ""), wk=(0, "wkhtmltopdf 0.12.6.1 (with patched qt)"),
-                 disk=(0, "Avail\n10737418240\n")):
+                 disk=None, seen=None):
+    if disk is None:
+        disk = (0, df_pk(10 * 1024 * 1024))
+
     async def capture(argv, *, cwd=None, timeout=120.0):
-        head = argv[0]
+        if seen is not None:
+            seen.append(list(argv))
+        # Tool probes are wrapped as ["bash","-lc","<cmd>"] (login shell); df runs
+        # direct. Unwrap so the fake can match on the inner command.
+        cmd = argv[2] if argv[:2] == ["bash", "-lc"] else " ".join(argv)
+        head = cmd.split()[0] if cmd.split() else ""
         if head == "uv":
             return CaptureResult(uv[0], uv[1], "")
         if head == "node":
             return CaptureResult(node[0], node[1], "")
         if head == "mariadb":
-            if "--version" in argv:
-                return CaptureResult(maria[0], maria[1], "")
-            return CaptureResult(snapshot[0], snapshot[1], "")  # the snapshot query
+            if "innodb_snapshot_isolation" in cmd:
+                return CaptureResult(snapshot[0], snapshot[1], "")  # the snapshot query
+            return CaptureResult(maria[0], maria[1], "")
         if head == "wkhtmltopdf":
             return CaptureResult(wk[0], wk[1], "")
         if head == "df":
@@ -202,8 +266,55 @@ def test_run_preflight_uv_missing_blocks():
 
 
 def test_run_preflight_low_disk_blocks():
-    report = _run(make_capture(disk=(0, "Avail\n1000000\n")))
+    report = _run(make_capture(disk=(0, df_pk(1 * 1024 * 1024))))  # ~1 GiB
     assert report.blocked
+
+
+def test_run_preflight_wraps_tool_probes_in_login_shell():
+    # DOO-1189: uv/node/mariadb/wkhtmltopdf run in a login shell so nvm/uv PATH
+    # is loaded; df (a system binary) runs direct.
+    seen: list[list[str]] = []
+    _run(make_capture(seen=seen))
+    tool_cmds = {
+        argv[2] for argv in seen if argv[:2] == ["bash", "-lc"]
+    }
+    assert any(c.startswith("uv ") for c in tool_cmds)
+    assert any(c.startswith("node ") for c in tool_cmds)
+    assert any(c.startswith("wkhtmltopdf ") for c in tool_cmds)
+    assert any(c.startswith("mariadb ") for c in tool_cmds)
+    # df is NOT login-wrapped.
+    assert ["df", "-Pk", "/home/frappe"] in seen
+
+
+def test_run_preflight_node_via_nvm_not_falsely_blocked():
+    # DOO-1189 headline regression: the login shell surfaces the nvm node (v24),
+    # so v16 is NOT blocked. (The incident: a non-login shell saw system node 20
+    # and blocked bench init, which read as "required apps not installing".)
+    report = _run(make_capture(node=(0, "v24.18.0")), frappe_major="16")
+    node = next(c for c in report.checks if c.key == "node")
+    assert node.status == "pass"
+    assert not report.blocked
+
+
+def test_run_preflight_disk_read_error_does_not_block():
+    # A broken df probe surfaces as a non-blocking "error", not a false block.
+    report = _run(make_capture(disk=(1, "")))
+    assert not report.blocked
+    assert report.has_errors
+    disk = next(c for c in report.checks if c.key == "disk")
+    assert disk.status == "error"
+
+
+def test_run_preflight_mariadb_server_version_drives_gate():
+    # Client 15.1 / server 11.8.8 with snapshot ON -> a (non-blocking) warning
+    # naming the SERVER version. Pre-fix this parsed 15.1 and skipped the check.
+    report = _run(make_capture(
+        maria=(0, "mariadb  Ver 15.1 Distrib 11.8.8-MariaDB, for debian-linux-gnu"),
+        snapshot=(0, "ON"),
+    ))
+    maria = next(c for c in report.checks if c.key == "mariadb")
+    assert maria.status == "warn" and "11.8.8" in maria.detail
+    assert not report.blocked
 
 
 def test_run_preflight_warnings_do_not_block():

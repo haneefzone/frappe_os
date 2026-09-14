@@ -172,7 +172,7 @@ async def _run_preflight_steps(ctx: JobContext):
         sibling_ports=_sibling_ports(ctx),
     )
     for result in report.checks:
-        icon = {"pass": "✓", "warn": "!", "fail": "✗"}.get(result.status, "·")
+        icon = {"pass": "✓", "warn": "!", "fail": "✗", "error": "?"}.get(result.status, "·")
         with ctx.step(result.title):
             await ctx.emit(f"[{icon}] {result.title}: {result.detail}")
     return report

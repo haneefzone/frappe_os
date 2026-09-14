@@ -151,7 +151,7 @@
                   <p class="flex items-center gap-2 text-label font-medium text-ink-1">
                     {{ c.title }}
                     <span v-if="c.status !== 'pass'" class="text-meta uppercase tracking-wide" :class="c.status === 'fail' ? 'text-err' : 'text-warn'">
-                      {{ c.status }}<span v-if="c.blocking && c.status === 'fail'"> · blocks init</span>
+                      {{ c.status === 'error' ? "couldn't check" : c.status }}<span v-if="c.blocking && c.status === 'fail'"> · blocks init</span>
                     </span>
                   </p>
                   <p class="text-meta text-ink-2">{{ c.detail }}</p>
@@ -164,6 +164,13 @@
                 role="alert"
               >
                 A blocking check failed. Fix it on the target and re-run — <code>bench init</code> will not start.
+              </p>
+              <p
+                v-else-if="report.has_errors"
+                class="rounded-lg border border-warn/40 bg-warn/10 px-4 py-3 text-label text-warn"
+              >
+                One or more checks couldn't be read (a platform probe error, not a host failure). They
+                don't block <code>bench init</code> — re-run the pre-flight, or verify those items manually.
               </p>
               <p
                 v-else-if="report.has_warnings"
@@ -191,8 +198,8 @@
               </div>
               <div class="flex justify-between px-4 py-2.5 text-label">
                 <dt class="text-ink-3">Pre-flight</dt>
-                <dd class="font-medium" :class="report && !report.blocked ? 'text-ok' : 'text-ink-3'">
-                  {{ report ? (report.blocked ? 'blocked' : report.has_warnings ? 'passed with warnings' : 'all clear') : 'not run' }}
+                <dd class="font-medium" :class="report && !report.blocked && !report.has_errors && !report.has_warnings ? 'text-ok' : 'text-ink-3'">
+                  {{ report ? (report.blocked ? 'blocked' : report.has_errors ? 'some checks unread' : report.has_warnings ? 'passed with warnings' : 'all clear') : 'not run' }}
                 </dd>
               </div>
             </dl>
@@ -304,7 +311,9 @@ const canContinue = computed(() => {
   }
 })
 
-const checkDot = (s: PreflightStatus): Status => (s === 'pass' ? 'ok' : s === 'warn' ? 'warn' : 'err')
+// 'error' (probe couldn't read) maps to the amber warn dot, not the red err dot —
+// it is a platform read-error, not "your host doesn't meet this" (DOO-1189).
+const checkDot = (s: PreflightStatus): Status => (s === 'pass' ? 'ok' : s === 'fail' ? 'err' : 'warn')
 
 // Anything that changes what the pre-flight tested invalidates the result, so a
 // stale "all clear" can never let a submit through.

@@ -57,7 +57,9 @@ export interface VersionMatrix {
   entries: VersionMatrixEntry[]
 }
 
-export type PreflightStatus = 'pass' | 'warn' | 'fail'
+// 'error' = the probe itself couldn't read a value (a platform-side read error),
+// distinct from 'fail' (the host does not meet a requirement). Never blocks init.
+export type PreflightStatus = 'pass' | 'warn' | 'fail' | 'error'
 
 /** One pre-flight probe's outcome (mirrors backend CheckResult). */
 export interface PreflightCheck {
@@ -71,6 +73,7 @@ export interface PreflightCheck {
 export interface PreflightReport {
   blocked: boolean
   has_warnings: boolean
+  has_errors?: boolean
   checks: PreflightCheck[]
 }
 
