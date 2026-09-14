@@ -47,7 +47,11 @@
                 <StatusDot :status="serverDot(s.status)" />
                 <span class="font-medium text-ink-1">{{ s.name }}</span>
                 <EnvironmentBadge :env="s.env_tag" />
-                <span class="ml-auto font-mono text-meta text-ink-3">{{ s.hostname }}</span>
+                <!-- Local: show "This machine" badge; SSH: show hostname -->
+                <span v-if="s.connection_type === 'local'" class="ml-auto rounded-full border border-line px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-ink-2">
+                  This machine
+                </span>
+                <span v-else class="ml-auto font-mono text-meta text-ink-3">{{ s.hostname }}</span>
               </label>
             </div>
           </template>

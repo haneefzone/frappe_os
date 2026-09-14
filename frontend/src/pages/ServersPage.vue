@@ -3,7 +3,7 @@
     <header class="flex items-center justify-between border-b border-line px-8 py-5">
       <div>
         <h1 class="text-lg font-semibold text-ink-1">Servers</h1>
-        <p class="text-meta text-ink-2">Managed hosts reached over SSH.</p>
+        <p class="text-meta text-ink-2">Managed hosts — remote (SSH) and local (this machine).</p>
       </div>
       <Button v-if="canManage" variant="solid" theme="gray" label="Add server" @click="sheetOpen = true">
         <template #prefix><LucidePlus class="h-4 w-4" /></template>
@@ -19,7 +19,7 @@
         :loading="loading"
         filter-placeholder="Filter servers"
         empty-title="No servers yet"
-        empty-message="Register your first Ubuntu host to start managing benches."
+        empty-message="Register your first host to start managing benches."
         height="calc(100vh - 220px)"
       >
         <template #cell-status="{ row }">
@@ -35,6 +35,15 @@
         </template>
         <template #cell-env_tag="{ row }">
           <EnvironmentBadge :env="(row as Server).env_tag" />
+        </template>
+        <!-- Show "This machine" badge for local servers instead of hostname -->
+        <template #cell-hostname="{ row }">
+          <span v-if="(row as Server).connection_type === 'local'" class="inline-flex items-center">
+            <span class="rounded-full border border-line px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-ink-2">
+              This machine
+            </span>
+          </span>
+          <span v-else class="font-mono text-meta text-ink-2">{{ (row as Server).hostname }}</span>
         </template>
         <template #cell-os_version="{ row }">
           <span class="text-ink-2">{{ (row as Server).os_version ?? '—' }}</span>
@@ -78,7 +87,7 @@ const columns: DataTableColumn<Server>[] = [
   { key: 'status', label: 'Status', width: '140px' },
   { key: 'name', label: 'Name', sortable: true },
   { key: 'env_tag', label: 'Env', width: '90px' },
-  { key: 'hostname', label: 'IP / Host', sortable: true },
+  { key: 'hostname', label: 'Host / IP', sortable: true },
   { key: 'os_version', label: 'OS' },
   { key: 'last_seen', label: 'Last seen', width: '130px' },
 ]

@@ -26,7 +26,7 @@
               <div>
                 <h2 class="text-section font-semibold text-ink-1">Add server</h2>
                 <p class="text-meta text-ink-2">
-                  {{ phase === 'form' ? 'Register a managed host and test the connection.' : created?.name }}
+                  {{ phase === 'form' ? 'Register a managed host.' : created?.name }}
                 </p>
               </div>
               <button
@@ -54,17 +54,57 @@
                 <!-- Identity -->
                 <template #step-identity>
                   <div class="space-y-4">
+                    <!-- Connection type selector: drives the rest of the form -->
+                    <div>
+                      <span class="mb-1.5 block text-meta font-medium uppercase tracking-wide text-ink-2">
+                        Connection type
+                      </span>
+                      <div class="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          class="fdm-focus rounded-lg border px-3 py-2.5 text-left transition"
+                          :class="connectionType === 'ssh'
+                            ? 'border-line-strong bg-raised text-ink-1'
+                            : 'border-line text-ink-2 hover:border-line-strong'"
+                          @click="setConnectionType('ssh')"
+                        >
+                          <span class="block text-label font-medium text-ink-1">Remote server</span>
+                          <span class="block text-meta text-ink-3">SSH — network host</span>
+                        </button>
+                        <button
+                          type="button"
+                          class="fdm-focus rounded-lg border px-3 py-2.5 text-left transition"
+                          :class="connectionType === 'local'
+                            ? 'border-line-strong bg-raised text-ink-1'
+                            : 'border-line text-ink-2 hover:border-line-strong'"
+                          @click="setConnectionType('local')"
+                        >
+                          <span class="block text-label font-medium text-ink-1">This machine</span>
+                          <span class="block text-meta text-ink-3">No SSH — FDM host itself</span>
+                        </button>
+                      </div>
+                      <!-- Safety notice for local -->
+                      <p v-if="isLocal" class="mt-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-meta text-warn">
+                        This manages the machine FDM itself runs on. A misconfigured job can take out the control panel.
+                      </p>
+                    </div>
+
                     <Field label="Name" hint="A friendly label, unique across the fleet.">
                       <input v-model.trim="form.name" v-bind="inputAttrs" placeholder="prod-web-01" />
                     </Field>
-                    <div class="flex gap-3">
-                      <Field label="Hostname or IP" class="flex-1">
-                        <input v-model.trim="form.hostname" v-bind="inputAttrs" placeholder="10.0.0.5" />
-                      </Field>
-                      <Field label="SSH port" class="w-28">
-                        <input v-model.number="form.ssh_port" type="number" min="1" max="65535" v-bind="inputAttrs" />
-                      </Field>
-                    </div>
+
+                    <!-- SSH-only: hostname + port -->
+                    <template v-if="!isLocal">
+                      <div class="flex gap-3">
+                        <Field label="Hostname or IP" class="flex-1">
+                          <input v-model.trim="form.hostname" v-bind="inputAttrs" placeholder="10.0.0.5" />
+                        </Field>
+                        <Field label="SSH port" class="w-28">
+                          <input v-model.number="form.ssh_port" type="number" min="1" max="65535" v-bind="inputAttrs" />
+                        </Field>
+                      </div>
+                    </template>
+
                     <Field label="Environment">
                       <select v-model="form.env_tag" v-bind="inputAttrs">
                         <option value="dev">Development</option>
@@ -81,7 +121,7 @@
                   </div>
                 </template>
 
-                <!-- Auth -->
+                <!-- Auth (SSH only — this step is absent for local) -->
                 <template #step-auth>
                   <div class="space-y-4">
                     <Field label="SSH username" hint="The bench owner — never root (bench refuses root).">
@@ -157,10 +197,11 @@
                 </template>
               </Wizard>
 
-              <!-- PHASE 2: install pubkey (if generated) + streamed test -->
+              <!-- PHASE 2: install pubkey (SSH + generated key only) + streamed test -->
               <div v-else class="space-y-5">
+                <!-- SSH + generated key: user must install the public key first. -->
                 <div
-                  v-if="created?.generated_public_key"
+                  v-if="!isLocal && created?.generated_public_key"
                   class="space-y-2 rounded-lg border border-line bg-surface p-3"
                 >
                   <p class="text-label font-medium text-ink-1">Install this public key on the server</p>
@@ -172,9 +213,16 @@
                   <CopyField :value="created.generated_public_key" :mono="true" />
                 </div>
 
+                <!-- Local: context reminder -->
+                <div v-if="isLocal" class="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2.5 text-meta text-warn">
+                  This server runs on the same machine as FDM. Jobs operate on this host directly — no SSH.
+                </div>
+
                 <div>
                   <div class="mb-2 flex items-center justify-between">
-                    <span class="text-label font-medium text-ink-1">Connection test</span>
+                    <span class="text-label font-medium text-ink-1">
+                      {{ isLocal ? 'Local execution test' : 'Connection test' }}
+                    </span>
                     <Button
                       v-if="!testing"
                       variant="subtle"
@@ -224,6 +272,7 @@ import {
   serversApi,
   streamServerTest,
   type CheckEvent,
+  type ConnectionType,
   type CredentialInput,
   type ServerCreated,
 } from '../api/servers'
@@ -244,10 +293,17 @@ watch(() => props.open, (open) => (open ? activate() : deactivate()), { flush: '
 type Method = 'paste' | 'upload' | 'generate' | 'password'
 type RowStatus = 'pending' | 'running' | 'ok' | 'fail' | 'skipped'
 
-const steps: WizardStep[] = [
-  { key: 'identity', label: 'Identity', description: 'What and where the server is.' },
-  { key: 'auth', label: 'Authentication', description: 'How the platform signs in.' },
-]
+const connectionType = ref<ConnectionType>('ssh')
+const isLocal = computed(() => connectionType.value === 'local')
+
+const steps = computed<WizardStep[]>(() =>
+  isLocal.value
+    ? [{ key: 'identity', label: 'Identity', description: 'What the server is.' }]
+    : [
+        { key: 'identity', label: 'Identity', description: 'What and where the server is.' },
+        { key: 'auth', label: 'Authentication', description: 'How the platform signs in.' },
+      ]
+)
 
 const methodOptions: { value: Method; label: string; hint: string }[] = [
   { value: 'paste', label: 'Paste key', hint: 'An existing private key' },
@@ -286,15 +342,26 @@ const method = ref<Method>('generate')
 const created = ref<ServerCreated | null>(null)
 
 const canContinue = computed(() => {
-  if (activeStep.value === 0) return !!form.name && !!form.hostname && form.ssh_port > 0
-  // auth step
+  if (activeStep.value === 0) {
+    if (!form.name) return false
+    if (isLocal.value) return true
+    return !!form.hostname && form.ssh_port > 0
+  }
+  // auth step (SSH only)
   if (!cred.username) return false
   if (method.value === 'generate') return true
   if (method.value === 'password') return !!cred.password
   return !!cred.private_key // paste / upload
 })
 
+function setConnectionType(type: ConnectionType) {
+  connectionType.value = type
+  activeStep.value = 0
+  formError.value = ''
+}
+
 function reset() {
+  connectionType.value = 'ssh'
   activeStep.value = 0
   phase.value = 'form'
   creating.value = false
@@ -347,20 +414,32 @@ async function onCreate() {
       .split(',')
       .map((t) => t.trim())
       .filter(Boolean)
-    const result = await serversApi.create({
-      name: form.name,
-      hostname: form.hostname,
-      ssh_port: form.ssh_port,
-      env_tag: form.env_tag,
-      tags,
-      notes: form.notes || null,
-      credential: buildCredential(),
-    })
+
+    const result = isLocal.value
+      ? await serversApi.create({
+          name: form.name,
+          connection_type: 'local',
+          env_tag: form.env_tag,
+          tags,
+          notes: form.notes || null,
+        })
+      : await serversApi.create({
+          name: form.name,
+          connection_type: 'ssh',
+          hostname: form.hostname,
+          ssh_port: form.ssh_port,
+          env_tag: form.env_tag,
+          tags,
+          notes: form.notes || null,
+          credential: buildCredential(),
+        })
+
     created.value = result
     phase.value = 'test'
-    // For a pasted/uploaded key or password we can test immediately; for a
-    // generated key the user must install the public key first, so wait.
-    if (method.value !== 'generate') runTest()
+    // Local: no key to install, run immediately.
+    // SSH + paste/upload/password: credentials already present, run immediately.
+    // SSH + generate: user must install the public key first; they click manually.
+    if (isLocal.value || method.value !== 'generate') runTest()
   } catch (error) {
     formError.value = error instanceof Error ? error.message : 'Could not create the server.'
   } finally {
@@ -368,7 +447,7 @@ async function onCreate() {
   }
 }
 
-// -- streamed connection test ------------------------------------------------
+// -- streamed connection / execution test ------------------------------------
 
 const testing = ref(false)
 const hasRun = ref(false)
@@ -380,7 +459,10 @@ const TOOL_KEYS = ['git', 'python3', 'uv', 'node', 'mariadb', 'redis-server', 'w
 
 function seedRows() {
   rows.splice(0, rows.length,
-    { key: 'ssh', label: 'SSH connection', status: 'pending', value: null },
+    // The backend emits 'ssh' first for both local and SSH servers:
+    // for local it represents "process check passes" (always ok); for SSH it's the
+    // actual connection. Use a context-appropriate label.
+    { key: 'ssh', label: isLocal.value ? 'Local process' : 'SSH connection', status: 'pending', value: null },
     { key: 'whoami', label: 'Login user', status: 'pending', value: null },
     { key: 'sudo', label: 'Passwordless sudo', status: 'pending', value: null },
     { key: 'os', label: 'Operating system', status: 'pending', value: null },

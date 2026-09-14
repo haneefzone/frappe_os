@@ -13,6 +13,14 @@
         <StatusDot v-if="server" :status="statusDot(server.status)" />
         <h1 class="truncate text-lg font-semibold text-ink-1">{{ server?.name ?? 'Server' }}</h1>
         <EnvironmentBadge v-if="server" :env="server.env_tag" />
+        <!-- Local server warning badge: this host IS the control panel -->
+        <span
+          v-if="server?.connection_type === 'local'"
+          class="shrink-0 rounded-full border border-warn/60 bg-warn/10 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-warn"
+          title="This server runs on the same machine as FDM. Actions here affect the control panel itself."
+        >
+          This machine
+        </span>
       </div>
       <div v-if="server && (canManage || canGenerateRunbook)" class="flex shrink-0 items-center gap-2">
         <Button
@@ -171,6 +179,11 @@
               />
             </div>
           </div>
+        </section>
+
+        <!-- Local server notice: persistent reminder that this host IS the control panel -->
+        <section v-if="server.connection_type === 'local'" class="rounded-lg border border-warn/40 bg-warn/10 px-4 py-3 text-label text-warn lg:col-span-2">
+          <strong>This machine</strong> — this server runs directly on the FDM host. Restarting services or running destructive jobs here affects the control panel itself.
         </section>
 
         <!-- Live monitoring: resource gauges + service health -->
@@ -665,15 +678,21 @@ async function confirmRestart() {
 const specs = computed(() => {
   const s = server.value
   if (!s) return []
+  const isLocal = s.connection_type === 'local'
   return [
     { label: 'Status', value: STATUS_LABEL[s.status] },
-    { label: 'Hostname / IP', value: s.hostname },
-    { label: 'SSH port', value: String(s.ssh_port) },
+    { label: 'Connection', value: isLocal ? 'Local (this machine)' : 'SSH' },
+    ...(isLocal ? [] : [
+      { label: 'Hostname / IP', value: s.hostname },
+      { label: 'SSH port', value: String(s.ssh_port) },
+    ]),
     { label: 'Operating system', value: s.os_version ?? '—' },
-    { label: 'SSH user', value: s.credential?.username ?? '—' },
-    { label: 'Auth', value: s.credential ? authLabel(s.credential.auth_type) : '—' },
-    { label: 'Sudo mode', value: s.credential?.sudo_mode === 'nopasswd' ? 'Passwordless' : 'None' },
-    { label: 'Host key pinned', value: s.credential?.host_key_pinned ? 'Yes' : 'No' },
+    ...(isLocal ? [] : [
+      { label: 'SSH user', value: s.credential?.username ?? '—' },
+      { label: 'Auth', value: s.credential ? authLabel(s.credential.auth_type) : '—' },
+      { label: 'Sudo mode', value: s.credential?.sudo_mode === 'nopasswd' ? 'Passwordless' : 'None' },
+      { label: 'Host key pinned', value: s.credential?.host_key_pinned ? 'Yes' : 'No' },
+    ]),
     { label: 'Tags', value: s.tags.length ? s.tags.join(', ') : '—' },
     { label: 'Last seen', value: `${relativeTime(s.last_seen)} (${absoluteTime(s.last_seen) || 'never'})` },
   ]
@@ -690,8 +709,10 @@ function dotOf(status: RowStatus): Status {
 }
 
 function seedRows() {
+  const isLocal = server.value?.connection_type === 'local'
   coreRows.splice(0, coreRows.length,
-    { key: 'ssh', label: 'SSH connection', status: 'pending', value: null },
+    // Backend emits 'ssh' first for both local and SSH; for local it's always ok.
+    { key: 'ssh', label: isLocal ? 'Local process' : 'SSH connection', status: 'pending', value: null },
     { key: 'whoami', label: 'Login user', status: 'pending', value: null },
     { key: 'sudo', label: 'Passwordless sudo', status: 'pending', value: null },
     { key: 'os', label: 'Operating system', status: 'pending', value: null },
