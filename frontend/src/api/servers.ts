@@ -11,6 +11,8 @@ export type EnvTag = 'prod' | 'staging' | 'dev'
 export type AuthType = 'key' | 'password'
 export type SudoMode = 'nopasswd' | 'none'
 export type ServerStatus = 'unknown' | 'online' | 'offline' | 'error'
+/** How the platform reaches this host (DOO-1199 / DOO-1196). */
+export type ConnectionType = 'ssh' | 'local'
 
 export interface CredentialInfo {
   username: string
@@ -24,6 +26,8 @@ export interface CredentialInfo {
 export interface Server {
   id: number
   name: string
+  /** 'local' = the machine FDM itself runs on; 'ssh' = remote host reached over SSH. */
+  connection_type: ConnectionType
   hostname: string
   ssh_port: number
   os_version: string | null
@@ -56,12 +60,16 @@ export interface CredentialInput {
 
 export interface ServerCreatePayload {
   name: string
-  hostname: string
-  ssh_port: number
+  connection_type: ConnectionType
+  /** Required for SSH; omitted/null for local (recorded as 'localhost' server-side). */
+  hostname?: string | null
+  /** Defaults to 22; not applicable for local. */
+  ssh_port?: number
   env_tag: EnvTag
   tags: string[]
   notes?: string | null
-  credential: CredentialInput
+  /** Required for SSH; must be omitted for local. */
+  credential?: CredentialInput | null
   /** Write-only: the host's MariaDB root password (empty string clears it). */
   mariadb_root_password?: string | null
 }
@@ -128,6 +136,7 @@ export interface BackupsRollup {
 export interface ServerDashboard {
   server_id: number
   name: string
+  connection_type: ConnectionType
   hostname: string
   env_tag: EnvTag
   status: ServerStatus
