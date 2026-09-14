@@ -11,6 +11,7 @@ from app.core.discovery import DiscoveryError
 from app.core.jobs import CaptureResult
 from app.core.preflight import (
     DEFAULT_BENCH_PORTS,
+    classify_mariadb_auth,
     disk_argv,
     evaluate_disk,
     evaluate_mariadb,
@@ -18,11 +19,15 @@ from app.core.preflight import (
     evaluate_ports,
     evaluate_uv,
     evaluate_wkhtmltopdf,
+    grants_allow_create_database,
+    mariadb_admin_auth_argv,
+    mariadb_admin_nopw_argv,
     parse_df_avail_bytes,
     parse_mariadb_server_version,
     parse_node_major,
     parse_snapshot_isolation,
     parse_version_tuple,
+    probe_mariadb_admin,
     run_preflight,
     sibling_ports_from_benches,
     wkhtmltopdf_is_patched,
@@ -335,3 +340,137 @@ def test_run_preflight_queries_snapshot_isolation_when_mariadb_new():
     maria = next(c for c in report.checks if c.key == "mariadb")
     assert maria.status == "warn"
     assert not report.blocked
+
+
+# -- MariaDB admin-login probe (DOO-1237) ------------------------------------ #
+#
+# `bench new-site` creates the site DB via pymysql over TCP as root. DOO-1232
+# proved three distinct outcomes on the target: (a) 1045 wrong/no valid
+# password, (b) 1698 unix_socket-only account unreachable over TCP, (c) the
+# probe can't run at all. The probe must name (a)/(b) as blocking fails and
+# treat (c) as a non-blocking "error" (the df read-error rule), never gating a
+# create on a broken/absent client.
+
+# A realistic `SHOW GRANTS` line for a full admin (what a healthy root returns).
+GRANT_ALL = "GRANT ALL PRIVILEGES ON *.* TO `root`@`%` IDENTIFIED BY PASSWORD '*abc'"
+# Error strings the mariadb client prints (code appears in the message).
+ERR_1698 = "ERROR 1698 (28000): Access denied for user 'root'@'localhost'"
+ERR_1045 = "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)"
+ERR_2002 = "ERROR 2002 (HY000): Can't connect to server on '127.0.0.1'"
+
+
+def test_mariadb_admin_argv_connects_over_tcp_with_password():
+    # Password is `-p<pw>` (no space), its own argv element; TCP host/port are
+    # explicit so the probe mirrors pymysql, not the socket default.
+    argv = mariadb_admin_auth_argv("root", "s3cret", host="127.0.0.1", port=3306)
+    assert argv[0] == "mariadb"
+    assert "-h" in argv and "127.0.0.1" in argv
+    assert "-P" in argv and "3306" in argv
+    assert "-proot".replace("root", "s3cret") == "-ps3cret"
+    assert "-ps3cret" in argv
+    assert "SHOW GRANTS FOR CURRENT_USER()" in argv
+    # No `bash -lc` wrapper — that belongs to the exec layer (DOO-1208).
+    assert argv[:2] != ["bash", "-lc"]
+
+
+def test_mariadb_admin_nopw_argv_has_no_password_flag():
+    argv = mariadb_admin_nopw_argv("root")
+    assert not any(a.startswith("-p") for a in argv)  # an empty -p would prompt/hang
+    assert "SELECT 1" in argv
+
+
+def test_classify_mariadb_auth_states():
+    assert classify_mariadb_auth(0, "GRANT ...", "") == "ok"
+    assert classify_mariadb_auth(1, "", ERR_1698) == "socket_plugin"
+    assert classify_mariadb_auth(1, "", ERR_1045) == "denied"
+    # Anything without a 1045/1698 verdict → cannot_run (never gates a create).
+    assert classify_mariadb_auth(1, "", ERR_2002) == "cannot_run"
+    assert classify_mariadb_auth(127, "", "mariadb: command not found") == "cannot_run"
+
+
+def test_grants_allow_create_database():
+    assert grants_allow_create_database(GRANT_ALL)
+    assert grants_allow_create_database("GRANT SELECT, CREATE, DROP ON *.* TO `x`@`%`")
+    # CREATE VIEW / CREATE ROUTINE are NOT the CREATE DATABASE privilege.
+    assert not grants_allow_create_database("GRANT SELECT, CREATE VIEW ON *.* TO `x`@`%`")
+    # CREATE on a single schema is not the global privilege bench needs.
+    assert not grants_allow_create_database("GRANT ALL PRIVILEGES ON `mydb`.* TO `x`@`%`")
+    assert not grants_allow_create_database("")
+
+
+def _admin_capture(*, auth, nopw=None):
+    """Fake capture for the admin probe: `auth` is the (exit, stdout, stderr) the
+    password connection returns; `nopw` (optional) the no-password re-probe."""
+    async def capture(argv, *, cwd=None, timeout=120.0):
+        query = argv[-1]
+        if query == "SELECT 1":  # the no-password disambiguation probe
+            assert nopw is not None, "no-password probe not expected"
+            return CaptureResult(*nopw)
+        return CaptureResult(*auth)
+    return capture
+
+
+def _probe(**kw):
+    return asyncio.run(probe_mariadb_admin(**kw))
+
+
+def test_probe_admin_pass_when_authenticated_with_create():
+    r = _probe(capture=_admin_capture(auth=(0, GRANT_ALL, "")), password="pw")
+    assert r.key == "mariadb_admin" and r.status == "pass"
+    assert not r.is_blocking_failure and r.blocking
+
+
+def test_probe_admin_authenticated_but_no_create_priv_blocks():
+    r = _probe(
+        capture=_admin_capture(auth=(0, "GRANT SELECT ON *.* TO `root`@`%`", "")),
+        password="pw",
+    )
+    assert r.status == "fail" and r.is_blocking_failure
+    assert "CREATE DATABASE" in r.detail
+
+
+def test_probe_admin_socket_plugin_1698_blocks_state_b():
+    # (b) unix_socket-only account: 1698 straight off the password probe.
+    r = _probe(capture=_admin_capture(auth=(1, "", ERR_1698)), password="pw")
+    assert r.status == "fail" and r.is_blocking_failure
+    assert "1698" in r.detail and "unix_socket" in r.detail
+    assert "IDENTIFIED VIA mysql_native_password" in r.detail  # actionable remedy
+
+
+def test_probe_admin_wrong_password_1045_blocks_state_a():
+    # (a) wrong password: 1045 with the password AND 1045 without it (a real
+    # password account rejecting the value) → "wrong password", not unix_socket.
+    r = _probe(
+        capture=_admin_capture(auth=(1, "", ERR_1045), nopw=(1, "", ERR_1045)),
+        password="wrong",
+    )
+    assert r.status == "fail" and r.is_blocking_failure
+    assert "1045" in r.detail and "password" in r.detail.lower()
+
+
+def test_probe_admin_1045_with_password_but_1698_without_is_socket_plugin():
+    # DOO-1232's exact box: password probe → 1045, no-password probe → 1698. The
+    # account is unix_socket-only; report state (b), not "wrong password".
+    r = _probe(
+        capture=_admin_capture(auth=(1, "", ERR_1045), nopw=(1, "", ERR_1698)),
+        password="root",
+    )
+    assert r.status == "fail" and r.is_blocking_failure
+    assert "1698" in r.detail and "unix_socket" in r.detail
+
+
+def test_probe_admin_cannot_run_is_error_not_blocking_state_c():
+    # (c) connection refused / client missing → non-blocking "error" (never gates
+    # a create), same shape as the df read-error fix.
+    r = _probe(capture=_admin_capture(auth=(1, "", ERR_2002)), password="pw")
+    assert r.status == "error"
+    assert not r.is_blocking_failure
+    r2 = _probe(capture=_admin_capture(auth=(127, "", "command not found")), password="pw")
+    assert r2.status == "error" and not r2.is_blocking_failure
+
+
+def test_probe_admin_capture_exception_is_error_not_blocking():
+    async def boom(argv, *, cwd=None, timeout=120.0):
+        raise RuntimeError("ssh channel died")
+    r = asyncio.run(probe_mariadb_admin(boom, password="pw"))
+    assert r.status == "error" and not r.is_blocking_failure

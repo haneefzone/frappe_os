@@ -382,6 +382,7 @@ class CreateSiteAction(Action):
     async def run(self, ctx: JobContext) -> None:
         from app.core import discovery
         from app.core.commands import get_template, render
+        from app.core.preflight import probe_mariadb_admin
 
         params = ctx.rendered.params_sanitized
         secrets = ctx.rendered.secret_map
@@ -405,6 +406,25 @@ class CreateSiteAction(Action):
                 "bench_path": bench_path,
             },
         )
+
+        # 2) DB-admin reachability gate (DOO-1237). `bench new-site` creates the
+        #    site database via pymysql over TCP as root; if root@localhost is
+        #    unix_socket-only (1698) or the stored admin password is wrong (1045),
+        #    that surfaces as an opaque pymysql traceback at DB-setup time. Probe
+        #    the *same* TCP path first, through the login-shell exec layer, and
+        #    fail with a named, actionable message instead. A probe that can't run
+        #    (status "error") never blocks — same rule as the df read-error fix.
+        ctx.register_secret(secrets["db_root_pw"])
+        with ctx.step("Check MariaDB admin login"):
+            db_check = await probe_mariadb_admin(
+                ctx.capture, password=secrets["db_root_pw"]
+            )
+            icon = {"pass": "✓", "warn": "!", "fail": "✗", "error": "?"}.get(
+                db_check.status, "·"
+            )
+            await ctx.emit(f"[{icon}] {db_check.title}: {db_check.detail}")
+            if db_check.is_blocking_failure:
+                raise RuntimeError(db_check.detail)
 
         started_redis = False
         try:
