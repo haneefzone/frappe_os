@@ -202,3 +202,134 @@ is_schema_drift_error() {
     printf '%s' "$1" | grep -qiE \
         'DuplicateColumn|DuplicateTable|DuplicateObject|psycopg2?\.errors\.Duplicate|already exists'
 }
+
+# ---------------------------------------------------------------------------
+# DOO-1205 — service-management helpers shared by install.sh and the `fdm` CLI.
+#
+# These live here (not copy-pasted into bin/fdm) so the installer and the CLI
+# drive the SAME nohup lifecycle: pidfiles at $FDM_HOME/run/{api,worker}.pid,
+# logs at $FDM_HOME/logs/{api,worker}.log, and the exact graceful-then-SIGKILL
+# stop the installer's start_bg has always used. A `fdm stop` that killed
+# differently from how install.sh replaces a stale process would be a subtle
+# split-brain; funnelling both through one function prevents that. Kept pure
+# (functions only, side effects only when called) so tests/install can source
+# and exercise them without root, apt, or systemd.
+
+# fdm_default_home IS_ROOT — echo the default FDM_HOME for a root(1)/non-root(0)
+# install, mirroring install.sh's rule (/opt/fdm-platform as root, else
+# ~/.local/share/fdm-platform). An explicit FDM_HOME env override is applied by
+# the caller BEFORE falling back to this; this is only the default.
+fdm_default_home() {
+    if [ "${1:-0}" -eq 1 ]; then
+        printf '/opt/fdm-platform'
+    else
+        printf '%s/.local/share/fdm-platform' "$HOME"
+    fi
+}
+
+# fdm_pid_running PIDFILE — if PIDFILE names a live process, print its PID and
+# return 0; otherwise print nothing and return 1. A stale pidfile (process gone)
+# is treated as not-running so callers can replace it.
+fdm_pid_running() {
+    local pidfile="$1" pid
+    [ -f "$pidfile" ] || return 1
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    [ -n "$pid" ] || return 1
+    if kill -0 "$pid" 2>/dev/null; then
+        printf '%s' "$pid"
+        return 0
+    fi
+    return 1
+}
+
+# fdm_stop_pid PID [TIMEOUT] — stop PID gracefully: SIGTERM, wait up to TIMEOUT
+# seconds (default 15) for it to exit, then SIGKILL. This is exactly the replace
+# logic install.sh:start_bg has always used for a stale pidfile; `fdm stop`
+# reuses it so an operator stop and an installer restart behave identically. The
+# worker's units carry TimeoutStopSec=30 because bench init/update jobs are long
+# — callers stopping the worker pass 30 to match. Best-effort: returns 0 even if
+# PID is empty or already gone.
+fdm_stop_pid() {
+    local pid="$1" timeout="${2:-15}"
+    [ -n "$pid" ] || return 0
+    kill -0 "$pid" 2>/dev/null || return 0
+    kill "$pid" 2>/dev/null || true
+    local _i
+    for _i in $(seq 1 "$timeout"); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+    done
+    kill -9 "$pid" 2>/dev/null || true
+    return 0
+}
+
+# fdm_start_bg IS_ROOT RUN_USER BACKEND_DIR FDM_HOME NAME -- CMD... — nohup a
+# service from BACKEND_DIR, tracking its pid at FDM_HOME/run/NAME.pid and logging
+# to FDM_HOME/logs/NAME.log. Graceful-replaces any existing instance first (via
+# fdm_stop_pid), so it is idempotent. Root runs drop to RUN_USER via runuser with
+# a minimal env, mirroring install.sh's as_fdm. Returns 0 on success, 1 if the
+# process dies within 2s of starting (caller reports the log path).
+fdm_start_bg() {
+    local is_root="$1" run_user="$2" backend_dir="$3" home="$4" name="$5"; shift 5
+    [ "${1:-}" = "--" ] && shift
+    local pidfile="$home/run/$name.pid"
+    if [ -f "$pidfile" ]; then
+        fdm_stop_pid "$(cat "$pidfile" 2>/dev/null || true)" 15
+    fi
+    mkdir -p "$home/run" "$home/logs"
+    if [ "$is_root" -eq 1 ]; then
+        nohup runuser -u "$run_user" -- env -C "$backend_dir" \
+            HOME="$home" PATH="/usr/local/bin:/usr/bin:/bin" "$@" \
+            >"$home/logs/$name.log" 2>&1 &
+    else
+        nohup env -C "$backend_dir" "$@" >"$home/logs/$name.log" 2>&1 &
+    fi
+    echo $! > "$pidfile"
+    sleep 2
+    kill -0 "$(cat "$pidfile")" 2>/dev/null || return 1
+    return 0
+}
+
+# fdm_port_from_unit FILE — parse the uvicorn `--port N` out of a systemd unit's
+# ExecStart line; print nothing when FILE is absent or has no --port. Lets the
+# CLI recover the port a systemd install actually serves on without the operator
+# re-supplying FDM_PORT.
+fdm_port_from_unit() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    sed -n 's/.*--port \([0-9][0-9]*\).*/\1/p' "$file" | head -1
+}
+
+# fdm_update_ff_state DIR BRANCH — classify whether DIR (a git checkout of the
+# FDM code) can be safely fast-forwarded to origin/BRANCH, for `fdm update`.
+# Prints exactly one token; NEVER fetches (the caller fetches first so this stays
+# a pure, testable inspection):
+#   no-git      git is unavailable
+#   not-a-repo  DIR has no .git (installed via rsync/curl-clone-then-artifacts)
+#   no-origin   origin/BRANCH is unknown (never fetched / wrong branch)
+#   dirty       TRACKED files are modified — refuse rather than clobber edits.
+#               Untracked build artifacts (.venv, dist, .env, logs) are IGNORED:
+#               an in-tree install is untracked-dirty by construction, so keying
+#               on them would make update refuse forever.
+#   diverged    HEAD is not an ancestor of origin/BRANCH — a non-fast-forward;
+#               refuse rather than force local commits away.
+#   up-to-date  HEAD already equals origin/BRANCH
+#   clean-ff    a clean fast-forward is available
+fdm_update_ff_state() {
+    local dir="$1" branch="${2:-main}"
+    command -v git >/dev/null 2>&1 || { printf 'no-git'; return 0; }
+    [ -d "$dir/.git" ] || { printf 'not-a-repo'; return 0; }
+    if [ -n "$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+        printf 'dirty'; return 0
+    fi
+    local head origin
+    head="$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo '')"
+    origin="$(git -C "$dir" rev-parse "origin/$branch" 2>/dev/null || echo '')"
+    [ -n "$origin" ] || { printf 'no-origin'; return 0; }
+    [ "$head" = "$origin" ] && { printf 'up-to-date'; return 0; }
+    if git -C "$dir" merge-base --is-ancestor HEAD "origin/$branch" 2>/dev/null; then
+        printf 'clean-ff'
+    else
+        printf 'diverged'
+    fi
+}

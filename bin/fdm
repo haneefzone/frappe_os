@@ -1,0 +1,447 @@
+#!/usr/bin/env bash
+# FDM Platform — operator CLI (DOO-1205 / parent DOO-1204).
+#
+#   fdm start          run the API in the foreground (Ctrl-C stops it)
+#   fdm start --bg     start api + worker in the background
+#   fdm stop           stop both background services
+#   fdm restart        restart both services
+#   fdm status         show mode, paths, per-service state, git HEAD, health
+#   fdm logs           tail the API log (--worker / --all, -n N, --no-follow)
+#   fdm update         fast-forward the checkout and re-run the installer
+#   fdm --version      print the checkout version + git HEAD
+#   fdm --help         usage
+#
+# WHY A SHELL SCRIPT (not a Python console_script): the CLI must be able to
+# `stop` and `status` even when the backend venv or database is broken — which
+# is exactly when a Python entrypoint would fail to import. It shells out to the
+# venv only for the verbs that genuinely need the app (start/update).
+#
+# It manages TWO services in whichever mode the install actually uses:
+#   • systemd mode  — units fdm-api.service + fdm-worker.service (root install)
+#   • nohup mode    — pidfiles/logs under $FDM_HOME/{run,logs} (non-root / no
+#                     systemd), driven through install-lib.sh's shared helpers so
+#                     start/stop match install.sh exactly.
+# Every verb acts on BOTH services: a stop that left the RQ worker running would
+# strand long bench init/update jobs.
+set -uo pipefail
+
+PROG="fdm"
+
+log()  { printf '\033[1;36m[fdm]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[fdm] WARN:\033[0m %s\n' "$*" >&2; }
+err()  { printf '\033[1;31m[fdm] ERROR:\033[0m %s\n' "$*" >&2; }
+
+# ---------------------------------------------------------------- resolve paths
+IS_ROOT=0; [ "$(id -u)" -eq 0 ] && IS_ROOT=1
+
+# Resolve FDM_HOME the same way install.sh does, with the SAME precedence:
+#   1. an explicit FDM_HOME env override always wins;
+#   2. else self-locate from the script's real path — the shim ships at
+#      $FDM_HOME/bin/fdm (and /usr/local/bin/fdm is a symlink to it), so
+#      resolving symlinks and walking up one dir recovers a custom FDM_HOME
+#      without the operator re-exporting it;
+#   3. else fall back to install.sh's root/non-root default.
+if [ -z "${FDM_HOME:-}" ]; then
+    _self="$0"
+    if command -v readlink >/dev/null 2>&1; then
+        _self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+    fi
+    _selfdir="$(cd "$(dirname "$_self")" 2>/dev/null && pwd || echo '')"
+    _cand="$(dirname "$_selfdir")"
+    if [ -n "$_selfdir" ] && [ -f "$_cand/install-lib.sh" ] && [ -d "$_cand/backend" ]; then
+        FDM_HOME="$_cand"
+    fi
+fi
+
+# Source install-lib for the shared helpers. Try the resolved FDM_HOME first,
+# then the script's own tree (covers running straight from a checkout).
+_lib=""
+if [ -n "${FDM_HOME:-}" ] && [ -f "$FDM_HOME/install-lib.sh" ]; then
+    _lib="$FDM_HOME/install-lib.sh"
+elif [ -n "${_cand:-}" ] && [ -f "${_cand:-}/install-lib.sh" ]; then
+    _lib="$_cand/install-lib.sh"
+fi
+if [ -z "$_lib" ]; then
+    err "cannot locate install-lib.sh (looked under FDM_HOME='${FDM_HOME:-unset}'). Set FDM_HOME to your install directory."
+    exit 1
+fi
+# shellcheck source=/dev/null
+. "$_lib"
+
+FDM_HOME="${FDM_HOME:-$(fdm_default_home "$IS_ROOT")}"
+BACKEND_DIR="$FDM_HOME/backend"
+FRONTEND_DIR="$FDM_HOME/frontend"
+ENV_FILE="$BACKEND_DIR/.env"
+RUN_DIR="$FDM_HOME/run"
+LOG_DIR="$FDM_HOME/logs"
+API_PIDFILE="$RUN_DIR/api.pid"
+WORKER_PIDFILE="$RUN_DIR/worker.pid"
+API_UNIT="/etc/systemd/system/fdm-api.service"
+WORKER_UNIT="/etc/systemd/system/fdm-worker.service"
+RUN_USER="fdm"; [ "$IS_ROOT" -eq 1 ] || RUN_USER="$(id -un)"
+FDM_BRANCH="${FDM_BRANCH:-main}"
+
+UVICORN="$BACKEND_DIR/.venv/bin/uvicorn"
+RQ="$BACKEND_DIR/.venv/bin/rq"
+
+# env_get KEY — read KEY=... from $ENV_FILE (first hit). Empty if absent.
+env_get() {
+    [ -f "$ENV_FILE" ] || return 0
+    (grep -E "^$1=" "$ENV_FILE" || true) | head -1 | cut -d= -f2-
+}
+
+REDIS_URL_EFFECTIVE="$(env_get REDIS_URL)"; REDIS_URL_EFFECTIVE="${REDIS_URL_EFFECTIVE:-${FDM_REDIS_URL:-redis://127.0.0.1:6379/0}}"
+
+# -------------------------------------------------------------- mode + port
+# detect_mode — the ACTIVE runtime mode, detected by artifact (which install.sh
+# actually produced), not merely by capability. FDM_MODE overrides (for tests /
+# unusual setups). systemd mode requires both systemctl AND an installed unit;
+# otherwise nohup. This means running `fdm` as root on a box where the install
+# was nohup still dispatches to nohup (no unit present), which is correct.
+detect_mode() {
+    if [ -n "${FDM_MODE:-}" ]; then printf '%s' "$FDM_MODE"; return; fi
+    if command -v systemctl >/dev/null 2>&1 && [ -f "$API_UNIT" ]; then
+        printf 'systemd'
+    else
+        printf 'nohup'
+    fi
+}
+
+# resolve_port — the port the API serves on. FDM_PORT env wins; else read it
+# from the systemd unit (authoritative for a systemd install); else from the
+# running nohup process's cmdline; else the install default 8000.
+resolve_port() {
+    if [ -n "${FDM_PORT:-}" ]; then printf '%s' "$FDM_PORT"; return; fi
+    local p=""
+    p="$(fdm_port_from_unit "$API_UNIT")"
+    if [ -z "$p" ]; then
+        local pid; pid="$(fdm_pid_running "$API_PIDFILE" || true)"
+        if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
+            p="$(tr '\0' ' ' < "/proc/$pid/cmdline" | sed -n 's/.*--port \([0-9][0-9]*\).*/\1/p')"
+        fi
+    fi
+    printf '%s' "${p:-8000}"
+}
+
+# port_bound PORT — true if something is already listening on 127.0.0.1:PORT.
+port_bound() {
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&- 3<&-; return 0; } || return 1
+}
+
+# systemd_active UNIT — true if the unit is active (installed + running).
+systemd_active() {
+    systemctl is-active --quiet "$1" 2>/dev/null
+}
+
+# ---------------------------------------------------------------- verbs
+
+usage() {
+    cat <<EOF
+$PROG — manage the FDM Platform server (api + worker).
+
+Usage: $PROG <command> [options]
+
+Commands:
+  start [--bg]     run the API in the foreground (default), or start api+worker
+                   in the background with --bg
+  stop             stop both background services (graceful, then SIGKILL)
+  restart          restart both services
+  status           show mode, paths, per-service state, git HEAD, /api/health
+                   (exits non-zero when unhealthy — scriptable)
+  logs [opts]      follow the API log
+                     --worker      the worker log instead
+                     --all         both logs interleaved
+                     -n, --lines N last N lines (default 200 when following)
+                     --no-follow   print and exit instead of following
+  update           fast-forward the checkout to origin/$FDM_BRANCH and re-run the
+                   installer (refuses on a dirty or diverged checkout)
+  status, logs, stop work even when the backend venv/DB is broken.
+
+Global:
+  --help, -h       this help
+  --version, -V    print the checkout version + git HEAD
+
+Environment: FDM_HOME (install dir), FDM_PORT (HTTP port), FDM_BRANCH,
+             FDM_MODE=systemd|nohup (force a mode).
+Resolved:    FDM_HOME=$FDM_HOME  mode=$(detect_mode)  port=$(resolve_port)
+EOF
+}
+
+cmd_version() {
+    local ver head
+    ver="$( (grep -E '^version' "$BACKEND_DIR/pyproject.toml" 2>/dev/null || true) | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+    head="$(git -C "$FDM_HOME" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+    printf 'FDM Platform %s (%s)\n' "${ver:-unknown}" "$head"
+}
+
+# run a command from BACKEND_DIR as the service user (root drops to RUN_USER).
+as_fdm_exec() {
+    if [ "$IS_ROOT" -eq 1 ]; then
+        exec runuser -u "$RUN_USER" -- env -C "$BACKEND_DIR" \
+            HOME="$FDM_HOME" PATH="/usr/local/bin:/usr/bin:/bin" "$@"
+    else
+        exec env -C "$BACKEND_DIR" "$@"
+    fi
+}
+
+cmd_start() {
+    local bg=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --bg|--background) bg=1 ;;
+            -h|--help) usage; return 0 ;;
+            *) err "start: unknown option '$1'"; return 2 ;;
+        esac
+        shift
+    done
+    local mode; mode="$(detect_mode)"
+    local port; port="$(resolve_port)"
+
+    if [ "$bg" -eq 1 ]; then
+        # ---- background (AC2): idempotent start of both services ----
+        if [ "$mode" = systemd ]; then
+            log "Starting fdm-api + fdm-worker via systemd…"
+            systemctl start fdm-api.service fdm-worker.service || {
+                err "systemctl start failed"; return 1; }
+            log "Started. Check: $PROG status"
+            return 0
+        fi
+        # nohup mode
+        local api_pid worker_pid
+        api_pid="$(fdm_pid_running "$API_PIDFILE" || true)"
+        worker_pid="$(fdm_pid_running "$WORKER_PIDFILE" || true)"
+        if [ -n "$api_pid" ] && [ -n "$worker_pid" ]; then
+            log "Already running (api pid $api_pid, worker pid $worker_pid) — nothing to do."
+            return 0
+        fi
+        [ -x "$UVICORN" ] || { err "uvicorn not found at $UVICORN — is the backend installed?"; return 1; }
+        [ -x "$RQ" ]      || { err "rq not found at $RQ — is the backend installed?"; return 1; }
+        mkdir -p "$RUN_DIR" "$LOG_DIR"
+        log "Starting api (uvicorn :$port) + worker (rq) in the background (logs in $LOG_DIR)…"
+        fdm_start_bg "$IS_ROOT" "$RUN_USER" "$BACKEND_DIR" "$FDM_HOME" api \
+            -- "$UVICORN" app.main:app --host 0.0.0.0 --port "$port" \
+            || { err "api exited right after start — see $LOG_DIR/api.log"; return 1; }
+        fdm_start_bg "$IS_ROOT" "$RUN_USER" "$BACKEND_DIR" "$FDM_HOME" worker \
+            -- "$RQ" worker --url "$REDIS_URL_EFFECTIVE" high default low \
+            || { err "worker exited right after start — see $LOG_DIR/worker.log"; return 1; }
+        log "Started (api pid $(cat "$API_PIDFILE" 2>/dev/null), worker pid $(cat "$WORKER_PIDFILE" 2>/dev/null)). Check: $PROG status"
+        return 0
+    fi
+
+    # ---- foreground (AC1): API only, in this terminal ----
+    # A foreground run is one process attached to the tty; it runs the API only.
+    # Background jobs (bench init/update) are NOT processed until a worker runs —
+    # start one with `fdm start --bg` or run the worker in another terminal.
+    if [ "$mode" = systemd ] && systemd_active fdm-api.service; then
+        err "fdm-api is already running under systemd. Stop it first ($PROG stop) or use $PROG status."
+        return 1
+    fi
+    if [ -n "$(fdm_pid_running "$API_PIDFILE" || true)" ]; then
+        err "a background api instance is already running (pid $(cat "$API_PIDFILE")). Stop it first ($PROG stop)."
+        return 1
+    fi
+    if port_bound "$port"; then
+        err "port $port is already bound — refusing to race for it. Something is already serving on :$port."
+        return 1
+    fi
+    [ -x "$UVICORN" ] || { err "uvicorn not found at $UVICORN — is the backend installed?"; return 1; }
+    warn "Foreground mode runs the API only. Background jobs need a worker: run '$PROG start --bg' or 'cd $BACKEND_DIR && .venv/bin/rq worker --url <redis> high default low' elsewhere."
+    log "Starting API in the foreground on :$port (Ctrl-C to stop)…"
+    as_fdm_exec "$UVICORN" app.main:app --host 0.0.0.0 --port "$port"
+}
+
+cmd_stop() {
+    local mode; mode="$(detect_mode)"
+    if [ "$mode" = systemd ]; then
+        log "Stopping fdm-worker + fdm-api via systemd…"
+        systemctl stop fdm-worker.service fdm-api.service || {
+            err "systemctl stop failed"; return 1; }
+        log "Stopped."
+        return 0
+    fi
+    # nohup: stop worker first (it may hold a long job; give it the unit's 30s),
+    # then the api. Clear pidfiles. Idempotent — no-op when already stopped.
+    local stopped=0
+    local wpid; wpid="$(fdm_pid_running "$WORKER_PIDFILE" || true)"
+    if [ -n "$wpid" ]; then
+        log "Stopping worker (pid $wpid)…"; fdm_stop_pid "$wpid" 30; stopped=1
+    fi
+    rm -f "$WORKER_PIDFILE"
+    local apid; apid="$(fdm_pid_running "$API_PIDFILE" || true)"
+    if [ -n "$apid" ]; then
+        log "Stopping api (pid $apid)…"; fdm_stop_pid "$apid" 15; stopped=1
+    fi
+    rm -f "$API_PIDFILE"
+    [ "$stopped" -eq 1 ] && log "Stopped." || log "Already stopped — nothing to do."
+    return 0
+}
+
+cmd_restart() {
+    local mode; mode="$(detect_mode)"
+    if [ "$mode" = systemd ]; then
+        log "Restarting fdm-api + fdm-worker via systemd…"
+        systemctl restart fdm-api.service fdm-worker.service || {
+            err "systemctl restart failed"; return 1; }
+        log "Restarted."
+        return 0
+    fi
+    cmd_stop
+    cmd_start --bg
+}
+
+# service_state — echo a one-line state for a service in the active mode.
+#   nohup: "running (pid N)" | "stopped"
+#   systemd: the raw unit ActiveState (active/inactive/failed/…)
+service_state() {
+    local mode="$1" name="$2" pidfile="$3" unit="$4"
+    if [ "$mode" = systemd ]; then
+        printf '%s' "$(systemctl is-active "$unit" 2>/dev/null || echo unknown)"
+    else
+        local pid; pid="$(fdm_pid_running "$pidfile" || true)"
+        [ -n "$pid" ] && printf 'running (pid %s)' "$pid" || printf 'stopped'
+    fi
+}
+
+cmd_status() {
+    local mode port head health rc=0
+    mode="$(detect_mode)"
+    port="$(resolve_port)"
+    head="$(git -C "$FDM_HOME" rev-parse --short HEAD 2>/dev/null || echo 'unknown (not a git checkout)')"
+    local api_state worker_state
+    api_state="$(service_state "$mode" api "$API_PIDFILE" fdm-api.service)"
+    worker_state="$(service_state "$mode" worker "$WORKER_PIDFILE" fdm-worker.service)"
+
+    printf 'FDM Platform status\n'
+    printf '  mode:      %s\n' "$mode"
+    printf '  FDM_HOME:  %s\n' "$FDM_HOME"
+    printf '  port:      %s\n' "$port"
+    printf '  git HEAD:  %s\n' "$head"
+    printf '  api:       %s\n' "$api_state"
+    printf '  worker:    %s\n' "$worker_state"
+
+    health="$(curl -fsS "http://127.0.0.1:$port/api/health" 2>/dev/null || true)"
+    if printf '%s' "$health" | grep -q '"status":"ok"'; then
+        printf '  health:    ok  %s\n' "$health"
+    else
+        printf '  health:    UNHEALTHY (no ok from http://127.0.0.1:%s/api/health)\n' "$port"
+        rc=1
+    fi
+    # A stopped/failed service is also unhealthy for scripting purposes.
+    case "$api_state" in running*|active) : ;; *) rc=1 ;; esac
+    case "$worker_state" in running*|active) : ;; *) rc=1 ;; esac
+    return $rc
+}
+
+cmd_logs() {
+    local which=api follow=1 lines="" all=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --worker) which=worker ;;
+            --api)    which=api ;;
+            --all)    all=1 ;;
+            --no-follow) follow=0 ;;
+            -n|--lines) shift; lines="${1:-}"; [ -n "$lines" ] || { err "logs: -n needs a number"; return 2; } ;;
+            -h|--help) usage; return 0 ;;
+            *) err "logs: unknown option '$1'"; return 2 ;;
+        esac
+        shift
+    done
+    local mode; mode="$(detect_mode)"
+    if [ "$mode" = systemd ]; then
+        local units=(-u fdm-api.service)
+        [ "$which" = worker ] && units=(-u fdm-worker.service)
+        [ "$all" -eq 1 ] && units=(-u fdm-api.service -u fdm-worker.service)
+        local args=("${units[@]}")
+        [ -n "$lines" ] && args+=(-n "$lines")
+        [ "$follow" -eq 1 ] && args+=(-f)
+        exec journalctl "${args[@]}"
+    fi
+    # nohup: tail the real api.log / worker.log (DOO-1205 note 5 — the ticket's
+    # log name from another product does not exist; do not fabricate it).
+    local files=()
+    if [ "$all" -eq 1 ]; then
+        files=("$LOG_DIR/api.log" "$LOG_DIR/worker.log")
+    elif [ "$which" = worker ]; then
+        files=("$LOG_DIR/worker.log")
+    else
+        files=("$LOG_DIR/api.log")
+    fi
+    local present=()
+    local f
+    for f in "${files[@]}"; do
+        if [ -f "$f" ]; then present+=("$f"); else warn "no log yet at $f"; fi
+    done
+    [ "${#present[@]}" -gt 0 ] || { err "no log files found under $LOG_DIR — has the server started?"; return 1; }
+    local n="${lines:-200}"
+    if [ "$follow" -eq 1 ]; then
+        exec tail -n "$n" -f "${present[@]}"
+    else
+        exec tail -n "$n" "${present[@]}"
+    fi
+}
+
+cmd_update() {
+    # AC7: wrap the idempotent installer. Never hand-roll git pull + alembic —
+    # the installer carries the honest ERR trap, is_schema_drift_error,
+    # recovery_cmd and checkout_is_behind warnings (DOO-1155/1169/1174/1175).
+    # We only (a) fast-forward the checkout ourselves — the in-tree installer
+    # takes its "skipping code sync" branch and would NOT pull — and (b) re-run
+    # the installer, surfacing its recovery message verbatim on failure.
+    if [ -d "$FDM_HOME/.git" ]; then
+        log "Fetching origin/$FDM_BRANCH…"
+        git -C "$FDM_HOME" fetch --quiet origin "$FDM_BRANCH" 2>/dev/null \
+            || warn "git fetch failed (offline?) — proceeding with the current checkout state."
+        local state; state="$(fdm_update_ff_state "$FDM_HOME" "$FDM_BRANCH")"
+        case "$state" in
+            dirty)
+                err "refusing to update: the checkout at $FDM_HOME has uncommitted changes to tracked files. Commit or discard them first (git -C $FDM_HOME status), then re-run '$PROG update'."
+                return 1 ;;
+            diverged)
+                err "refusing to update: HEAD has diverged from origin/$FDM_BRANCH (a non-fast-forward). This would need a merge/rebase or a reset you should do deliberately — '$PROG update' will not clobber local commits. Inspect: git -C $FDM_HOME log --oneline origin/$FDM_BRANCH..HEAD"
+                return 1 ;;
+            no-origin)
+                warn "origin/$FDM_BRANCH is unknown (fetch may have failed) — re-running the installer against the current checkout without a fast-forward." ;;
+            up-to-date)
+                log "Checkout already at origin/$FDM_BRANCH — re-running the installer to reconcile deps/migrations (idempotent)." ;;
+            clean-ff)
+                log "Fast-forwarding $FDM_HOME to origin/$FDM_BRANCH…"
+                git -C "$FDM_HOME" merge --ff-only "origin/$FDM_BRANCH" >/dev/null \
+                    || { err "fast-forward failed unexpectedly — resolve manually and re-run."; return 1; } ;;
+            *)  warn "checkout is not a normal git tree ($state) — re-running the installer as-is." ;;
+        esac
+        log "Re-running the installer ($FDM_HOME/install.sh)…"
+        [ -f "$FDM_HOME/install.sh" ] || { err "install.sh missing from $FDM_HOME — cannot update."; return 1; }
+        bash "$FDM_HOME/install.sh"
+        local rc=$?
+        [ "$rc" -eq 0 ] && log "Update complete." || err "installer exited $rc — see its recovery message above."
+        return $rc
+    fi
+
+    # No .git (rsync/curl install left build artifacts, not a repo): the only
+    # honest update is to re-fetch the canonical installer, which pulls fresh
+    # code and is immune to on-disk checkout age (DOO-1174).
+    warn "$FDM_HOME is not a git checkout — updating via the canonical installer from origin/$FDM_BRANCH."
+    local sudo_pfx=""; [ "$IS_ROOT" -eq 1 ] || sudo_pfx=""
+    log "Fetching + running https://raw.githubusercontent.com/haneefzone/frappe_os/$FDM_BRANCH/install.sh …"
+    curl -fsSL "https://raw.githubusercontent.com/haneefzone/frappe_os/$FDM_BRANCH/install.sh" | bash
+    local rc=$?
+    [ "$rc" -eq 0 ] && log "Update complete." || err "installer exited $rc — see its recovery message above."
+    return $rc
+}
+
+# ---------------------------------------------------------------- dispatch
+[ $# -ge 1 ] || { usage; exit 0; }
+
+# Normalise the verb: lowercase so 'fdm Update' works too (DOO-1205 note).
+verb="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"; shift
+case "$verb" in
+    start)    cmd_start "$@" ;;
+    stop)     cmd_stop "$@" ;;
+    restart)  cmd_restart "$@" ;;
+    status)   cmd_status "$@" ;;
+    logs|log) cmd_logs "$@" ;;
+    update)   cmd_update "$@" ;;
+    -h|--help|help) usage ;;
+    -v|-V|--version|version) cmd_version ;;
+    *) err "unknown command '$verb'"; echo >&2; usage >&2; exit 2 ;;
+esac

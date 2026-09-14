@@ -507,28 +507,11 @@ EOF
 
 start_bg() {
     # start_bg <name> <cmd...> — nohup a service from $BACKEND_DIR as the
-    # service user, tracking the pid so re-runs replace the old process.
+    # service user, tracking the pid so re-runs replace the old process. The
+    # lifecycle (graceful-replace, pidfile, log path) lives in install-lib.sh so
+    # the `fdm` CLI's start/stop drive the identical logic (DOO-1205).
     local name="$1"; shift
-    local pidfile="$FDM_HOME/run/$name.pid"
-    if [ -f "$pidfile" ]; then
-        local old_pid; old_pid="$(cat "$pidfile")"
-        kill "$old_pid" 2>/dev/null || true
-        for _ in $(seq 1 15); do
-            kill -0 "$old_pid" 2>/dev/null || break
-            sleep 1
-        done
-        kill -9 "$old_pid" 2>/dev/null || true
-    fi
-    if [ "$IS_ROOT" -eq 1 ]; then
-        nohup runuser -u "$RUN_USER" -- env -C "$BACKEND_DIR" \
-            HOME="$FDM_HOME" PATH="/usr/local/bin:/usr/bin:/bin" "$@" \
-            >"$FDM_HOME/logs/$name.log" 2>&1 &
-    else
-        nohup env -C "$BACKEND_DIR" "$@" >"$FDM_HOME/logs/$name.log" 2>&1 &
-    fi
-    echo $! > "$pidfile"
-    sleep 2
-    kill -0 "$(cat "$pidfile")" 2>/dev/null \
+    fdm_start_bg "$IS_ROOT" "$RUN_USER" "$BACKEND_DIR" "$FDM_HOME" "$name" -- "$@" \
         || die "Service '$name' exited right after start — see $FDM_HOME/logs/$name.log"
 }
 
@@ -541,6 +524,31 @@ start_services_nohup() {
 }
 
 if [ "$HAVE_SYSTEMD" -eq 1 ]; then start_services_systemd; else start_services_nohup; fi
+
+# ------------------------------------------------------------------ fdm CLI
+# DOO-1205: put the `fdm` operator CLI on PATH so start/stop/restart/status/logs/
+# update work without memorising systemctl/installer invocations. The CLI itself
+# ships in the tree at $FDM_HOME/bin/fdm (synced above); here we only make it
+# reachable. Idempotent: the root symlink is replaced in place (never duplicated)
+# and the non-root shim is already in the tree.
+install_cli() {
+    local shim="$FDM_HOME/bin/fdm"
+    [ -f "$shim" ] || { warn "bin/fdm missing from the checkout — skipping CLI install."; return 0; }
+    chmod 0755 "$shim" 2>/dev/null || true
+    if [ "$IS_ROOT" -eq 1 ]; then
+        chown "$RUN_USER:$RUN_USER" "$shim" 2>/dev/null || true
+        # symlink (not copy) so a code sync keeps the CLI current; -f replaces an
+        # existing link/file in place, so re-running never duplicates it.
+        if ln -sfn "$shim" /usr/local/bin/fdm 2>/dev/null; then
+            log "Installed CLI: /usr/local/bin/fdm -> $shim"
+        else
+            warn "Could not symlink /usr/local/bin/fdm — run it directly as $shim"
+        fi
+    else
+        log "CLI available at $shim (add its dir to PATH to call it as 'fdm')."
+    fi
+}
+install_cli
 
 # ------------------------------------------------------------- health check
 log "Waiting for the API to come up on :$FDM_PORT…"
@@ -583,13 +591,16 @@ else
 fi
 echo
 echo "  Config:       $ENV_FILE"
-if [ "$HAVE_SYSTEMD" -eq 1 ]; then
-    echo "  Services:     systemctl status fdm-api fdm-worker"
-    echo "  Logs:         journalctl -u fdm-api -f"
+# DOO-1205: advertise the `fdm` CLI instead of raw systemctl/journalctl lines.
+if [ "$IS_ROOT" -eq 1 ]; then
+    echo "  Manage:       fdm status | fdm logs | fdm restart | fdm stop"
 else
-    echo "  Services:     nohup (dev mode) — logs in $FDM_HOME/logs/"
+    echo "  Manage:       $FDM_HOME/bin/fdm status | logs | restart | stop"
+    echo "                (add '$FDM_HOME/bin' to PATH to call it as 'fdm':"
+    echo "                   export PATH=\"$FDM_HOME/bin:\$PATH\")"
 fi
-echo "  Upgrade:      re-run this installer (idempotent)"
+echo "  Services:     api + worker ($([ "$HAVE_SYSTEMD" -eq 1 ] && echo systemd || echo 'nohup dev mode'))"
+echo "  Upgrade:      fdm update   (or re-run this installer — idempotent)"
 echo "  Reset admin:  cd $BACKEND_DIR && .venv/bin/python -m app.seed \\"
 echo "                    --admin-email <email> --admin-password <new-password>"
 echo

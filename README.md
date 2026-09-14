@@ -43,6 +43,35 @@ The install serves plain HTTP; before exposing it beyond a trusted network,
 put it behind an HTTPS reverse proxy and set `COOKIE_SECURE=true` in the
 generated `backend/.env`.
 
+## Operating the server (`fdm` CLI)
+
+The installer puts an `fdm` command on `PATH` (`/usr/local/bin/fdm` for root
+installs; under `$FDM_HOME/bin/fdm` otherwise — add that dir to `PATH`). It
+manages **both** services — the API (`fdm-api`, uvicorn) and the job worker
+(`fdm-worker`, RQ) — in whichever mode the install uses: `systemd` for root
+installs, `nohup` (pidfiles + logs under `$FDM_HOME/{run,logs}`) otherwise.
+
+| Command | What it does |
+|---|---|
+| `fdm start` | Run the API in the **foreground** (Ctrl-C stops it). API only — start a worker separately for background jobs. |
+| `fdm start --bg` | Start api **and** worker in the background (idempotent). |
+| `fdm stop` | Stop **both** services — graceful, then SIGKILL after a bounded wait. |
+| `fdm restart` | Restart both; survives one service already being down. |
+| `fdm status` | Mode, `FDM_HOME`, port, git HEAD, per-service state, and live `/api/health`. Exits non-zero when unhealthy (scriptable). |
+| `fdm logs` | Follow the API log. `--worker`, `--all`, `-n/--lines N`, `--no-follow`. |
+| `fdm update` | Fast-forward the checkout to `origin/main` and re-run the **idempotent installer**. Refuses on a dirty or diverged checkout rather than clobbering. |
+| `fdm --version` | Print the checkout version + git HEAD. |
+| `fdm --help` | Usage. |
+
+`status`, `logs`, and `stop` are pure shell and keep working even when the
+backend venv or database is broken — exactly when you need them most.
+Overrides: `FDM_HOME`, `FDM_PORT`, `FDM_BRANCH`, and `FDM_MODE=systemd|nohup`.
+
+`fdm update` deliberately wraps `install.sh` instead of hand-rolling
+`git pull` + `alembic upgrade`: the installer carries the honest migration
+error trap, schema-drift detection, and stale-checkout recovery advice that a
+raw pull would lose.
+
 Everything below is the **development** setup.
 
 ## Prerequisites
