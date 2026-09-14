@@ -24,6 +24,8 @@ export interface MarketplaceApp {
   reason: string | null
   /** Latest release version compatible with the target bench. */
   latest_compatible_version: string | null
+  /** True when this app is already installed on the target site/bench. */
+  installed: boolean
 }
 
 export interface MarketplaceRelease {

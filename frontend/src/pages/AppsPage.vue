@@ -282,7 +282,11 @@
                 <div class="flex flex-wrap items-center gap-2">
                   <span class="truncate font-medium text-ink-1">{{ app.title }}</span>
                   <span
-                    v-if="app.is_installable === true"
+                    v-if="app.installed"
+                    class="flex-none rounded-full border border-line bg-raised px-1.5 py-0.5 text-meta font-medium text-ink-3"
+                  >Installed</span>
+                  <span
+                    v-else-if="app.is_installable === true"
                     class="flex-none rounded-full border border-ok/40 bg-ok/10 px-1.5 py-0.5 text-meta font-medium text-ok"
                   >{{ app.latest_compatible_version ?? 'Compatible' }}</span>
                   <span
@@ -574,12 +578,16 @@
                       installSiteId == null ||
                       installing ||
                       detailLoading ||
-                      detail?.is_installable === false
+                      detail?.is_installable === false ||
+                      !!detail?.installed
                     "
                     @click="submitInstall"
                   />
                 </div>
-                <p v-if="detail?.is_installable === false" class="mt-2 text-meta text-warn">
+                <p v-if="detail?.installed" class="mt-2 text-meta text-ink-3">
+                  This app is already installed on the selected bench.
+                </p>
+                <p v-else-if="detail?.is_installable === false" class="mt-2 text-meta text-warn">
                   This app is not installable on the selected bench — switch to a compatible bench to enable install.
                 </p>
               </footer>
@@ -749,6 +757,7 @@ const filteredCatalog = computed(() =>
       return true
     })
     .sort((a, b) => {
+      if (a.installed !== b.installed) return a.installed ? -1 : 1
       if (b.stars !== a.stars) return b.stars - a.stars
       return a.title.localeCompare(b.title)
     }),
