@@ -75,6 +75,32 @@ def test_create_session_no_credential(client, db_session, seeded_users):
     assert resp.status_code == 422
 
 
+def test_create_session_local_server_no_credential(client, db_session, seeded_users):
+    """A local server (DOO-1203) has no SSH credential — the terminal is a local
+    PTY, so session-create succeeds and labels the audit row with the service
+    account user instead of 422-ing on the missing credential."""
+    from app.core.local_guard import current_user
+    from app.models import Server
+
+    server = Server(name="localhost-box", connection_type="local", hostname="localhost")
+    db_session.add(server)
+    db_session.commit()
+    db_session.refresh(server)
+
+    login(client, "developer@example.com")
+    with patch("app.api.routes.terminal._store_ticket", new_callable=AsyncMock):
+        resp = client.post(
+            "/api/terminal/sessions",
+            json={"server_id": server.id},
+            headers=csrf_headers(client),
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["server_name"] == "localhost-box"
+    assert body["ssh_username"] == current_user()
+    assert body["ticket"]
+
+
 # ---------------------------------------------------------------------------
 # Ticket helpers (unit-tested via direct import, no network).
 # ---------------------------------------------------------------------------

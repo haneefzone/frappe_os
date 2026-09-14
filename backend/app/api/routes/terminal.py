@@ -39,6 +39,8 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import require
 from app.config import get_settings
+from app.core.local_guard import LocalExecRefused, current_user
+from app.core.local_pty import open_local_pty
 from app.core.permissions import TERMINAL_ACCESS
 from app.core.security import get_secrets_service
 from app.core.ssh import host_key_string, normalize_host_key
@@ -134,14 +136,19 @@ async def create_terminal_session(
     ).first()
     if server is None:
         raise HTTPException(status_code=404, detail="Server not found.")
+    # A local server (DOO-1199) runs on the FDM host itself: no SSH credential,
+    # the shell is the service account. The credential precondition applies only
+    # to ssh servers; the "username" is then just the audit label (DOO-1203).
+    is_local = getattr(server, "connection_type", "ssh") == "local"
     cred: SSHCredential | None = server.credential
-    if cred is None:
+    if not is_local and cred is None:
         raise HTTPException(status_code=422, detail="Server has no SSH credential configured.")
+    ssh_username = cred.username if cred is not None else current_user()
 
     session = TerminalSession(
         server_id=server.id,
         user_id=user.id,
-        ssh_username=cred.username,
+        ssh_username=ssh_username,
         status="open",
         started_at=datetime.now(UTC),
     )
@@ -156,7 +163,7 @@ async def create_terminal_session(
         session_id=session.id,
         ticket=ticket,
         server_name=server.name,
-        ssh_username=cred.username,
+        ssh_username=ssh_username,
         ticket_ttl_seconds=get_settings().terminal_ticket_ttl_seconds,
     )
 
@@ -236,6 +243,120 @@ def _finalize(session_id: int, reason: str, started_at: datetime) -> None:
             db.commit()
 
 
+async def _bridge_pty(
+    websocket: WebSocket,
+    process,
+    *,
+    idle_timeout: int,
+    init_command: str | None = None,
+) -> str:
+    """Bidirectional byte bridge between the WebSocket and a PTY `process`.
+
+    Shared by the SSH and local backends (DOO-1203): `process` need only present
+    the slice of the AsyncSSH process interface used here — `stdin.write(bytes)`,
+    an async-iterable `stdout`, `change_terminal_size(cols, rows)` and
+    `terminate()`. Returns the close reason for the audit row. The logic is the
+    FDM 1.5 SSH bridge verbatim, extracted so the SSH path is unchanged.
+    """
+    warn_at = idle_timeout - _WARN_BEFORE_SECONDS
+    close_reason = "disconnected"
+
+    # Scoped AI-agent session (5.1): drop into the jailed working dir and launch
+    # the registered agent command. Server-built line only.
+    if init_command:
+        process.stdin.write((init_command + "\n").encode("utf-8"))
+
+    idle_timer = asyncio.get_running_loop().time()
+    warned = False
+
+    async def read_pty() -> None:
+        """Relay bytes from the PTY → WebSocket."""
+        nonlocal close_reason
+        try:
+            async for chunk in process.stdout:
+                if isinstance(chunk, str):
+                    await websocket.send_bytes(chunk.encode("utf-8", errors="replace"))
+                else:
+                    await websocket.send_bytes(chunk)
+        except asyncssh.misc.DisconnectError:
+            close_reason = "ssh_disconnect"
+        except Exception:
+            close_reason = "pty_error"
+
+    pty_reader = asyncio.create_task(read_pty())
+
+    try:
+        while True:
+            # Idle check: how long since last keypress?
+            elapsed = asyncio.get_running_loop().time() - idle_timer
+
+            remaining = idle_timeout - elapsed
+            if remaining <= 0:
+                warning = (
+                    b"\r\n\x1b[33m[FDM] Session idle timeout."
+                    b" Closing connection.\x1b[0m\r\n"
+                )
+                await websocket.send_bytes(warning)
+                close_reason = "idle_timeout"
+                break
+
+            if not warned and elapsed >= warn_at:
+                warn_msg = (
+                    f"\r\n\x1b[33m[FDM] Idle for {warn_at}s. "
+                    f"Session closes in {_WARN_BEFORE_SECONDS}s of inactivity.\x1b[0m\r\n"
+                )
+                await websocket.send_bytes(warn_msg.encode())
+                # Text control frame so the UI badge/indicator can react.
+                await websocket.send_text(
+                    json.dumps({
+                        "type": "idle_warning",
+                        "remaining_seconds": _WARN_BEFORE_SECONDS,
+                    })
+                )
+                warned = True
+
+            # Wait for a WS message with a poll interval so idle timer fires.
+            try:
+                data = await asyncio.wait_for(
+                    websocket.receive(),
+                    timeout=min(remaining, 5.0),
+                )
+            except TimeoutError:
+                continue
+
+            # Client disconnect.
+            if data["type"] == "websocket.disconnect":
+                close_reason = "client_disconnect"
+                break
+
+            # Bytes = raw terminal input; pass as-is (encoding=None on process).
+            if data.get("bytes"):
+                idle_timer = asyncio.get_running_loop().time()
+                warned = False
+                process.stdin.write(data["bytes"])
+
+            # Text = control JSON {"type":"resize","cols":N,"rows":N}
+            elif data.get("text"):
+                try:
+                    msg = json.loads(data["text"])
+                except (ValueError, TypeError):
+                    continue
+                if msg.get("type") == "resize":
+                    cols = int(msg.get("cols", 80))
+                    rows = int(msg.get("rows", 24))
+                    process.change_terminal_size(cols, rows)
+
+    finally:
+        pty_reader.cancel()
+        try:
+            await pty_reader
+        except (asyncio.CancelledError, Exception):
+            pass
+        process.terminate()
+
+    return close_reason
+
+
 @router.websocket("/ws")
 async def terminal_ws(websocket: WebSocket, ticket: str | None = None) -> None:
     """WebSocket bridge: ticket → SSH PTY → bidirectional byte bridge."""
@@ -267,31 +388,40 @@ async def terminal_ws(websocket: WebSocket, ticket: str | None = None) -> None:
         if server is None:
             await websocket.close(code=4004, reason="server not found")
             return
+        # A local server (DOO-1199) has no SSH credential — its terminal is a
+        # local PTY, not an SSH channel. Only the ssh path needs a credential.
+        is_local = getattr(server, "connection_type", "ssh") == "local"
         cred = server.credential
-        if cred is None:
-            await websocket.close(code=4004, reason="no credential")
-            return
 
-        # Decrypt secrets now, before the db session closes.
-        secrets_svc = get_secrets_service()
-        connect_options: dict = {
-            "host": server.hostname,
-            "port": server.ssh_port,
-            "username": cred.username,
-            "known_hosts": None,
-        }
-        if cred.auth_type == "password":
-            connect_options["password"] = secrets_svc.decrypt(cred.password_enc or "")
-        else:
-            passphrase = secrets_svc.decrypt(cred.passphrase_enc) if cred.passphrase_enc else None
-            private_key = asyncssh.import_private_key(
-                secrets_svc.decrypt(cred.private_key_enc or ""), passphrase
-            )
-            connect_options["client_keys"] = [private_key]
+        connect_options: dict | None = None
+        known_host_key: str | None = None
+        cred_id: int | None = None
+        if not is_local:
+            if cred is None:
+                await websocket.close(code=4004, reason="no credential")
+                return
+            # Decrypt secrets now, before the db session closes.
+            secrets_svc = get_secrets_service()
+            connect_options = {
+                "host": server.hostname,
+                "port": server.ssh_port,
+                "username": cred.username,
+                "known_hosts": None,
+            }
+            if cred.auth_type == "password":
+                connect_options["password"] = secrets_svc.decrypt(cred.password_enc or "")
+            else:
+                passphrase = (
+                    secrets_svc.decrypt(cred.passphrase_enc) if cred.passphrase_enc else None
+                )
+                private_key = asyncssh.import_private_key(
+                    secrets_svc.decrypt(cred.private_key_enc or ""), passphrase
+                )
+                connect_options["client_keys"] = [private_key]
 
-        # Snapshot host-key state for B2 pinning check (must happen before db closes).
-        known_host_key: str | None = cred.known_host_key
-        cred_id: int = cred.id
+            # Snapshot host-key state for B2 pinning check (before db closes).
+            known_host_key = cred.known_host_key
+            cred_id = cred.id
 
         # Snapshot what we need from the session row.
         session_row = db.get(TerminalSession, session_id)
@@ -299,128 +429,59 @@ async def terminal_ws(websocket: WebSocket, ticket: str | None = None) -> None:
 
     settings = get_settings()
     idle_timeout = settings.terminal_idle_timeout_seconds
-    warn_at = idle_timeout - _WARN_BEFORE_SECONDS
 
     close_reason = "disconnected"
+    # Server-built jail launch line for a scoped AI-agent session (5.1); None for
+    # a plain shell. Written to the PTY on connect by the shared bridge.
+    init_command = payload.get("init_command")
 
     try:
-        # 4) Open AsyncSSH connection with host-key pinning (mirrors SSHService._open).
-        async with asyncssh.connect(**connect_options) as ssh_conn:
-            presented = host_key_string(ssh_conn)
-            if known_host_key:
-                if not hmac.compare_digest(
-                    normalize_host_key(known_host_key), presented
-                ):
-                    await websocket.close(code=4004, reason="host key mismatch")
-                    await asyncio.to_thread(_finalize, session_id, "host_key_mismatch", started_at)
-                    return
-            else:
-                # First connect: pin the key (trust-on-first-use, same as SSHService).
-                with SessionLocal() as pin_db:
-                    cred_row = pin_db.get(SSHCredential, cred_id)
-                    if cred_row is not None and not cred_row.known_host_key:
-                        cred_row.known_host_key = presented
-                        pin_db.commit()
-
-            process = await ssh_conn.create_process(
-                term_type="xterm-256color",
-                request_pty=True,
-                encoding=None,
-            )
-
-            # Scoped AI-agent session (5.1): drop into the jailed working dir and
-            # launch the registered agent command. Server-built line only.
-            init_command = payload.get("init_command")
-            if init_command:
-                process.stdin.write((init_command + "\n").encode("utf-8"))
-
-            idle_timer = asyncio.get_running_loop().time()
-            warned = False
-
-            async def read_pty() -> None:
-                """Relay bytes from SSH PTY → WebSocket."""
-                nonlocal close_reason
-                try:
-                    async for chunk in process.stdout:
-                        if isinstance(chunk, str):
-                            await websocket.send_bytes(chunk.encode("utf-8", errors="replace"))
-                        else:
-                            await websocket.send_bytes(chunk)
-                except asyncssh.misc.DisconnectError:
-                    close_reason = "ssh_disconnect"
-                except Exception:
-                    close_reason = "pty_error"
-
-            pty_reader = asyncio.create_task(read_pty())
-
+        if is_local:
+            # 4a) Local branch (DOO-1203): an interactive PTY on the FDM host as
+            #     the service account. No SSH, no host key. Trust model:
+            #     docs/local-pty-terminal-trust-model.md.
             try:
-                while True:
-                    # Idle check: how long since last keypress?
-                    elapsed = asyncio.get_running_loop().time() - idle_timer
-
-                    remaining = idle_timeout - elapsed
-                    if remaining <= 0:
-                        warning = (
-                            b"\r\n\x1b[33m[FDM] Session idle timeout."
-                            b" Closing connection.\x1b[0m\r\n"
-                        )
-                        await websocket.send_bytes(warning)
-                        close_reason = "idle_timeout"
-                        break
-
-                    if not warned and elapsed >= warn_at:
-                        warn_msg = (
-                            f"\r\n\x1b[33m[FDM] Idle for {warn_at}s. "
-                            f"Session closes in {_WARN_BEFORE_SECONDS}s of inactivity.\x1b[0m\r\n"
-                        )
-                        await websocket.send_bytes(warn_msg.encode())
-                        # Text control frame so the UI badge/indicator can react.
-                        await websocket.send_text(
-                            json.dumps({
-                                "type": "idle_warning",
-                                "remaining_seconds": _WARN_BEFORE_SECONDS,
-                            })
-                        )
-                        warned = True
-
-                    # Wait for a WS message with a poll interval so idle timer fires.
-                    try:
-                        data = await asyncio.wait_for(
-                            websocket.receive(),
-                            timeout=min(remaining, 5.0),
-                        )
-                    except TimeoutError:
-                        continue
-
-                    # Client disconnect.
-                    if data["type"] == "websocket.disconnect":
-                        close_reason = "client_disconnect"
-                        break
-
-                    # Bytes = raw terminal input; pass as-is (encoding=None on process).
-                    if data.get("bytes"):
-                        idle_timer = asyncio.get_running_loop().time()
-                        warned = False
-                        process.stdin.write(data["bytes"])
-
-                    # Text = control JSON {"type":"resize","cols":N,"rows":N}
-                    elif data.get("text"):
-                        try:
-                            msg = json.loads(data["text"])
-                        except (ValueError, TypeError):
-                            continue
-                        if msg.get("type") == "resize":
-                            cols = int(msg.get("cols", 80))
-                            rows = int(msg.get("rows", 24))
-                            process.change_terminal_size(cols, rows)
-
+                process = await open_local_pty()
+            except LocalExecRefused:
+                await websocket.close(code=4004, reason="local shell refused")
+                await asyncio.to_thread(_finalize, session_id, "local_refused", started_at)
+                return
+            try:
+                close_reason = await _bridge_pty(
+                    websocket, process, idle_timeout=idle_timeout, init_command=init_command
+                )
             finally:
-                pty_reader.cancel()
-                try:
-                    await pty_reader
-                except (asyncio.CancelledError, Exception):
-                    pass
                 process.terminate()
+        else:
+            # 4b) Open AsyncSSH connection with host-key pinning (mirrors
+            #     SSHService._open). Preserved byte-for-byte from FDM 1.5.
+            async with asyncssh.connect(**connect_options) as ssh_conn:
+                presented = host_key_string(ssh_conn)
+                if known_host_key:
+                    if not hmac.compare_digest(
+                        normalize_host_key(known_host_key), presented
+                    ):
+                        await websocket.close(code=4004, reason="host key mismatch")
+                        await asyncio.to_thread(
+                            _finalize, session_id, "host_key_mismatch", started_at
+                        )
+                        return
+                else:
+                    # First connect: pin the key (trust-on-first-use, same as SSHService).
+                    with SessionLocal() as pin_db:
+                        cred_row = pin_db.get(SSHCredential, cred_id)
+                        if cred_row is not None and not cred_row.known_host_key:
+                            cred_row.known_host_key = presented
+                            pin_db.commit()
+
+                process = await ssh_conn.create_process(
+                    term_type="xterm-256color",
+                    request_pty=True,
+                    encoding=None,
+                )
+                close_reason = await _bridge_pty(
+                    websocket, process, idle_timeout=idle_timeout, init_command=init_command
+                )
 
     except WebSocketDisconnect:
         close_reason = "client_disconnect"
