@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.app import InstalledApp
+from app.models.app import AppSource, InstalledApp
 
 # A bare marketplace app / module name — the same shape Frappe uses for an app
 # module. Matches `bench get-app <name>` and `install-app <name>`.
@@ -114,6 +114,57 @@ def parse_app_version(text: str, app_name: str) -> str | None:
         if m and m.group("app") == app_name:
             return m.group("ver")
     return None
+
+
+def get_or_create_app_source(
+    db: Session,
+    *,
+    name: str,
+    repo_url: str,
+    default_branch: str | None = None,
+) -> AppSource | None:
+    """Idempotently return the `app_sources` row for a repo/marketplace-backed
+    install (the store path, DOO-1227, and any raw `source` install).
+
+    Natural key = `name`, the app module name, which is already the AppSource
+    unique key. Consequences of that choice (the DOO-1227 design questions):
+
+    - Idempotency (Q1): a second install of the same store app — on any site —
+      finds the existing same-named row and reuses it; the `uq_app_sources_name`
+      constraint is the hard backstop. No duplicate rows.
+    - Shared rows (Q3): a store app and a manually-added source that share the
+      app's module name share ONE row. A manual source that points at the same
+      repo under a *different* name stays separate — the module name, not the
+      URL, is the identity here (repo_url is deliberately not unique: forks,
+      mirrors, and renames are all legitimate).
+
+    An existing row is returned untouched — operator-authored config (repo_url,
+    deploy key, notes, privacy) is authoritative and never clobbered by an
+    install. A brand-new row is created only for a name we have never seen, with
+    its kind classified off the repo via the same host-allowlist gate used
+    everywhere else. If that repo somehow fails validation (it is already
+    validated upstream on every path that reaches here) we return None rather
+    than fail a successful install over bookkeeping — the matrix cell simply
+    keeps its nullable `app_source_id`.
+    """
+    existing = db.scalars(
+        select(AppSource).where(AppSource.name == name)
+    ).first()
+    if existing is not None:
+        return existing
+    try:
+        kind = validate_repo_source(repo_url).kind
+    except RepoSourceError:
+        return None
+    source = AppSource(
+        name=name,
+        repo_url=repo_url,
+        kind=kind,
+        default_branch=default_branch or None,
+    )
+    db.add(source)
+    db.flush()  # assign source.id within the caller's transaction
+    return source
 
 
 def upsert_installed_app(

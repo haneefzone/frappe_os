@@ -148,6 +148,35 @@ def test_upsert_and_remove_installed_app(sf):
         assert not appsources.remove_installed_app(db, site_id=site_id, app_name="erpnext")
 
 
+def test_get_or_create_app_source(sf):
+    """DOO-1227: idempotent by app module name; classifies kind; never clobbers
+    an existing row; returns None (rather than raising) for a bad repo."""
+    with sf() as db:
+        _bench(db)
+        first = appsources.get_or_create_app_source(
+            db, name="hrms", repo_url="https://github.com/frappe/hrms",
+            default_branch="version-16",
+        )
+        assert first.kind == "github" and first.default_branch == "version-16"
+        # Same name → same row, and pre-existing config is left untouched.
+        again = appsources.get_or_create_app_source(
+            db, name="hrms", repo_url="https://github.com/someone/else",
+        )
+        assert again.id == first.id
+        assert again.repo_url == "https://github.com/frappe/hrms"
+        assert db.scalars(select(AppSource)).all().__len__() == 1
+        # A bare marketplace name classifies as marketplace, not an error.
+        mkt = appsources.get_or_create_app_source(db, name="payments", repo_url="payments")
+        assert mkt.kind == "marketplace"
+        # An un-allowlisted / malformed repo is a no-op None, not a crash.
+        assert (
+            appsources.get_or_create_app_source(
+                db, name="evil", repo_url="https://evil.example.com/x/y"
+            )
+            is None
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Template renders (golden rule 1)
 # --------------------------------------------------------------------------- #
@@ -367,6 +396,115 @@ def test_store_install_installs_dependencies_first(sf):
         rows = {r.app_name: r for r in db.scalars(select(InstalledApp)).all()}
         assert set(rows) == {"erpnext", "hrms"}
         assert rows["erpnext"].branch == "version-15"
+        # DOO-1227: the primary AND its dependency each link a real app_sources
+        # row keyed on the app module name, pointing at the fetched repo.
+        srcs = {s.name: s for s in db.scalars(select(AppSource)).all()}
+        assert set(srcs) == {"erpnext", "hrms"}
+        assert srcs["hrms"].repo_url == "https://github.com/frappe/hrms"
+        assert srcs["hrms"].kind == "github"
+        assert rows["hrms"].app_source_id == srcs["hrms"].id
+        assert rows["erpnext"].app_source_id == srcs["erpnext"].id
+
+
+def test_store_install_creates_app_source_so_matrix_is_not_null(sf):
+    """DOO-1227: a store-path install (a `source` repo, no saved `source_name`)
+    creates an app_sources row and the matrix cell's app_source_id is non-null —
+    the gap this issue closes."""
+    with sf() as db:
+        server_id, _ = _bench(db, prod=False)
+    ex = AppExecutor(prod=False)
+    runner, job_id = _run(
+        sf, action="site.install_app", server_id=server_id,
+        target_id=f"{BENCH_PATH}::test1.localhost",
+        params={
+            "site": "test1.localhost", "bench_path": BENCH_PATH, "app": "erpnext",
+            "source": "https://github.com/frappe/erpnext", "branch": "version-16",
+        },
+    )
+    runner.run_job(job_id, executor_factory=fake_factory(ex))
+    with sf() as db:
+        assert db.get(CommandJob, job_id).status == "success"
+        src = db.scalars(select(AppSource)).one()
+        assert src.name == "erpnext"
+        assert src.repo_url == "https://github.com/frappe/erpnext"
+        assert src.kind == "github"
+        assert src.default_branch == "version-16"
+        ia = db.scalars(select(InstalledApp)).one()
+        assert ia.app_source_id == src.id  # not null
+
+
+def test_store_install_reuses_app_source_no_duplicate(sf):
+    """DOO-1227 idempotency (Q1): a second store install of the same app — here
+    on a second site — reuses the one app_sources row instead of duplicating
+    it, and both matrix cells point at that same row."""
+    with sf() as db:
+        server_id, bench_id = _bench(db, prod=False)
+        db.add(Site(bench_id=bench_id, name="test2.localhost"))
+        db.commit()
+
+    install_params = {
+        "bench_path": BENCH_PATH, "app": "erpnext",
+        "source": "https://github.com/frappe/erpnext", "branch": "version-16",
+    }
+    for site_name in ("test1.localhost", "test2.localhost"):
+        ex = AppExecutor(prod=False)
+        runner, job_id = _run(
+            sf, action="site.install_app", server_id=server_id,
+            target_id=f"{BENCH_PATH}::{site_name}",
+            params={"site": site_name, **install_params},
+        )
+        runner.run_job(job_id, executor_factory=fake_factory(ex))
+        with sf() as db:
+            assert db.get(CommandJob, job_id).status == "success"
+
+    with sf() as db:
+        srcs = db.scalars(select(AppSource)).all()
+        assert len(srcs) == 1  # no duplicate row
+        src_id = srcs[0].id
+        rows = db.scalars(select(InstalledApp)).all()
+        assert len(rows) == 2
+        assert {r.app_source_id for r in rows} == {src_id}
+
+
+def test_store_install_reuses_manual_source_and_leaves_it_untouched(sf):
+    """DOO-1227 shared rows (Q3): a store install whose app module name matches
+    an operator-added source reuses that row — it does NOT create a second row
+    and does NOT clobber the operator's repo_url / deploy key."""
+    with sf() as db:
+        server_id, _ = _bench(db, prod=False)
+        manual = AppSource(
+            name="erpnext",
+            repo_url="https://github.com/acme/erpnext-fork",
+            kind="github",
+            is_private=True,
+            deploy_key_enc=get_secrets_service().encrypt(FAKE_KEY),
+            notes="operator fork",
+        )
+        db.add(manual)
+        db.commit()
+        manual_id = manual.id
+    ex = AppExecutor(prod=False)
+    runner, job_id = _run(
+        sf, action="site.install_app", server_id=server_id,
+        target_id=f"{BENCH_PATH}::test1.localhost",
+        params={
+            "site": "test1.localhost", "bench_path": BENCH_PATH, "app": "erpnext",
+            "source": "https://github.com/frappe/erpnext", "branch": "version-16",
+        },
+    )
+    runner.run_job(job_id, executor_factory=fake_factory(ex))
+    with sf() as db:
+        assert db.get(CommandJob, job_id).status == "success"
+        srcs = db.scalars(select(AppSource)).all()
+        assert len(srcs) == 1  # reused, not duplicated
+        src = srcs[0]
+        assert src.id == manual_id
+        # Operator-authored config is authoritative — untouched by the install.
+        assert src.repo_url == "https://github.com/acme/erpnext-fork"
+        assert src.is_private is True
+        assert src.deploy_key_enc is not None
+        ia = db.scalars(select(InstalledApp)).one()
+        assert ia.app_source_id == manual_id
 
 
 def test_prod_install_skips_redis_dance(sf):
