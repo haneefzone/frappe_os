@@ -596,6 +596,24 @@ async def _get_app_steps(
                 await ctx.emit("Deploy key removed from the target.")
 
 
+def _parse_dep_plan(raw: str | None) -> list[tuple[str, str, str]]:
+    """Split a validated `app~source~branch,...` dependency plan (DOO-1192) into
+    ordered (app, source, branch) triples. The value was whitelisted by the
+    DEP_PLAN regex at render time and each field is re-validated when rendered
+    through the `app.get`/`app.install` templates, so this only splits."""
+    if not raw:
+        return []
+    out: list[tuple[str, str, str]] = []
+    for rec in raw.split(","):
+        rec = rec.strip()
+        if not rec:
+            continue
+        parts = rec.split("~")
+        if len(parts) == 3 and all(parts):
+            out.append((parts[0], parts[1], parts[2]))
+    return out
+
+
 async def _install_app_step(
     ctx: JobContext, *, site: str, app: str, bench_path: str
 ) -> None:
@@ -704,11 +722,14 @@ class InstallAppOnSiteAction(Action):
         source = params.get("source")
         branch = params.get("branch")
         deploy_key = ctx.rendered.secret_map.get("deploy_key")
+        # Ordered app-store dependencies (DOO-1192): fetch+install each on the
+        # SAME job before the primary app. Public store repos, so no deploy key.
+        deps = _parse_dep_plan(params.get("dep_plan"))
 
         bench = _load_bench(ctx, bench_path)
         queue_port, cache_port = _redis_ports(bench)
 
-        # 1) Fetch the app onto the bench first if a source was given (a
+        # 1) Fetch the primary app onto the bench first if a source was given (a
         #    marketplace name already resolvable by bench also flows through
         #    get-app; already-present apps are a no-op get that bench short-circuits).
         if source:
@@ -720,7 +741,7 @@ class InstallAppOnSiteAction(Action):
                 deploy_key=deploy_key,
             )
 
-        # 2) Detect dev/prod, run the install wrapped in the Redis dance.
+        # 2) Detect dev/prod, run the installs wrapped in the Redis dance.
         is_dev = await _detect_bench_mode(ctx, bench_path)
         started_redis = False
         try:
@@ -728,6 +749,35 @@ class InstallAppOnSiteAction(Action):
                 await _start_dev_redis(ctx, bench_path)
                 started_redis = True
 
+            # 2a) Install resolved dependencies first, deps-first order (AC5).
+            #     Each reuses the exact same get-app + install-app helpers as the
+            #     primary — one job, one lock, one progress surface.
+            for dep_app, dep_source, dep_branch in deps:
+                await _get_app_steps(
+                    ctx,
+                    source=dep_source,
+                    branch=dep_branch,
+                    bench_path=bench_path,
+                    deploy_key=None,
+                )
+                await _install_app_step(ctx, site=site, app=dep_app, bench_path=bench_path)
+                with ctx.step(f"Register installed app: {dep_app}"):
+                    dep_version = await _app_version(ctx, bench_path, dep_app)
+                    if bench is not None:
+                        _register_installed_app(
+                            ctx,
+                            bench=bench,
+                            site_name=site,
+                            app=dep_app,
+                            branch=dep_branch,
+                            version=dep_version,
+                        )
+                        await ctx.emit(
+                            f"Registered dependency {dep_app} on {site} "
+                            f"(version {dep_version or 'unknown'})."
+                        )
+
+            # 2b) Install the primary app.
             await _install_app_step(ctx, site=site, app=app, bench_path=bench_path)
 
             # 3) Register the app×site matrix cell.

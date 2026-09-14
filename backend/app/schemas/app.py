@@ -69,16 +69,47 @@ class UpdateAppSourceRequest(BaseModel):
 
 
 class InstallAppRequest(BaseModel):
-    """Install an app on a site. Either give `app_source_id` (a saved source —
-    its repo_url + branch + deploy key are used) OR a raw `source` + `branch`
-    for an ad-hoc public repo, OR neither for an already-fetched marketplace app.
-    `app` is the module name to install (defaults to the source name)."""
+    """Install an app on a site. One source of install parameters:
+    - `store_app` — a Frappe app-store name (DOO-1192); the platform resolves the
+      compatible release (repo, pinned branch, dependencies) against the bench's
+      Frappe version and reuses this same install path,
+    - `app_source_id` — a saved source (its repo_url + branch + deploy key),
+    - a raw `source` + `branch` for an ad-hoc public repo,
+    - or neither for an already-fetched marketplace app.
+    `app` is the module name to install (defaults to the source/store name)."""
 
     app: str | None = Field(default=None, max_length=120)
+    store_app: str | None = Field(default=None, max_length=120)
     app_source_id: int | None = None
     source: str | None = Field(default=None, max_length=300)
     branch: str | None = Field(default=None, max_length=100)
     priority: str = "high"
+
+
+class StoreCatalogAppOut(BaseModel):
+    """One app-store catalog entry resolved against a bench's Frappe version.
+
+    Field names are the AC2 interface contract shared with the frontend issue —
+    do not rename without updating DOO-1192's frontend counterpart."""
+
+    name: str
+    title: str
+    description: str
+    repo: str
+    logo_url: str | None
+    website: str | None
+    documentation: str | None
+    categories: list[str]
+    stars: int | None
+    branch: str | None
+    commit: str | None
+    version: str | None
+    channel: str | None
+    required_version: str | None
+    dependencies: dict
+    is_installable: bool
+    installed: bool
+    incompatible_reason: str | None
 
 
 class UninstallAppRequest(BaseModel):

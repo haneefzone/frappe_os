@@ -25,6 +25,15 @@ from app.audit import Audit
 from app.core.appsources import RepoSourceError, validate_repo_source
 from app.core.commands import RenderError, get_template
 from app.core.jobs import JobRunner, LockConflict
+from app.core.marketplace import (
+    DependencyError,
+    PlanStep,
+    RegistryCache,
+    RegistryError,
+    get_registry_cache,
+    resolve_catalog,
+    resolve_install_plan,
+)
 from app.core.permissions import READ, role_allows
 from app.core.secrets_resolve import SecretResolutionError
 from app.core.security import get_secrets_service
@@ -40,6 +49,7 @@ from app.schemas.app import (
     InstallAppRequest,
     InstalledAppOut,
     ListBranchesRequest,
+    StoreCatalogAppOut,
     UninstallAppRequest,
     UpdateAppSourceRequest,
 )
@@ -49,6 +59,7 @@ router = APIRouter(prefix="/api", tags=["apps"])
 
 DbSession = Annotated[Session, Depends(get_db)]
 Runner = Annotated[JobRunner, Depends(get_job_runner)]
+Registry = Annotated[RegistryCache, Depends(get_registry_cache)]
 
 INSTALL_ACTION = "site.install_app"
 UNINSTALL_ACTION = "app.uninstall"
@@ -302,6 +313,65 @@ def list_installed_apps(
 
 
 # --------------------------------------------------------------------------- #
+# App-store catalog (DOO-1192)
+# --------------------------------------------------------------------------- #
+
+
+def _bench_installed_apps(db: Session, bench_id: int) -> set[str]:
+    """App names already present on a bench (any site of it), plus the Frappe
+    core which every bench carries."""
+    names = set(
+        db.scalars(
+            select(InstalledApp.app_name).where(InstalledApp.bench_id == bench_id)
+        ).all()
+    )
+    names.add("frappe")
+    return names
+
+
+def _site_installed_apps(db: Session, site_id: int) -> set[str]:
+    """App names already installed on a specific site, plus the Frappe core."""
+    names = set(
+        db.scalars(
+            select(InstalledApp.app_name).where(InstalledApp.site_id == site_id)
+        ).all()
+    )
+    names.add("frappe")
+    return names
+
+
+@router.get("/store/catalog", response_model=list[StoreCatalogAppOut])
+def store_catalog(
+    registry: Registry,
+    db: DbSession,
+    _: Annotated[object, Depends(require(READ))],
+    bench: int = Query(..., description="Bench id to resolve compatibility against."),
+) -> list[StoreCatalogAppOut]:
+    """The app-store catalog resolved against one bench's installed Frappe
+    version. Incompatible apps are returned with `is_installable=false` and a
+    reason — never hidden (AC2). A never-cloned registry is a hard 503 (AC1)."""
+    b = db.get(Bench, bench)
+    if b is None:
+        raise HTTPException(status_code=404, detail="Bench not found.")
+    if not b.frappe_version:
+        raise HTTPException(
+            status_code=409,
+            detail="This bench's Frappe version is unknown — run a discovery on "
+            "its server before browsing the store.",
+        )
+    try:
+        registry.ensure_fresh()
+        records = registry.records()
+    except RegistryError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    installed = _bench_installed_apps(db, b.id)
+    resolved = resolve_catalog(records, b.frappe_version, installed)
+    # `categories` is a tuple on the dataclass; pydantic coerces it to a list.
+    return [StoreCatalogAppOut(**vars(r)) for r in resolved]
+
+
+# --------------------------------------------------------------------------- #
 # Install / uninstall on a site
 # --------------------------------------------------------------------------- #
 
@@ -313,13 +383,98 @@ def _bench_for_site(db: Session, site: Site) -> Bench:
     return bench
 
 
+# Dependencies are encoded onto the single `site.install_app` job as an ordered
+# `app~source~branch` list joined by ",". Every character in that grammar is
+# shell-safe (letters, digits, and `_ ~ . : / @ - ,` only — no shell
+# metacharacter can appear), and the value is NEVER interpolated into a shell
+# command: InstallAppOnSiteAction splits it and re-renders each field through the
+# whitelisted `app.get`/`app.install` templates as its own argv element. This
+# keeps the store's dependency install on the SAME job/lock/progress surface as a
+# single-app install rather than adding a second install code path (AC3/AC5).
+def _encode_dep_plan(steps: list[PlanStep]) -> str:
+    return ",".join(f"{s.app}~{s.source}~{s.branch}" for s in steps)
+
+
+def _resolve_store_install(
+    db: Session,
+    registry: RegistryCache,
+    bench: Bench,
+    site: Site,
+    store_app: str,
+) -> tuple[str, str, str, str | None]:
+    """Resolve a store app name into (source_repo, pinned_branch, app_name,
+    dep_plan) for the shared install job. Raises the right HTTP error for each
+    failure mode: unknown Frappe version (409), already installed (409),
+    never-cloned registry (503), unknown/incompatible app or dependency
+    conflict/cycle (422)."""
+    if not bench.frappe_version:
+        raise HTTPException(
+            status_code=409,
+            detail="This bench's Frappe version is unknown — run a discovery on "
+            "its server before installing store apps.",
+        )
+    # Already installed on THIS site → clean 409, not a crash (AC6).
+    if store_app in _site_installed_apps(db, site.id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{store_app!r} is already installed on site {site.name!r}.",
+        )
+    try:
+        registry.ensure_fresh()
+    except RegistryError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    installed = _site_installed_apps(db, site.id)
+    try:
+        plan = resolve_install_plan(
+            store_app, bench.frappe_version, registry.record, installed
+        )
+    except RegistryError as exc:  # index unreadable mid-resolve
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except DependencyError as exc:
+        # Unknown app, no compatible release, version conflict, or a cycle — a
+        # clear error, never a partial install (AC5).
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if not plan:  # pragma: no cover - the already-installed guard above covers this
+        raise HTTPException(
+            status_code=409,
+            detail=f"{store_app!r} is already installed on site {site.name!r}.",
+        )
+    target = plan[-1]
+    deps = plan[:-1]
+    if not target.branch:
+        raise HTTPException(
+            status_code=422,
+            detail=f"The catalog release for {store_app!r} has no branch to pin to.",
+        )
+    # Host-allowlist gate on every repo we are about to fetch (golden rule 1).
+    for step in plan:
+        try:
+            validate_repo_source(step.source)
+        except RepoSourceError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"catalog repo for {step.app!r} is not allowed: {exc}",
+            ) from exc
+    dep_plan = _encode_dep_plan(deps) if deps else None
+    return target.source, target.branch, target.app, dep_plan
+
+
 @router.post("/sites/{site_id}/apps", status_code=201, response_model=JobDetail)
 def install_app(
-    site_id: int, body: InstallAppRequest, db: DbSession, runner: Runner, user: CurrentUser
+    site_id: int,
+    body: InstallAppRequest,
+    db: DbSession,
+    runner: Runner,
+    registry: Registry,
+    user: CurrentUser,
 ):
     """Get the app onto the bench if needed, then install it on the site — one
-    chained job. Source: a saved `app_source_id`, a raw `source`, or neither for
-    an already-fetched marketplace app."""
+    chained job. Install parameters come from ONE of: `store_app` (an app-store
+    name resolved against the bench's Frappe version, DOO-1192), a saved
+    `app_source_id`, a raw `source`, or neither for an already-fetched
+    marketplace app. All four funnel into the same `site.install_app` job."""
     _require_action_permission(user, INSTALL_ACTION)
     site = db.get(Site, site_id)
     if site is None:
@@ -330,9 +485,14 @@ def install_app(
     branch: str | None = body.branch
     source_name: str | None = None
     app_name: str | None = body.app
+    dep_plan: str | None = None
     user_secrets: dict[str, str] | None = None
 
-    if body.app_source_id is not None:
+    if body.store_app is not None:
+        source_arg, branch, app_name, dep_plan = _resolve_store_install(
+            db, registry, bench, site, body.store_app
+        )
+    elif body.app_source_id is not None:
         src = db.get(AppSource, body.app_source_id)
         if src is None:
             raise HTTPException(status_code=404, detail="App source not found.")
@@ -370,6 +530,8 @@ def install_app(
         params["branch"] = branch
     if source_name:
         params["source_name"] = source_name
+    if dep_plan:
+        params["dep_plan"] = dep_plan
 
     try:
         job = runner.create(

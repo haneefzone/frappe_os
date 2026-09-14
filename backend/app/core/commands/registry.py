@@ -134,6 +134,17 @@ BRANCH_NAME = r"[A-Za-z0-9._/-]{1,100}"
 # lists branches for a repo). Same shell-safe whitelist as APP_SOURCE.
 REPO_URL = r"[A-Za-z0-9._:/@-]{1,200}"
 
+# An ordered app-store dependency plan (DOO-1192): `app~source~branch` records
+# joined by ",", deps first. Every char is shell-safe (the union of the app /
+# source / branch whitelists plus the `~` and `,` separators, neither of which
+# is a shell metacharacter and neither of which appears in any field's own
+# whitelist, so the split is unambiguous). This value is NEVER interpolated into
+# a shell command — InstallAppOnSiteAction splits it and re-renders each field
+# through the `app.get`/`app.install` templates as its own argv element, so the
+# per-field whitelists still gate every token that reaches the CLI.
+_DEP = r"[a-z0-9_]{1,60}~[A-Za-z0-9._:/@-]{1,200}~[A-Za-z0-9._/-]{1,100}"
+DEP_PLAN = rf"{_DEP}(,{_DEP})*"
+
 # A supervisor group target for `sudo supervisorctl restart <group>` on a
 # production bench (session 1.10). The orchestrator builds it as
 # `<bench-basename>:*` (restart every program in the bench's supervisor group),
@@ -459,6 +470,9 @@ register(
             ParamSpec("branch", regex=BRANCH_NAME, required=False),
             ParamSpec("source_name", regex=APP_NAME, required=False),
             ParamSpec("deploy_key", regex=DEPLOY_KEY, secret=True, required=False),
+            # Ordered app-store dependencies to fetch+install before the primary
+            # app, deps first (DOO-1192). Never shell-interpolated; see DEP_PLAN.
+            ParamSpec("dep_plan", regex=DEP_PLAN, required=False),
         ),
         action_class=InstallAppOnSiteAction,
         idempotent=False,

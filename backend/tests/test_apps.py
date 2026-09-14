@@ -341,6 +341,34 @@ def test_install_without_source_skips_get(sf):
     ], ex.streamed
 
 
+def test_store_install_installs_dependencies_first(sf):
+    """DOO-1192: a dep_plan makes the SAME job fetch+install each dependency
+    before the primary app, deps-first, on one lock/progress surface."""
+    with sf() as db:
+        server_id, _ = _bench(db, prod=False)
+    ex = AppExecutor(prod=False)
+    runner, job_id = _run(
+        sf, action="site.install_app", server_id=server_id,
+        target_id=f"{BENCH_PATH}::test1.localhost",
+        params={
+            "site": "test1.localhost", "bench_path": BENCH_PATH, "app": "hrms",
+            "source": "https://github.com/frappe/hrms", "branch": "version-15",
+            "dep_plan": "erpnext~https://github.com/frappe/erpnext~version-15",
+        },
+    )
+    runner.run_job(job_id, executor_factory=fake_factory(ex))
+    with sf() as db:
+        assert db.get(CommandJob, job_id).status == "success"
+        installs = [a for a in ex.streamed if "install-app" in a]
+        assert [a[-1] for a in installs] == ["erpnext", "hrms"]  # dependency first
+        gets = [a for a in ex.streamed if "get-app" in a]
+        assert gets[0][-1] == "https://github.com/frappe/hrms"  # primary get first
+        assert any(a[-1] == "https://github.com/frappe/erpnext" for a in gets)
+        rows = {r.app_name: r for r in db.scalars(select(InstalledApp)).all()}
+        assert set(rows) == {"erpnext", "hrms"}
+        assert rows["erpnext"].branch == "version-15"
+
+
 def test_prod_install_skips_redis_dance(sf):
     with sf() as db:
         server_id, _ = _bench(db, prod=True)
@@ -681,3 +709,163 @@ def test_branches_endpoint_launches_job(apps_client, api_env):
     )
     assert resp.status_code == 201, resp.text
     assert resp.json()["action_name"] == "app.list_branches"
+
+
+# --------------------------------------------------------------------------- #
+# App store: catalog + unified install path (DOO-1192)
+# --------------------------------------------------------------------------- #
+
+from app.core.marketplace import AppRecord, get_registry_cache  # noqa: E402
+
+_ERP15 = {"version": "15.5.0", "branch": "version-15", "commit": "c15",
+          "frappe_core": ">=15.0.0,<16.0.0", "channel": "stable"}
+_HRMS16 = {"version": "16.0.0", "branch": "version-16", "commit": "c16",
+           "frappe_core": ">=16.0.0", "channel": "stable"}
+_HRMS15 = {"version": "15.9.0", "branch": "version-15", "commit": "h15",
+           "frappe_core": ">=15.0.0,<16.0.0", "channel": "stable",
+           "dependencies": {"erpnext": ">=15.0.0,<16.0.0"}}
+
+
+class _StubRegistry:
+    """A registry cache stub — no clone, no network."""
+
+    def __init__(self, records):
+        self._recs = {r.name: r for r in records}
+        self.fresh_calls = 0
+
+    def ensure_fresh(self):
+        self.fresh_calls += 1
+
+    def records(self):
+        return list(self._recs.values())
+
+    def record(self, name):
+        return self._recs.get(name)
+
+
+def _store_rec(name, releases):
+    return AppRecord(
+        name=name,
+        repo=f"https://github.com/frappe/{name}",
+        releases=tuple(releases),
+        meta={"name": name, "title": name.upper(), "description": "d", "categories": ["x"], "stars": 1},
+    )
+
+
+def _use_registry(client, records, bench_version="15.42.1", *, bench_id=None, db_session=None):
+    if bench_id is not None and db_session is not None:
+        bench = db_session.get(Bench, bench_id)
+        bench.frappe_version = bench_version
+        db_session.commit()
+    reg = _StubRegistry(records)
+    client.app.dependency_overrides[get_registry_cache] = lambda: reg
+    return reg
+
+
+def test_catalog_lists_installable_and_incompatible(apps_client, api_env, db_session):
+    _use_registry(
+        apps_client,
+        [_store_rec("erpnext", [_ERP15]), _store_rec("hrms", [_HRMS16])],
+        bench_id=api_env["bench_id"], db_session=db_session,
+    )
+    login(apps_client, "readonly@example.com")  # READ is enough to browse
+    resp = apps_client.get(f"/api/store/catalog?bench={api_env['bench_id']}")
+    assert resp.status_code == 200, resp.text
+    by = {a["name"]: a for a in resp.json()}
+    assert by["erpnext"]["is_installable"] is True
+    assert by["erpnext"]["branch"] == "version-15"
+    assert by["hrms"]["is_installable"] is False
+    assert ">=16.0.0" in by["hrms"]["incompatible_reason"]
+    apps_client.app.dependency_overrides.pop(get_registry_cache, None)
+
+
+def test_catalog_unknown_frappe_version_is_409(apps_client, api_env, db_session):
+    _use_registry(apps_client, [_store_rec("erpnext", [_ERP15])])  # bench version left None
+    login(apps_client, "developer@example.com")
+    resp = apps_client.get(f"/api/store/catalog?bench={api_env['bench_id']}")
+    assert resp.status_code == 409
+    apps_client.app.dependency_overrides.pop(get_registry_cache, None)
+
+
+def test_store_install_launches_job_with_pinned_branch(apps_client, api_env, db_session):
+    _use_registry(apps_client, [_store_rec("erpnext", [_ERP15])],
+                  bench_id=api_env["bench_id"], db_session=db_session)
+    login(apps_client, "developer@example.com")
+    resp = apps_client.post(
+        f"/api/sites/{api_env['site_id']}/apps",
+        json={"store_app": "erpnext"},
+        headers=csrf_headers(apps_client),
+    )
+    assert resp.status_code == 201, resp.text
+    p = resp.json()["params_sanitized"]
+    assert p["app"] == "erpnext"
+    assert p["source"] == "https://github.com/frappe/erpnext"
+    assert p["branch"] == "version-15"  # pinned to the resolved release, not a default
+    assert "dep_plan" not in p
+    apps_client.app.dependency_overrides.pop(get_registry_cache, None)
+
+
+def test_store_install_encodes_ordered_dependencies(apps_client, api_env, db_session):
+    _use_registry(
+        apps_client,
+        [_store_rec("hrms", [_HRMS15]), _store_rec("erpnext", [_ERP15])],
+        bench_id=api_env["bench_id"], db_session=db_session,
+    )
+    login(apps_client, "developer@example.com")
+    resp = apps_client.post(
+        f"/api/sites/{api_env['site_id']}/apps",
+        json={"store_app": "hrms"},
+        headers=csrf_headers(apps_client),
+    )
+    assert resp.status_code == 201, resp.text
+    p = resp.json()["params_sanitized"]
+    assert p["app"] == "hrms" and p["branch"] == "version-15"
+    # erpnext (the dependency) is installed first, encoded app~source~branch.
+    assert p["dep_plan"] == "erpnext~https://github.com/frappe/erpnext~version-15"
+    apps_client.app.dependency_overrides.pop(get_registry_cache, None)
+
+
+def test_store_install_already_installed_is_409(apps_client, api_env, db_session):
+    appsources.upsert_installed_app(
+        db_session, site_id=api_env["site_id"], bench_id=api_env["bench_id"],
+        app_name="erpnext", branch="version-15", version="15.5.0",
+    )
+    _use_registry(apps_client, [_store_rec("erpnext", [_ERP15])],
+                  bench_id=api_env["bench_id"], db_session=db_session)
+    login(apps_client, "developer@example.com")
+    resp = apps_client.post(
+        f"/api/sites/{api_env['site_id']}/apps",
+        json={"store_app": "erpnext"},
+        headers=csrf_headers(apps_client),
+    )
+    assert resp.status_code == 409
+    assert "already installed" in resp.text
+    apps_client.app.dependency_overrides.pop(get_registry_cache, None)
+
+
+def test_store_install_incompatible_app_is_422(apps_client, api_env, db_session):
+    _use_registry(apps_client, [_store_rec("hrms", [_HRMS16])],
+                  bench_id=api_env["bench_id"], db_session=db_session)
+    login(apps_client, "developer@example.com")
+    resp = apps_client.post(
+        f"/api/sites/{api_env['site_id']}/apps",
+        json={"store_app": "hrms"},
+        headers=csrf_headers(apps_client),
+    )
+    assert resp.status_code == 422
+    assert "compatible" in resp.text
+    apps_client.app.dependency_overrides.pop(get_registry_cache, None)
+
+
+def test_store_install_unknown_app_is_422(apps_client, api_env, db_session):
+    _use_registry(apps_client, [_store_rec("erpnext", [_ERP15])],
+                  bench_id=api_env["bench_id"], db_session=db_session)
+    login(apps_client, "developer@example.com")
+    resp = apps_client.post(
+        f"/api/sites/{api_env['site_id']}/apps",
+        json={"store_app": "nope"},
+        headers=csrf_headers(apps_client),
+    )
+    assert resp.status_code == 422
+    assert "catalog" in resp.text
+    apps_client.app.dependency_overrides.pop(get_registry_cache, None)

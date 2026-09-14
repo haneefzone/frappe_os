@@ -108,6 +108,15 @@ class Settings(BaseSettings):
     # path resolves from the backend working directory. Set via UPLOADS_DIR.
     uploads_dir: str = "uploads"
 
+    # Frappe app-store catalog (DOO-1192). The catalog is a git repo, not an API
+    # (https://github.com/frappe/marketplace); the platform keeps a shallow
+    # server-local clone refreshed on a TTL and serves the last good clone on any
+    # fetch failure. A relative cache dir resolves from the backend working
+    # directory like uploads_dir. Set via MARKETPLACE_* env vars.
+    marketplace_registry_url: str = "https://github.com/frappe/marketplace"
+    marketplace_cache_dir: str = "marketplace-cache"
+    marketplace_cache_ttl_seconds: int = 3600  # hourly refresh (AC1)
+
     # Monitoring poller (session 1.12): how often each server is SSH-polled and
     # how long samples are retained. Set MONITORING_ENABLED=false to run a
     # dedicated poller elsewhere instead of the in-process loop.
