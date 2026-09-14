@@ -107,6 +107,50 @@ MARIADB_SNAPSHOT_ARGV = [
 ]
 WKHTMLTOPDF_ARGV = ["wkhtmltopdf", "--version"]
 
+# DOO-1237: `bench new-site` creates the site database through **pymysql over
+# TCP** (127.0.0.1:3306), NOT the unix socket. So the admin-login probe must
+# connect the same way — over TCP as the configured admin user — or it would
+# pass on a `unix_socket`-only account that `bench new-site` then can't use.
+MARIADB_ADMIN_USERNAME = "root"  # matches the hardcoded `--mariadb-root-username` in site.new
+MARIADB_ADMIN_HOST = "127.0.0.1"
+MARIADB_ADMIN_PORT = 3306
+
+
+def mariadb_admin_auth_argv(
+    username: str,
+    password: str,
+    *,
+    host: str = MARIADB_ADMIN_HOST,
+    port: int = MARIADB_ADMIN_PORT,
+) -> list[str]:
+    """Authenticate to MariaDB over TCP as `username` (mirroring pymysql / the
+    real `bench new-site`) and return the account's grants in ONE round trip —
+    proving both that we can log in and that the account can CREATE DATABASE,
+    without running any destructive statement. MariaDB takes the password as
+    `-p<pw>` with no space; it is its own argv element, shlex-quoted by the exec
+    layer (never spliced into a shell string). `--connect-timeout` bounds a dead
+    server so the probe can't hang the create."""
+    return [
+        "mariadb", "-h", host, "-P", str(port), "-u", username,
+        f"-p{password}", "--connect-timeout=10",
+        "-N", "-B", "-e", "SHOW GRANTS FOR CURRENT_USER()",
+    ]
+
+
+def mariadb_admin_nopw_argv(
+    username: str,
+    *,
+    host: str = MARIADB_ADMIN_HOST,
+    port: int = MARIADB_ADMIN_PORT,
+) -> list[str]:
+    """A TCP connect with NO password, used only to tell a rejected-password 1045
+    apart from a `unix_socket`-only account (1698) — the DOO-1232 disambiguation.
+    No `-p` flag at all (an empty `-p` would prompt interactively and hang)."""
+    return [
+        "mariadb", "-h", host, "-P", str(port), "-u", username,
+        "--connect-timeout=10", "-N", "-B", "-e", "SELECT 1",
+    ]
+
 
 def disk_argv(path: str) -> list[str]:
     """`df` on the bench's parent dir. Path is validated (absolute allowlist)
@@ -172,6 +216,46 @@ def parse_snapshot_isolation(text: str) -> bool | None:
     if token in ("OFF", "0"):
         return False
     return None
+
+
+def classify_mariadb_auth(exit_code: int, stdout: str, stderr: str) -> str:
+    """Classify a MariaDB client connection attempt into one DOO-1232 state,
+    from the client's exit code + output:
+
+    - ``"ok"``            — exit 0: authenticated.
+    - ``"socket_plugin"`` — ERROR 1698: the account authenticates via a plugin
+      (``unix_socket``) that cannot be satisfied over this (TCP) connection.
+    - ``"denied"``        — ERROR 1045: access denied (wrong / no valid password).
+    - ``"cannot_run"``    — anything else (client missing, connection refused,
+      timeout, unknown host, …): the probe could not reach a verdict, so the
+      caller must NOT gate a create on it (the df read-error rule)."""
+    if exit_code == 0:
+        return "ok"
+    blob = f"{stdout}\n{stderr}"
+    if "1698" in blob:
+        return "socket_plugin"
+    if "1045" in blob:
+        return "denied"
+    return "cannot_run"
+
+
+def grants_allow_create_database(text: str) -> bool:
+    """Does `SHOW GRANTS` output include the global CREATE DATABASE privilege?
+
+    Each grant line reads `GRANT <privs> ON <scope> TO <user>`. CREATE DATABASE
+    is the plain global `CREATE` privilege on `*.*` (or `ALL PRIVILEGES`); we
+    match the exact `CREATE` token — not `CREATE VIEW` / `CREATE ROUTINE` /
+    `CREATE USER` — on the global scope only."""
+    for line in text.splitlines():
+        m = re.match(r"\s*GRANT\s+(.+?)\s+ON\s+(\S+)\s+TO\b", line, re.IGNORECASE)
+        if not m:
+            continue
+        if m.group(2).replace("`", "") != "*.*":
+            continue
+        tokens = {p.strip().upper() for p in m.group(1).split(",")}
+        if "ALL PRIVILEGES" in tokens or "CREATE" in tokens:
+            return True
+    return False
 
 
 def parse_df_avail_bytes(text: str) -> int | None:
@@ -438,6 +522,109 @@ async def run_preflight(
     await record(evaluate_disk(disk.exit_code, disk.stdout))
 
     return report
+
+
+def _socket_plugin_result(username: str) -> CheckResult:
+    return CheckResult(
+        "mariadb_admin", "MariaDB admin login", "fail",
+        f"MariaDB account {username!r}@localhost authenticates via a socket "
+        "plugin (unix_socket) and is unreachable over TCP (error 1698) — the "
+        "path `bench new-site` uses (pymysql to 127.0.0.1). On the target, give "
+        f"it a password over TCP, e.g. `ALTER USER '{username}'@'localhost' "
+        "IDENTIFIED VIA mysql_native_password USING PASSWORD('…')`, or add a "
+        "dedicated password admin user, then store that password in the server's "
+        "MariaDB settings.",
+        blocking=True,
+    )
+
+
+async def probe_mariadb_admin(
+    capture: Capture,
+    *,
+    password: str,
+    username: str = MARIADB_ADMIN_USERNAME,
+    host: str = MARIADB_ADMIN_HOST,
+    port: int = MARIADB_ADMIN_PORT,
+) -> CheckResult:
+    """DOO-1237 blocking probe: verify FDM can authenticate to MariaDB over TCP
+    as an account able to CREATE DATABASE — the exact path `bench new-site` uses
+    (pymysql to 127.0.0.1:3306). Runs through the injected `capture`
+    (``SSHService._wrap_command`` login shell), so it clears the same exec path
+    the real create takes (DOO-1208).
+
+    Distinguishes, in its message, the three DOO-1232 states:
+      (a) 1045 — the stored admin password is wrong / not valid over TCP,
+      (b) 1698 — the admin account is ``unix_socket``-only, unreachable over TCP,
+    both blocking fails; and
+      (c) the probe could not run at all — status ``"error"``, NON-blocking, the
+          same shape as the df read-error fix, so a broken/absent MariaDB client
+          never falsely gates a create (DOO-1189).
+    A successful auth whose grants lack CREATE DATABASE is also a blocking fail
+    (authenticated but not privileged)."""
+    key, title = "mariadb_admin", "MariaDB admin login"
+    try:
+        auth = await capture(
+            mariadb_admin_auth_argv(username, password, host=host, port=port),
+            timeout=20.0,
+        )
+    except Exception:
+        return CheckResult(
+            key, title, "error",
+            "Could not run the MariaDB admin-login probe (platform probe error, "
+            "not a host shortfall) — verify the MariaDB client is installed on "
+            "the target, then re-run. Not blocking site creation.",
+            blocking=True,
+        )
+
+    state = classify_mariadb_auth(auth.exit_code, auth.stdout, auth.stderr)
+    if state == "ok":
+        if grants_allow_create_database(auth.stdout):
+            return CheckResult(
+                key, title, "pass",
+                f"Authenticated to MariaDB over TCP ({host}:{port}) as {username!r} "
+                "with the CREATE DATABASE privilege bench new-site needs.",
+                blocking=True,
+            )
+        return CheckResult(
+            key, title, "fail",
+            f"Authenticated to MariaDB as {username!r}, but the account lacks the "
+            "CREATE DATABASE privilege `bench new-site` needs. Grant it "
+            f"(`GRANT ALL ON *.* TO '{username}'@'%'`) or configure a different "
+            "admin account.",
+            blocking=True,
+        )
+    if state == "socket_plugin":
+        return _socket_plugin_result(username)
+    if state == "denied":
+        # Reached the server but the password was rejected (1045). Re-probe with
+        # NO password to tell "wrong password" apart from "unix_socket-only
+        # account" — exactly the DOO-1232 diagnostic sequence.
+        try:
+            nopw = await capture(
+                mariadb_admin_nopw_argv(username, host=host, port=port),
+                timeout=20.0,
+            )
+            if classify_mariadb_auth(nopw.exit_code, nopw.stdout, nopw.stderr) == "socket_plugin":
+                return _socket_plugin_result(username)
+        except Exception:
+            pass  # fall through to the wrong-password verdict; never gate on the re-probe
+        return CheckResult(
+            key, title, "fail",
+            f"MariaDB rejected the stored admin password for {username!r} over TCP "
+            "(error 1045, using password: YES). Set the correct MariaDB admin "
+            "password in the server's settings, or fix the account's password on "
+            "the target.",
+            blocking=True,
+        )
+    # cannot_run
+    return CheckResult(
+        key, title, "error",
+        "Could not reach MariaDB to check admin login — no 1045/1698 verdict "
+        "(e.g. connection refused, timeout, or the client is missing). Platform "
+        "probe error, not a host shortfall; not blocking site creation. Verify "
+        f"MariaDB is listening on {host}:{port} and the client is installed.",
+        blocking=True,
+    )
 
 
 def sibling_ports_from_benches(benches) -> set[int]:

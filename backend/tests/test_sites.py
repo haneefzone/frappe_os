@@ -233,20 +233,36 @@ def test_site_name_rejected(bad):
 # --------------------------------------------------------------------------- #
 
 
-class SiteExecutor:
-    """Fake executor: `capture` answers the dev/prod probe; `run` records every
-    streamed argv (redis start, bench new-site, redis shutdown) and returns a
-    configurable new-site exit code."""
+# A healthy admin's `SHOW GRANTS` (root with the global CREATE privilege), the
+# default the MariaDB admin-login probe (DOO-1237) sees so the create proceeds.
+GRANT_ALL = "GRANT ALL PRIVILEGES ON *.* TO `root`@`%` IDENTIFIED BY PASSWORD '*x'"
 
-    def __init__(self, *, prod=False, new_site_exit=0):
+
+class SiteExecutor:
+    """Fake executor: `capture` answers the dev/prod probe and the DOO-1237
+    MariaDB admin-login probe; `run` records every streamed argv (redis start,
+    bench new-site, redis shutdown) and returns a configurable new-site exit code.
+
+    `db_admin` configures the admin-login probe's password-connection result as
+    (exit_code, stdout, stderr) — default a healthy authenticated admin."""
+
+    def __init__(self, *, prod=False, new_site_exit=0, db_admin=(0, GRANT_ALL, "")):
         self._prod = prod
         self._new_site_exit = new_site_exit
+        self._db_admin = db_admin
         self.streamed: list[list[str]] = []
         self.lines: list[str] = []
 
     async def capture(self, argv, *, cwd=None, timeout=120.0):
         if argv[:2] == ["bash", "-c"] and argv[2] == _MODE_PROBE:
             return CaptureResult(0, "PROD" if self._prod else "DEV", "")
+        # DOO-1237 admin-login probe: the password connection (SHOW GRANTS) and
+        # the no-password disambiguation (SELECT 1) both run `mariadb` over TCP.
+        if argv and argv[0] == "mariadb" and argv[-1] == "SHOW GRANTS FOR CURRENT_USER()":
+            return CaptureResult(*self._db_admin)
+        if argv and argv[0] == "mariadb" and argv[-1] == "SELECT 1":
+            # 1045 without a password => a real password account rejecting it.
+            return CaptureResult(1, "", "ERROR 1045 (28000): Access denied")
         raise AssertionError(f"unexpected capture {argv}")
 
     async def run(self, argv, *, cwd, run_as, on_line, cancel_check):
@@ -367,6 +383,35 @@ def test_site_create_shuts_redis_down_even_when_new_site_fails(sf):
         # Nothing registered, but the redis we started was still shut back down.
         assert db.scalars(select(Site)).first() is None
     assert [a[0] for a in ex.streamed][-2:] == ["redis-cli", "redis-cli"]
+
+
+def test_site_create_blocked_when_mariadb_root_is_unix_socket_only(sf):
+    # DOO-1237: root@localhost is unix_socket-only (1698 over TCP). The admin-
+    # login probe must gate the create BEFORE `bench new-site` runs, so the
+    # operator sees a named, actionable message instead of a pymysql traceback.
+    with sf() as db:
+        server_id = _server(db)
+        _bench(db, server_id, prod=False)
+    ex = SiteExecutor(
+        prod=False,
+        db_admin=(1, "", "ERROR 1698 (28000): Access denied for user 'root'@'localhost'"),
+    )
+    job_id = _run_create(sf, server_id, ex)
+
+    with sf() as db:
+        job = db.get(CommandJob, job_id)
+        assert job.status == "failure", job.status
+        # bench new-site NEVER ran — the gate stopped it.
+        assert not any(a[:2] == ["bench", "new-site"] for a in ex.streamed), ex.streamed
+        # No site registered.
+        assert db.scalars(select(Site)).first() is None
+        # The failure names the unix_socket case with the operator remedy.
+        logs = " ".join(
+            log.content for log in db.scalars(
+                select(LogEntry).where(LogEntry.job_id == job_id)
+            ).all()
+        )
+        assert "1698" in logs and "unix_socket" in logs
 
 
 # --------------------------------------------------------------------------- #
