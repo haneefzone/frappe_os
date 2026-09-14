@@ -34,7 +34,7 @@ from app.core.jobs import JobRunner, LockConflict
 from app.core.permissions import BACKUP_RESTORE, DANGER, READ, role_allows
 from app.core.secrets_resolve import SecretResolutionError
 from app.core.security import SecretsService, get_secrets_service
-from app.core.ssh import SSHService, get_ssh_service
+from app.core.ssh import SSHService, get_ssh_service, stream_local_file
 from app.db import get_db
 from app.models import Server
 from app.models.backup import Backup
@@ -492,7 +492,12 @@ async def download_artifact(
         if bench
         else None
     )
-    if server is None or server.credential is None:
+    if server is None:
+        raise HTTPException(status_code=404, detail="Backup's server is missing.")
+    is_local = getattr(server, "connection_type", "ssh") == "local"
+    # A local server reads the artifact off the FDM host's own filesystem; only an
+    # ssh server needs a credential to fetch it (DOO-1199).
+    if not is_local and server.credential is None:
         raise HTTPException(
             status_code=409, detail="Backup's server has no SSH credential configured."
         )
@@ -505,8 +510,13 @@ async def download_artifact(
         entity_id=backup_id,
         params={"artifact": artifact, "filename": filename},
     )
+    body_iter = (
+        stream_local_file(path)
+        if is_local
+        else ssh.stream_file(server, server.credential, path)
+    )
     return StreamingResponse(
-        ssh.stream_file(server, server.credential, path),
+        body_iter,
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

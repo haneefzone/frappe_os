@@ -20,7 +20,12 @@ from app.audit import Audit
 from app.core.permissions import READ, SERVER_MANAGE
 from app.core.security import SecretsService, generate_ed25519_keypair, get_secrets_service
 from app.core.server_rollup import server_dashboard
-from app.core.ssh import ConnectionCheck, SSHService, get_ssh_service
+from app.core.ssh import (
+    ConnectionCheck,
+    SSHService,
+    get_ssh_service,
+    run_local_connection_check,
+)
 from app.db import get_db
 from app.models import Server, SSHCredential
 from app.schemas.server import (
@@ -115,9 +120,13 @@ def create_server(
     if db.scalars(select(Server).where(Server.name == body.name)).first():
         raise HTTPException(status_code=409, detail=f"A server named {body.name!r} already exists.")
 
+    # A local server runs on the FDM host itself — no hostname to dial, no SSH
+    # credential (DOO-1199). Record hostname as 'localhost' for a stable display.
+    is_local = body.connection_type == "local"
     server = Server(
         name=body.name,
-        hostname=body.hostname,
+        connection_type=body.connection_type,
+        hostname="localhost" if is_local else (body.hostname or ""),
         ssh_port=body.ssh_port,
         env_tag=body.env_tag,
         tags=body.tags,
@@ -125,8 +134,11 @@ def create_server(
     )
     if body.mariadb_root_password:
         server.mariadb_root_password_enc = secrets.encrypt(body.mariadb_root_password)
-    cred = SSHCredential(server=server)
-    generated_public_key = _apply_credential(cred, body.credential, secrets)
+    generated_public_key: str | None = None
+    if not is_local:
+        cred = SSHCredential(server=server)
+        # credential is guaranteed present for ssh by ServerCreate's validator.
+        generated_public_key = _apply_credential(cred, body.credential, secrets)  # type: ignore[arg-type]
     db.add(server)
     db.commit()
     db.refresh(server)
@@ -232,15 +244,16 @@ def _summary(result: ConnectionCheck) -> dict:
 
 
 def _persist_check(
-    db: Session, server: Server, cred: SSHCredential, result: ConnectionCheck
+    db: Session, server: Server, cred: SSHCredential | None, result: ConnectionCheck
 ) -> None:
     if result.ssh_ok:
         server.status = "online"
         server.last_seen = datetime.now(UTC)
         if result.lsb_release:
             server.os_version = result.lsb_release
-        # Trust-on-first-use: pin the host key the first time we see it.
-        if not cred.known_host_key and result.host_key:
+        # Trust-on-first-use: pin the host key the first time we see it. A local
+        # server has no credential / host key (DOO-1199).
+        if cred is not None and not cred.known_host_key and result.host_key:
             cred.known_host_key = result.host_key
     else:
         server.status = "error" if result.error else "offline"
@@ -260,7 +273,10 @@ async def test_connection(
     key are persisted when the test finishes."""
     server = _get_server(db, server_id)
     cred = server.credential
-    if cred is None:
+    is_local = getattr(server, "connection_type", "ssh") == "local"
+    # A local server runs on the FDM host itself and has no SSH credential — the
+    # SSH-credential precondition applies only to ssh servers (DOO-1199).
+    if not is_local and cred is None:
         raise HTTPException(status_code=400, detail="This server has no SSH credential configured.")
 
     async def event_stream():
@@ -271,7 +287,10 @@ async def test_connection(
 
         async def worker() -> None:
             try:
-                result = await svc.check_connection(server, cred, emit=emit)
+                if is_local:
+                    result = await run_local_connection_check(emit=emit)
+                else:
+                    result = await svc.check_connection(server, cred, emit=emit)
                 _persist_check(db, server, cred, result)
                 await queue.put({"check": "done", **_summary(result)})
             except Exception as exc:  # never let the stream hang open

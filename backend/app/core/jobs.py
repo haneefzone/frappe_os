@@ -589,6 +589,116 @@ class LocalRemoteExecutor:
                 yield chunk
 
 
+class LocalShellExecutor:
+    """Executor for a `connection_type='local'` Server (DOO-1199): runs jobs on
+    the FDM host itself via local subprocesses instead of AsyncSSH, so an operator
+    can install Frappe on the machine FDM runs on without an SSH loopback.
+
+    It satisfies the same `RemoteExecutor` protocol as `SSHRemoteExecutor`, so all
+    ~99 Protocol call sites (bench init/update, app install, site create/backup/
+    restore/migrate, discovery, restic, drift) work against a local server with no
+    edits (AC5).
+
+    Distinct from `LocalRemoteExecutor` (session 6.3), which runs a *platform-local
+    template* that has no Server at all and deliberately ignores `run_as`. This one
+    is bound to a real Server row and **honours `run_as`** — dropping to the bench
+    owner via `sudo -n -u` (AC7) — and refuses to touch FDM's own install dir (AC8).
+    See `core/local_guard`.
+    """
+
+    def __init__(self, server: Server | None = None) -> None:
+        self._server = server
+
+    async def __aenter__(self) -> LocalShellExecutor:
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        return None
+
+    async def run(
+        self,
+        argv: list[str],
+        *,
+        cwd: str | None,
+        run_as: str | None,
+        on_line: Callable[[str, str], Awaitable[None] | None],
+        cancel_check: Callable[[], bool] | None,
+    ) -> int:
+        import asyncio
+
+        from app.core.local_guard import local_env, wrap_local_argv
+
+        assert_local_path_allowed(cwd)
+        proc = await asyncio.create_subprocess_exec(
+            *wrap_local_argv(argv, run_as),
+            cwd=cwd,
+            env=local_env(run_as),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        async def _pump(stream, name: str) -> None:
+            while True:
+                raw = await stream.readline()
+                if not raw:
+                    break
+                if cancel_check is not None and cancel_check():
+                    proc.terminate()
+                    break
+                res = on_line(name, raw.decode(errors="replace").rstrip("\n"))
+                if res is not None:
+                    await res
+
+        await asyncio.gather(_pump(proc.stdout, "stdout"), _pump(proc.stderr, "stderr"))
+        return await proc.wait()
+
+    async def capture(
+        self, argv: list[str], *, cwd: str | None = None, timeout: float = 120.0
+    ) -> CaptureResult:
+        import asyncio
+
+        from app.core.local_guard import local_env, wrap_local_argv
+
+        assert_local_path_allowed(cwd)
+        proc = await asyncio.create_subprocess_exec(
+            *wrap_local_argv(argv, None),
+            cwd=cwd,
+            env=local_env(None),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return CaptureResult(
+            exit_code=proc.returncode or 0,
+            stdout=out.decode(errors="replace"),
+            stderr=err.decode(errors="replace"),
+        )
+
+    async def read_file(self, path: str, *, chunk_size: int = 65536):
+        assert_local_path_allowed(path)
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+
+    async def write_file(self, path: str, chunks: AsyncIterator[bytes]) -> int:
+        assert_local_path_allowed(path)
+        with open(path, "wb") as fh:
+            async for chunk in chunks:
+                fh.write(chunk)
+        return 0
+
+
+def assert_local_path_allowed(path: str | None) -> None:
+    """Thin re-export so tests/readers find the AC8 guard alongside the executor.
+    Refuses a cwd/file path inside FDM's own install root."""
+    from app.core.local_guard import assert_path_allowed
+
+    assert_path_allowed(path)
+
+
 @dataclass
 class CreateResult:
     job: CommandJob
@@ -875,7 +985,11 @@ class JobRunner:
             elif getattr(template, "local", False):
                 factory = self._local_executor_factory
             else:
-                factory = self._ssh_executor_factory
+                # Dispatch on the Server's connection_type (DOO-1199): a
+                # `local` server runs on the FDM host via subprocess, everything
+                # else over SSH. The `server` row is loaded just below and handed
+                # to whichever factory this returns.
+                factory = self._server_executor_factory
             server = db.scalars(
                 select(Server)
                 .options(joinedload(Server.credential))
@@ -998,6 +1112,14 @@ class JobRunner:
                         )
 
         asyncio.run(_amain())
+
+    def _server_executor_factory(self, server: Server):
+        """Pick the executor for a Server-backed job by its connection_type
+        (DOO-1199). `local` -> subprocess on the FDM host; `ssh` (default, and
+        every pre-existing row via the column's server_default) -> AsyncSSH."""
+        if server is not None and getattr(server, "connection_type", "ssh") == "local":
+            return LocalShellExecutor(server)
+        return self._ssh_executor_factory(server)
 
     def _ssh_executor_factory(self, server: Server):
         if self._ssh is None:

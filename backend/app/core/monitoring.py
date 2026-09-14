@@ -194,11 +194,33 @@ def store_sample(
     return sample
 
 
+async def _poll_local(server: Server) -> SampleFields:
+    """Run the monitoring probe on the FDM host itself, as a local subprocess —
+    the local-backend equivalent of the SSH poll (DOO-1199). No credential, no
+    connection; MONITOR_ARGV is a fixed `bash -lc <snippet>` of constants."""
+    proc = await asyncio.create_subprocess_exec(
+        *MONITOR_ARGV,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out_b, err_b = await asyncio.wait_for(
+        proc.communicate(), timeout=POLL_TIMEOUT_SECONDS
+    )
+    stdout = out_b.decode(errors="replace")
+    stderr = err_b.decode(errors="replace")
+    code = proc.returncode or 0
+    if code != 0 and not stdout.strip():
+        raise RuntimeError(stderr.strip()[:280] or f"probe exited {code}")
+    return parse_sample(stdout)
+
+
 async def poll_server(ssh, server: Server) -> SampleFields:
     """Run the probe on one server and return parsed metrics.
 
     Raises on connection/probe failure so the caller records a failed sample.
     """
+    if getattr(server, "connection_type", "ssh") == "local":
+        return await _poll_local(server)
     cred = server.credential
     if cred is None:
         raise RuntimeError("server has no SSH credential")

@@ -14,6 +14,7 @@ from app.models import Server, SSHCredential
 EnvTag = Literal["prod", "staging", "dev"]
 AuthType = Literal["key", "password"]
 SudoMode = Literal["nopasswd", "none"]
+ConnectionType = Literal["ssh", "local"]
 
 
 class CredentialIn(BaseModel):
@@ -49,15 +50,42 @@ class CredentialIn(BaseModel):
 
 class ServerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    hostname: str = Field(min_length=1, max_length=255)
+    # 'local' = the machine FDM runs on (executes via subprocess, no SSH). For a
+    # local server hostname/ssh_port/credential are not applicable (DOO-1199).
+    connection_type: ConnectionType = "ssh"
+    # Required for ssh; optional for local (defaults to 'localhost' server-side).
+    hostname: str | None = Field(default=None, max_length=255)
     ssh_port: int = Field(default=22, ge=1, le=65535)
     env_tag: EnvTag = "dev"
     tags: list[str] = Field(default_factory=list)
     notes: str | None = None
-    credential: CredentialIn
+    # Required for ssh; must be omitted for local.
+    credential: CredentialIn | None = None
     # Write-only. The host's MariaDB root password, used server-side by
     # `bench new-site` (gotcha #4); Fernet-encrypted at rest, never returned.
     mariadb_root_password: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _validate_by_connection_type(self) -> "ServerCreate":
+        if self.connection_type == "local":
+            if self.credential is not None:
+                raise ValueError(
+                    "a local server runs on the FDM host itself and takes no SSH "
+                    "credential; omit `credential`"
+                )
+            # SSH-only fields are meaningless for local; reject a real hostname to
+            # avoid the false impression it dials out. A default/blank is fine.
+            if self.hostname not in (None, "", "localhost", "127.0.0.1"):
+                raise ValueError(
+                    "a local server does not connect to a hostname; omit "
+                    "`hostname` (it is recorded as 'localhost')"
+                )
+        else:  # ssh
+            if not self.hostname:
+                raise ValueError("hostname is required for an SSH server")
+            if self.credential is None:
+                raise ValueError("credential is required for an SSH server")
+        return self
 
 
 class ServerUpdate(BaseModel):
@@ -99,6 +127,7 @@ class CredentialOut(BaseModel):
 class ServerOut(BaseModel):
     id: int
     name: str
+    connection_type: str
     hostname: str
     ssh_port: int
     os_version: str | None
@@ -118,6 +147,7 @@ class ServerOut(BaseModel):
         return cls(
             id=server.id,
             name=server.name,
+            connection_type=getattr(server, "connection_type", "ssh"),
             hostname=server.hostname,
             ssh_port=server.ssh_port,
             os_version=server.os_version,

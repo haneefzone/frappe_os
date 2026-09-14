@@ -440,3 +440,82 @@ def get_ssh_service() -> SSHService:
     from app.core.security import get_secrets_service
 
     return SSHService(get_secrets_service())
+
+
+# --------------------------------------------------------------------------- #
+# Local (localhost) backend helpers (DOO-1199). A `connection_type='local'`
+# server has no SSH connection to open — the connection test and artifact
+# download run the same probes / file reads locally, minus host-key pinning.
+# --------------------------------------------------------------------------- #
+
+
+async def run_local_connection_check(emit: Emit | None = None) -> ConnectionCheck:
+    """The connection test for a local server: run the same diagnostic suite as
+    `SSHService.check_connection` (whoami, sudo -n true, lsb_release -ds, and every
+    tool in TOOL_COMMANDS) as local subprocesses. There is no host key to pin, so
+    `host_key` stays None; `ssh_ok` doubles as "the host is reachable" (always
+    true locally once the probes run) so the same persistence path applies."""
+    import asyncio
+
+    result = ConnectionCheck()
+
+    async def send(event: str, **data) -> None:
+        if emit is not None:
+            await emit({"check": event, **data})
+
+    async def _run(argv: list[str]) -> tuple[int, str]:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out, _err = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+            return proc.returncode or 0, out.decode(errors="replace")
+        except FileNotFoundError:
+            return 127, ""
+        except Exception:
+            return -1, ""
+
+    result.ssh_ok = True
+    await send("ssh", ok=True)
+    try:
+        code, out = await _run(["whoami"])
+        result.whoami = out.strip() or None
+        await send("whoami", ok=code == 0, value=result.whoami)
+
+        code, _ = await _run(["sudo", "-n", "true"])
+        result.sudo_ok = code == 0
+        await send("sudo", ok=result.sudo_ok)
+
+        code, out = await _run(["lsb_release", "-ds"])
+        if code == 0:
+            result.lsb_release = out.strip().strip('"') or None
+        await send("os", ok=code == 0, value=result.lsb_release)
+
+        for tool, argv in TOOL_COMMANDS.items():
+            code, out = await _run(argv)
+            version = out.strip().splitlines()[0].strip() if out.strip() else None
+            detected = version if code == 0 else None
+            result.tools[tool] = detected
+            await send("tool", name=tool, ok=code == 0, value=detected)
+    except Exception as exc:  # surface, don't crash the stream
+        result.error = f"Diagnostics failed: {exc}"
+        await send("error", error=str(exc))
+
+    return result
+
+
+async def stream_local_file(path: str, *, chunk_size: int = 65536):
+    """Yield the raw bytes of a local file in chunks — the local-backend
+    equivalent of `SSHService.stream_file` for a backup artifact download. Refuses
+    a path inside FDM's own install root (AC8)."""
+    from app.core.local_guard import assert_path_allowed
+
+    assert_path_allowed(path)
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk

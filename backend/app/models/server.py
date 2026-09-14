@@ -18,12 +18,21 @@ TagsJSON = JSON().with_variant(JSONB(), "postgresql")
 
 
 class Server(Base):
-    """A managed Ubuntu host the platform reaches over SSH (agentless)."""
+    """A managed Ubuntu host. Reached over SSH (agentless, the default) or, when
+    `connection_type='local'`, the FDM host itself via local subprocess (DOO-1199)."""
 
     __tablename__ = "servers"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    # How the platform reaches this host (DOO-1199 / DOO-1196):
+    #   ssh   -> agentless over AsyncSSH (needs a credential + hostname).
+    #   local -> the machine FDM itself runs on; jobs execute as local
+    #            subprocesses, no SSH, no credential (see core.jobs.LocalShellExecutor).
+    # server_default='ssh' backfills every pre-existing row to today's behaviour.
+    connection_type: Mapped[str] = mapped_column(
+        String(10), nullable=False, server_default="ssh", default="ssh"
+    )
     hostname: Mapped[str] = mapped_column(String(255))
     ssh_port: Mapped[int] = mapped_column(Integer, default=22)
     os_version: Mapped[str | None] = mapped_column(String(120))
