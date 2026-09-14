@@ -703,7 +703,7 @@
 
             <div class="max-h-[60vh] space-y-4 overflow-y-auto px-5 py-4">
               <!-- Mode toggle -->
-              <div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Install method">
+              <div class="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Install method">
                 <button
                   v-for="opt in installModes"
                   :key="opt.value"
@@ -714,7 +714,7 @@
                   :class="installMode === opt.value
                     ? 'border-line-strong bg-surface text-ink-1'
                     : 'border-line text-ink-2 hover:border-line-strong'"
-                  @click="installMode = opt.value"
+                  @click="installMode = opt.value; opt.value === 'store' && loadStoreCatalog()"
                 >
                   <span class="block font-medium text-ink-1">{{ opt.label }}</span>
                   <span class="block text-meta text-ink-3">{{ opt.hint }}</span>
@@ -740,6 +740,68 @@
                 </div>
               </template>
 
+              <!-- App Store browse -->
+              <template v-else-if="installMode === 'store'">
+                <div>
+                  <label class="mb-1 block text-meta font-medium uppercase tracking-wide text-ink-2" for="store-search">
+                    Search catalog
+                  </label>
+                  <input
+                    id="store-search"
+                    v-model="storeSearch"
+                    v-bind="modalInput"
+                    type="search"
+                    placeholder="App name…"
+                  />
+                </div>
+                <p v-if="storeCatalogError" class="text-label text-err" role="alert">{{ storeCatalogError }}</p>
+                <div v-if="storeCatalogLoading" class="space-y-1.5">
+                  <div v-for="i in 4" :key="i" class="h-10 animate-pulse rounded-lg bg-base" />
+                </div>
+                <div
+                  v-else
+                  class="max-h-48 overflow-y-auto rounded-lg border border-line"
+                  role="listbox"
+                  aria-label="Catalog apps"
+                >
+                  <button
+                    v-for="app in filteredStoreCatalog"
+                    :key="app.name"
+                    type="button"
+                    role="option"
+                    :aria-selected="selectedStoreApp?.name === app.name"
+                    :disabled="!app.is_installable"
+                    class="fdm-focus w-full px-3 py-2 text-left transition"
+                    :class="[
+                      selectedStoreApp?.name === app.name ? 'bg-surface text-ink-1' : 'text-ink-2 hover:bg-surface',
+                      !app.is_installable ? 'cursor-not-allowed opacity-50' : '',
+                    ]"
+                    @click="app.is_installable && (selectedStoreApp = app)"
+                  >
+                    <span class="block text-label font-medium leading-tight text-ink-1">{{ app.title }}</span>
+                    <span class="block truncate text-meta text-ink-3">
+                      {{ app.is_installable ? `${app.name} · ${app.branch}` : app.incompatible_reason }}
+                    </span>
+                  </button>
+                  <p v-if="filteredStoreCatalog.length === 0 && !storeCatalogLoading" class="px-3 py-4 text-center text-label text-ink-3">
+                    No apps found.
+                  </p>
+                </div>
+                <!-- Selected app details + dependencies -->
+                <template v-if="selectedStoreApp">
+                  <p class="text-label text-ink-2">
+                    {{ selectedStoreApp.description }}
+                  </p>
+                  <div
+                    v-if="Object.keys(selectedStoreApp.dependencies).length > 0"
+                    class="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2.5 text-label text-warn"
+                    role="note"
+                  >
+                    <span class="font-medium">Requires: </span>{{ Object.keys(selectedStoreApp.dependencies).join(', ') }} — these apps will also be installed.
+                  </div>
+                </template>
+              </template>
+
               <!-- GitHub URL -->
               <template v-else>
                 <div>
@@ -754,8 +816,8 @@
                 </p>
               </template>
 
-              <!-- Branch (both modes) -->
-              <div>
+              <!-- Branch (source and github modes only) -->
+              <div v-if="installMode !== 'store'">
                 <div class="mb-1 flex items-center justify-between">
                   <label class="block text-meta font-medium uppercase tracking-wide text-ink-2" for="branch-pick">
                     Branch
@@ -846,7 +908,7 @@ import LucideGlobe from '~icons/lucide/globe'
 import LucidePackage from '~icons/lucide/package'
 import LucidePackagePlus from '~icons/lucide/package-plus'
 import LucidePlus from '~icons/lucide/plus'
-import { appsApi, parseBranchesLine, type AppSource, type InstalledApp } from '../api/apps'
+import { appsApi, parseBranchesLine, type AppSource, type CatalogApp, type InstalledApp, type InstallAppPayload } from '../api/apps'
 import { backupsApi } from '../api/backups'
 import { ApiError } from '../api/client'
 import { domainsApi, HOSTNAME_RE, type DomainOut } from '../api/domains'
@@ -1055,10 +1117,11 @@ async function pollJob(id: number): Promise<string> {
 }
 
 // -- Install picker ----------------------------------------------------------
-type InstallMode = 'source' | 'github'
+type InstallMode = 'source' | 'store' | 'github'
 
 const installModes: { value: InstallMode; label: string; hint: string }[] = [
-  { value: 'source', label: 'Marketplace / saved source', hint: 'A known app source' },
+  { value: 'source', label: 'Saved source', hint: 'A known app source' },
+  { value: 'store', label: 'App Store', hint: 'Browse the catalog' },
   { value: 'github', label: 'GitHub URL', hint: 'An arbitrary repo' },
 ]
 
@@ -1077,8 +1140,49 @@ const installForm = reactive({
   branch: '',
 })
 
+// Catalog / store mode state
+const storeCatalog = ref<CatalogApp[]>([])
+const storeCatalogLoading = ref(false)
+const storeCatalogError = ref('')
+const storeSearch = ref('')
+const selectedStoreApp = ref<CatalogApp | null>(null)
+
+const filteredStoreCatalog = computed(() => {
+  const q = storeSearch.value.trim().toLowerCase()
+  return storeCatalog.value
+    .filter((app) => {
+      if (!q) return true
+      return app.name.toLowerCase().includes(q) || app.title.toLowerCase().includes(q)
+    })
+    .sort((a, b) => {
+      if (a.installed !== b.installed) return a.installed ? -1 : 1
+      if ((b.stars ?? 0) !== (a.stars ?? 0)) return (b.stars ?? 0) - (a.stars ?? 0)
+      return a.title.localeCompare(b.title)
+    })
+})
+
+async function loadStoreCatalog() {
+  if (storeCatalog.value.length > 0) return
+  storeCatalogLoading.value = true
+  storeCatalogError.value = ''
+  try {
+    storeCatalog.value = await appsApi.listCatalog(siteId)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      storeCatalogError.value = 'Bench Frappe version unknown — run a discovery on this server first.'
+    } else if (error instanceof ApiError && error.status === 503) {
+      storeCatalogError.value = 'App registry unavailable — contact your platform admin.'
+    } else {
+      storeCatalogError.value = error instanceof Error ? error.message : 'Could not load the app catalog.'
+    }
+  } finally {
+    storeCatalogLoading.value = false
+  }
+}
+
 const canInstall = computed(() => {
   if (installMode.value === 'github') return installForm.repoUrl.length > 0
+  if (installMode.value === 'store') return selectedStoreApp.value != null && selectedStoreApp.value.is_installable
   return installForm.sourceId != null || installForm.marketplace.length > 0
 })
 
@@ -1086,6 +1190,8 @@ async function openInstall() {
   installMode.value = 'source'
   branches.value = []
   branchError.value = ''
+  storeSearch.value = ''
+  selectedStoreApp.value = null
   Object.assign(installForm, { sourceId: null, marketplace: '', repoUrl: '', branch: '' })
   installOpen.value = true
   try {
@@ -1137,12 +1243,15 @@ async function submitInstall() {
   installing.value = true
   busy.value = 'app'
   try {
-    const payload =
-      installMode.value === 'github'
-        ? { source: installForm.repoUrl, branch: installForm.branch || undefined }
-        : installForm.sourceId != null
-          ? { app_source_id: installForm.sourceId, branch: installForm.branch || undefined }
-          : { source: installForm.marketplace, branch: installForm.branch || undefined }
+    const storeApp = selectedStoreApp.value
+    const payload: InstallAppPayload =
+      installMode.value === 'store' && storeApp
+        ? { store_app: storeApp.name }
+        : installMode.value === 'github'
+          ? { source: installForm.repoUrl, branch: installForm.branch || undefined }
+          : installForm.sourceId != null
+            ? { app_source_id: installForm.sourceId, branch: installForm.branch || undefined }
+            : { source: installForm.marketplace, branch: installForm.branch || undefined }
     const job = await appsApi.install(siteId, payload)
     installOpen.value = false
     const status = await pollJob(job.id)

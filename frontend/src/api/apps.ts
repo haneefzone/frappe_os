@@ -60,8 +60,33 @@ export interface InstallAppPayload {
   app_source_id?: number
   /** Ad-hoc repo URL / marketplace name (when no saved source is used). */
   source?: string
+  /** Frappe store app name — routes through dependency resolution on the backend. */
+  store_app?: string
   branch?: string
   priority?: 'high' | 'default' | 'low'
+}
+
+/** One entry from the Frappe app-store catalog (DOO-1192 contract). */
+export interface CatalogApp {
+  name: string
+  title: string
+  description: string
+  repo: string
+  logo_url: string | null
+  website: string | null
+  documentation: string | null
+  categories: string[]
+  stars: number | null
+  branch: string | null
+  commit: string | null
+  version: string | null
+  channel: string | null
+  required_version: string | null
+  /** App name → PEP-440 specifier (e.g. `{"erpnext": ">=15.0.0"}`). */
+  dependencies: Record<string, string>
+  is_installable: boolean
+  installed: boolean
+  incompatible_reason: string | null
 }
 
 export interface ListBranchesPayload {
@@ -92,6 +117,13 @@ export const appsApi = {
     apiClient.delete<JobDetail>(`/api/sites/${siteId}/apps/${encodeURIComponent(appName)}`, {
       confirm_name: confirmName,
     }),
+
+  /** Fetch the Frappe app-store catalog for a specific site (DOO-1192).
+   * Compatibility resolves against the site's bench Frappe version; `installed`
+   * means installed on this site. Raises 503 when the registry has never been
+   * cloned, 409 when the bench's Frappe version is unknown. */
+  listCatalog: (siteId: number) =>
+    apiClient.get<CatalogApp[]>(`/api/store/catalog?site=${siteId}`),
 }
 
 /** Parse the `BRANCHES_RESULT <json>` line the list-branches job emits. */
