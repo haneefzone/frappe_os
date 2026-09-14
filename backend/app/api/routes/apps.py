@@ -317,18 +317,6 @@ def list_installed_apps(
 # --------------------------------------------------------------------------- #
 
 
-def _bench_installed_apps(db: Session, bench_id: int) -> set[str]:
-    """App names already present on a bench (any site of it), plus the Frappe
-    core which every bench carries."""
-    names = set(
-        db.scalars(
-            select(InstalledApp.app_name).where(InstalledApp.bench_id == bench_id)
-        ).all()
-    )
-    names.add("frappe")
-    return names
-
-
 def _site_installed_apps(db: Session, site_id: int) -> set[str]:
     """App names already installed on a specific site, plus the Frappe core."""
     names = set(
@@ -345,19 +333,26 @@ def store_catalog(
     registry: Registry,
     db: DbSession,
     _: Annotated[object, Depends(require(READ))],
-    bench: int = Query(..., description="Bench id to resolve compatibility against."),
+    site: int = Query(
+        ..., description="Site id: compatibility resolves against its bench's "
+        "Frappe version and `installed` reflects this site."
+    ),
 ) -> list[StoreCatalogAppOut]:
-    """The app-store catalog resolved against one bench's installed Frappe
-    version. Incompatible apps are returned with `is_installable=false` and a
-    reason — never hidden (AC2). A never-cloned registry is a hard 503 (AC1)."""
-    b = db.get(Bench, bench)
-    if b is None:
-        raise HTTPException(status_code=404, detail="Bench not found.")
+    """The app-store catalog resolved for one site. Compatibility is resolved
+    against the Frappe version of the bench the site belongs to (a per-bench
+    property); the `installed` flag means "installed on THIS site" so it matches
+    the site-scoped already-installed guard on install (per DOO-1192 addendum).
+    Incompatible apps are returned with `is_installable=false` and a reason —
+    never hidden (AC2). A never-cloned registry is a hard 503 (AC1)."""
+    s = db.get(Site, site)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Site not found.")
+    b = _bench_for_site(db, s)
     if not b.frappe_version:
         raise HTTPException(
             status_code=409,
-            detail="This bench's Frappe version is unknown — run a discovery on "
-            "its server before browsing the store.",
+            detail="This site's bench Frappe version is unknown — run a discovery "
+            "on its server before browsing the store.",
         )
     try:
         registry.ensure_fresh()
@@ -365,7 +360,7 @@ def store_catalog(
     except RegistryError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    installed = _bench_installed_apps(db, b.id)
+    installed = _site_installed_apps(db, s.id)
     resolved = resolve_catalog(records, b.frappe_version, installed)
     # `categories` is a tuple on the dataclass; pydantic coerces it to a list.
     return [StoreCatalogAppOut(**vars(r)) for r in resolved]

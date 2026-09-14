@@ -748,7 +748,10 @@ def _store_rec(name, releases):
         name=name,
         repo=f"https://github.com/frappe/{name}",
         releases=tuple(releases),
-        meta={"name": name, "title": name.upper(), "description": "d", "categories": ["x"], "stars": 1},
+        meta={
+            "name": name, "title": name.upper(), "description": "d",
+            "categories": ["x"], "stars": 1,
+        },
     )
 
 
@@ -769,20 +772,38 @@ def test_catalog_lists_installable_and_incompatible(apps_client, api_env, db_ses
         bench_id=api_env["bench_id"], db_session=db_session,
     )
     login(apps_client, "readonly@example.com")  # READ is enough to browse
-    resp = apps_client.get(f"/api/store/catalog?bench={api_env['bench_id']}")
+    resp = apps_client.get(f"/api/store/catalog?site={api_env['site_id']}")
     assert resp.status_code == 200, resp.text
     by = {a["name"]: a for a in resp.json()}
     assert by["erpnext"]["is_installable"] is True
     assert by["erpnext"]["branch"] == "version-15"
+    assert by["erpnext"]["installed"] is False
     assert by["hrms"]["is_installable"] is False
     assert ">=16.0.0" in by["hrms"]["incompatible_reason"]
+    apps_client.app.dependency_overrides.pop(get_registry_cache, None)
+
+
+def test_catalog_installed_flag_is_site_scoped(apps_client, api_env, db_session):
+    # erpnext installed on THIS site → flagged installed; bench-wide would be the
+    # same here, but the flag must track the site the catalog was asked for.
+    appsources.upsert_installed_app(
+        db_session, site_id=api_env["site_id"], bench_id=api_env["bench_id"],
+        app_name="erpnext", branch="version-15", version="15.5.0",
+    )
+    _use_registry(apps_client, [_store_rec("erpnext", [_ERP15])],
+                  bench_id=api_env["bench_id"], db_session=db_session)
+    login(apps_client, "developer@example.com")
+    resp = apps_client.get(f"/api/store/catalog?site={api_env['site_id']}")
+    assert resp.status_code == 200, resp.text
+    by = {a["name"]: a for a in resp.json()}
+    assert by["erpnext"]["installed"] is True
     apps_client.app.dependency_overrides.pop(get_registry_cache, None)
 
 
 def test_catalog_unknown_frappe_version_is_409(apps_client, api_env, db_session):
     _use_registry(apps_client, [_store_rec("erpnext", [_ERP15])])  # bench version left None
     login(apps_client, "developer@example.com")
-    resp = apps_client.get(f"/api/store/catalog?bench={api_env['bench_id']}")
+    resp = apps_client.get(f"/api/store/catalog?site={api_env['site_id']}")
     assert resp.status_code == 409
     apps_client.app.dependency_overrides.pop(get_registry_cache, None)
 
