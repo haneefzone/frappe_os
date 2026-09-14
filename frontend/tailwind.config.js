@@ -17,7 +17,19 @@ export default {
       // values keep Tailwind's `/10` opacity modifiers working).
       colors: {
         base: 'var(--bg-base)',
-        surface: 'var(--bg-surface)',
+        // frappe-ui's Tailwind plugin extends `backgroundColor.surface` with its own
+        // nested object ({white, gray-1, …}). When our scalar `'var(--bg-surface)'`
+        // is resolved against that object extension, the object wins and the bare
+        // `bg-surface` utility is never emitted — inputs fall back to the
+        // @tailwindcss/forms hardcoded `background-color:#fff`, making typed text
+        // (near-white #f4f4f5 in dark mode) invisible on a white background.
+        // Using {DEFAULT:…} matches the `line` token pattern and deep-merges
+        // correctly: the resulting `backgroundColor.surface` object gains a DEFAULT
+        // key alongside frappe-ui's nested keys, so both `bg-surface` and
+        // `bg-surface-gray-*` are generated.
+        surface: {
+          DEFAULT: 'var(--bg-surface)',
+        },
         raised: 'var(--bg-raised)',
         line: {
           DEFAULT: 'var(--border)',
