@@ -60,6 +60,8 @@ export interface InstallAppPayload {
   app_source_id?: number
   /** Ad-hoc repo URL / marketplace name (when no saved source is used). */
   source?: string
+  /** Frappe store app name — routes through dependency resolution on the backend. */
+  store_app?: string
   branch?: string
   priority?: 'high' | 'default' | 'low'
 }

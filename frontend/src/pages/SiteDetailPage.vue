@@ -1246,7 +1246,7 @@ async function submitInstall() {
     const storeApp = selectedStoreApp.value
     const payload: InstallAppPayload =
       installMode.value === 'store' && storeApp
-        ? { app: storeApp.name, source: storeApp.repo, branch: storeApp.branch ?? undefined }
+        ? { store_app: storeApp.name }
         : installMode.value === 'github'
           ? { source: installForm.repoUrl, branch: installForm.branch || undefined }
           : installForm.sourceId != null

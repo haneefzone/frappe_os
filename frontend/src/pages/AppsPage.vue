@@ -368,7 +368,7 @@
     <ConfirmModal
       v-model="deleteOpen"
       title="Delete source"
-      :message="deleteTarget ? `Remove the app source "${deleteTarget.name}".` : ''"
+      :message="deleteTarget ? `Remove the app source '${deleteTarget.name}'.` : ''"
       verb="Delete source"
       variant="destructive"
       :loading="deleting"
@@ -666,9 +666,7 @@ async function submitStoreInstall() {
   storeInstallError.value = ''
   try {
     const job = await appsApi.install(catalogSiteId.value, {
-      app: app.name,
-      source: app.repo,
-      branch: app.branch ?? undefined,
+      store_app: app.name,
     })
     storeInstallOpen.value = false
     toast.success(`Installing ${app.title} — job #${job.id} started.`)
